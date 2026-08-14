@@ -38,7 +38,7 @@ deploy/k8s             生产基线清单
 ops                    Prometheus/Grafana/Loki/EMQX 安全基线
 ```
 
-本地前后端分别启动：
+本地前后端分别启动。后端要求 Go 1.25.5 或更高版本；前端要求 Node.js `^20.19.0` 或 `>=22.12.0`（推荐 Node.js 22 LTS），npm 会在版本不兼容时终止安装：
 
 ```powershell
 cd D:\iot\platform

@@ -29,3 +29,14 @@ test('frontend builds independently and proxies backend routes', async () => {
   for (const route of ['/api/', '/health/', '/mcp']) assert.ok(nginx.includes(route), `nginx is missing ${route}`)
   assert.ok(nginx.includes('platform-api:8080'))
 })
+
+test('frontend rejects Node versions unsupported by the build toolchain', async () => {
+  const packageJson = JSON.parse(await readFile(new URL('package.json', root), 'utf8'))
+  const packageLock = JSON.parse(await readFile(new URL('package-lock.json', root), 'utf8'))
+  const npmrc = await readFile(new URL('.npmrc', root), 'utf8')
+
+  const supportedNodeVersions = '^20.19.0 || >=22.12.0'
+  assert.equal(packageJson.engines?.node, supportedNodeVersions)
+  assert.equal(packageLock.packages?.['']?.engines?.node, supportedNodeVersions)
+  assert.match(npmrc, /^engine-strict=true\s*$/m)
+})
