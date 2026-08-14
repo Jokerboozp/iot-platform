@@ -20,7 +20,7 @@
 | 回放 | 租户/产品/设备/时间筛选；DRY_RUN、REINGEST、真实 DIFF；指定 Parser 版本、限速、差异摘要和审计 |
 | 备份 | PostgreSQL 全量/WAL、ClickHouse Native、Redis RDB/AOF、Redpanda/EMQX/配置、MinIO 版本控制与独立 DR、Weaviate 快照；校验和恢复演练 |
 | 运维 | JSON 日志、健康检查、Prometheus 指标/告警、Grafana/Loki、Compose、K8s/HPA/NetworkPolicy、压测器 |
-| Web | 中文总览、设备管理、产品管理、协议开发、数据接入、告警、原始报文、规则、AI 助手；响应式布局 |
+| Web | Vue 3 + Vite + Element Plus 单页应用；中文总览、设备管理、产品管理、协议开发、数据接入、告警、原始报文、规则、AI 助手；按需加载与响应式布局 |
 
 ## 目录
 
@@ -32,9 +32,21 @@ internal/core          归档后处理、状态、规则、告警、视频、AI�
 internal/adapters      PostgreSQL/Redis/MinIO/Kafka/MQTT/ClickHouse/AI/RAG 适配器
 internal/httpapi       REST、JWT、Webhook、中文 Web 前端
 internal/mcpserver     受控 MCP 工具
+web                    Vue 3 + Element Plus 前端源码和 Vite 构建配置
 deploy/k8s             生产基线清单
 ops                    Prometheus/Grafana/Loki/EMQX 安全基线
 ```
+
+前端本地开发与生产构建：
+
+```powershell
+cd D:\iot\platform\web
+npm.cmd install
+npm.cmd run dev       # Vite 开发服务器，API 代理到 localhost:8080
+npm.cmd run build     # 构建到 internal/httpapi/static，供 Go embed 打包
+```
+
+Compose 和根目录 Dockerfile 已包含独立的 Node 构建阶段，正常部署无需预先手工执行前端构建。
 
 ## 1. 零依赖启动
 

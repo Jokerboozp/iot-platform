@@ -1,0 +1,14 @@
+import { t as unplugin_default } from "./src-C6T5sjAq.mjs";
+import { addVitePlugin, addWebpackPlugin, defineNuxtModule } from "@nuxt/kit";
+//#region src/nuxt.ts
+var nuxt_default = defineNuxtModule({ setup(options) {
+	options.exclude = options.exclude || [
+		/[\\/]node_modules[\\/]/,
+		/[\\/]\.git[\\/]/,
+		/[\\/]\.nuxt[\\/]/
+	];
+	addWebpackPlugin(unplugin_default.webpack(options));
+	addVitePlugin(unplugin_default.vite(options));
+} });
+//#endregion
+export { nuxt_default as default };

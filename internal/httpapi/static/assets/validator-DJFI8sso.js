@@ -1,0 +1,1 @@
+import{Fn as e}from"./api-CKl5kc5P.js";var t=t=>[``,...e].includes(t);export{t};

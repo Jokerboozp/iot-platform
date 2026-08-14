@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"io/fs"
 	"strings"
 	"testing"
 )
@@ -23,16 +24,8 @@ func TestVideoSignature(t *testing.T) {
 }
 
 func TestFrontendManagementControls(t *testing.T) {
-	app, err := staticFS.ReadFile("static/app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	index, err := staticFS.ReadFile("static/index.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	assets := string(app) + string(index)
-	for _, label := range []string{"查看告警详情", "查看详情", "下载", "批量下载", "raw-select-all", "未注册设备", "一键注册", "所属网关", "网关自动注册子设备", "手动添加规则", "保存规则", "data-rule-edit", "data-rule-delete", "接入配置已保存"} {
+	assets := frontendAssets(t)
+	for _, label := range []string{"查看详情", "下载", "批量下载", "未注册设备", "一键注册", "所属网关", "网关自动注册子设备", "手动添加规则", "保存规则", "编辑", "删除", "接入配置已保存"} {
 		if !strings.Contains(assets, label) {
 			t.Errorf("frontend is missing %q", label)
 		}
@@ -40,15 +33,12 @@ func TestFrontendManagementControls(t *testing.T) {
 }
 
 func TestFrontendUsesChineseEnumLabels(t *testing.T) {
-	app, err := staticFS.ReadFile("static/app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
+	assets := frontendAssets(t)
 	index, err := staticFS.ReadFile("static/index.html")
 	if err != nil {
 		t.Fatal(err)
 	}
-	assets := string(app) + string(index)
+	assets += string(index)
 	for _, label := range []string{"火灾风险", "检测到火焰", "紧急", "活动中", "设备上报", "疑似离线", "数据静默", "已发布", "烟雾探测器", "边缘网关"} {
 		if !strings.Contains(assets, label) {
 			t.Errorf("frontend is missing Chinese enum label %q", label)
@@ -59,4 +49,23 @@ func TestFrontendUsesChineseEnumLabels(t *testing.T) {
 			t.Errorf("frontend still exposes English enum option %q", visibleEnglish)
 		}
 	}
+}
+
+func frontendAssets(t *testing.T) string {
+	t.Helper()
+	var assets strings.Builder
+	err := fs.WalkDir(staticFS, "static", func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || !(strings.HasSuffix(path, ".js") || strings.HasSuffix(path, ".html")) {
+			return err
+		}
+		content, readErr := staticFS.ReadFile(path)
+		if readErr == nil {
+			assets.Write(content)
+		}
+		return readErr
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return assets.String()
 }

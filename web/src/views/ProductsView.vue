@@ -1,0 +1,17 @@
+<script setup>
+import { onMounted, reactive, ref } from 'vue'
+import { ElMessage } from 'element-plus'
+import { api, notifyError } from '../api'
+import { categories, enabledStatuses, label, tagType } from '../labels'
+
+const products = ref([]), protocols = ref([]), saving = ref(false)
+const blank = () => ({ id:'', code:'', name:'', category:'smoke', protocolPackageId:'', transport:'MQTT', payloadFormat:'json', status:'ENABLED', description:'' })
+const form = reactive(blank())
+async function load() { try { const [p, pk] = await Promise.all([api('/api/v1/products'), api('/api/v1/protocol-packages')]); products.value=p.items||[]; protocols.value=pk.items||[] } catch(e){notifyError(e)} }
+function reset(){ Object.assign(form,blank()) }
+function edit(item){ Object.assign(form, { ...item, code:item.id }) }
+async function save(){ saving.value=true; try { const value={...form,id:form.id||form.code}; delete value.code; const editing=products.value.some(x=>x.id===value.id); await api(editing?`/api/v1/products/${encodeURIComponent(value.id)}`:'/api/v1/products',{method:editing?'PUT':'POST',body:JSON.stringify(value)}); ElMessage.success('产品已保存'); reset(); load() }catch(e){notifyError(e)}finally{saving.value=false} }
+onMounted(load)
+</script>
+<template><div class="workspace-grid"><el-card shadow="never" class="surface-card"><template #header><div class="card-header"><strong>产品列表</strong><el-button type="primary" @click="reset">新建产品</el-button></div></template><div class="catalog-list"><button v-for="item in products" :key="item.id" @click="edit(item)"><span><b>{{ item.name }}</b><small>{{ item.id }}</small></span><span><el-tag :type="tagType(item.status)" round>{{ label(enabledStatuses,item.status) }}</el-tag><small>{{ label(categories,item.category,'其他设备') }}</small></span></button><el-empty v-if="!products.length" description="暂无产品" /></div></el-card>
+<el-card shadow="never" class="surface-card"><template #header><strong>{{ form.id ? `编辑 · ${form.name}` : '新建产品' }}</strong></template><el-form :model="form" label-position="top"><el-form-item label="产品名称"><el-input v-model="form.name" /></el-form-item><el-form-item label="产品标识"><el-input v-model="form.code" :disabled="!!form.id" placeholder="留空自动生成" /></el-form-item><div class="form-grid"><el-form-item label="设备分类"><el-select v-model="form.category"><el-option v-for="(text,key) in categories" :key="key" :label="text" :value="key" /></el-select></el-form-item><el-form-item label="协议包"><el-select v-model="form.protocolPackageId" filterable><el-option v-for="item in protocols" :key="item.id" :label="`${item.name} · ${item.id}`" :value="item.id" /></el-select></el-form-item><el-form-item label="传输协议"><el-select v-model="form.transport"><el-option v-for="x in ['MQTT','HTTP','TCP','MODBUS_TCP']" :key="x" :label="x" :value="x" /></el-select></el-form-item><el-form-item label="数据格式"><el-select v-model="form.payloadFormat"><el-option label="结构化文本" value="json" /><el-option label="十六进制" value="hex" /><el-option label="二进制" value="binary" /></el-select></el-form-item></div><el-form-item label="产品状态"><el-select v-model="form.status"><el-option label="已启用" value="ENABLED" /><el-option label="已停用" value="DISABLED" /><el-option label="草稿" value="DRAFT" /></el-select></el-form-item><el-form-item label="说明"><el-input v-model="form.description" type="textarea" :rows="3" /></el-form-item><el-button type="primary" :loading="saving" @click="save">保存产品</el-button></el-form></el-card></div></template>

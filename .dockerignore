@@ -2,3 +2,5 @@
 data
 *.log
 bin
+web/node_modules
+web/dist
