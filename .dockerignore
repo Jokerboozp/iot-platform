@@ -2,5 +2,5 @@
 data
 *.log
 bin
-web/node_modules
-web/dist
+frontend/node_modules
+frontend/dist

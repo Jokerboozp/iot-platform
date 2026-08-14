@@ -20,7 +20,7 @@ $env:IOT_THINGSPANEL_PASSWORD='<服务账号密码>'
 docker compose --profile thingspanel up -d --build
 ```
 
-入口：ThingsPanel Web `http://localhost:8088`，ThingsPanel API `http://localhost:9999`，消防扩展平台 `http://localhost:8080`。首次初始化 ThingsPanel 后填写服务账号并重启 `platform`，或直接调用手动同步接口。
+入口：ThingsPanel Web `http://localhost:8088`，ThingsPanel API `http://localhost:9999`，消防扩展平台 Web `http://localhost:8080`，消防扩展 API `http://localhost:8081`。首次初始化 ThingsPanel 后填写服务账号并重启 `platform-api`，或直接调用手动同步接口。
 
 目录同步映射：
 
@@ -36,11 +36,11 @@ docker compose --profile thingspanel up -d --build
 推荐反向代理：
 
 ```text
-/api/v1/raw-messages  -> iot-platform:8080
-/api/v1/replays       -> iot-platform:8080
-/api/v1/ai            -> iot-platform:8080
-/api/v1/integrations  -> iot-platform:8080
-/mcp                  -> iot-platform:8080
+/api/v1/raw-messages  -> platform-api:8080
+/api/v1/replays       -> platform-api:8080
+/api/v1/ai            -> platform-api:8080
+/api/v1/integrations  -> platform-api:8080
+/mcp                  -> platform-api:8080
 其余 /api             -> ThingsPanel backend
 ```
 

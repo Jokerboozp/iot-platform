@@ -7,6 +7,7 @@ kind: ConfigMap
 metadata: {name: iot-platform, namespace: iot-platform}
 data:
   IOT_HTTP_ADDR: ":8080"
+  IOT_CORS_ALLOWED_ORIGINS: ""
   IOT_DEV_MODE: "false"
   IOT_OFFLINE_SCAN_INTERVAL: "30s"
   IOT_KAFKA_BROKERS: "redpanda.iot-infra.svc:9092"
@@ -33,18 +34,18 @@ stringData:
 ---
 apiVersion: apps/v1
 kind: Deployment
-metadata: {name: iot-platform, namespace: iot-platform}
+metadata: {name: iot-platform-api, namespace: iot-platform}
 spec:
   replicas: 3
-  selector: {matchLabels: {app: iot-platform}}
+  selector: {matchLabels: {app: iot-platform-api}}
   template:
-    metadata: {labels: {app: iot-platform}}
+    metadata: {labels: {app: iot-platform-api}}
     spec:
       serviceAccountName: iot-platform
       securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
       containers:
-        - name: platform
-          image: your-registry/iot-platform:1.0.0
+        - name: api
+          image: your-registry/iot-platform-api:1.0.0
           ports: [{name: http, containerPort: 8080}]
           envFrom: [{configMapRef: {name: iot-platform}}, {secretRef: {name: iot-platform}}]
           resources: {requests: {cpu: "500m", memory: "512Mi"}, limits: {cpu: "2", memory: "2Gi"}}
@@ -60,14 +61,38 @@ metadata: {name: iot-platform, namespace: iot-platform}
 ---
 apiVersion: v1
 kind: Service
+metadata: {name: platform-api, namespace: iot-platform}
+spec: {selector: {app: iot-platform-api}, ports: [{name: http, port: 8080, targetPort: http}]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: iot-platform-web, namespace: iot-platform}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: iot-platform-web}}
+  template:
+    metadata: {labels: {app: iot-platform-web}}
+    spec:
+      securityContext: {runAsNonRoot: false, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: web
+          image: your-registry/iot-platform-web:1.0.0
+          ports: [{name: http, containerPort: 8080}]
+          resources: {requests: {cpu: "100m", memory: "64Mi"}, limits: {cpu: "500m", memory: "256Mi"}}
+          readinessProbe: {httpGet: {path: /health/ready, port: http}, initialDelaySeconds: 5, periodSeconds: 10}
+          livenessProbe: {httpGet: {path: /health/live, port: http}, initialDelaySeconds: 10, periodSeconds: 15}
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: ["ALL"], add: ["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"]}}
+---
+apiVersion: v1
+kind: Service
 metadata: {name: iot-platform, namespace: iot-platform}
-spec: {selector: {app: iot-platform}, ports: [{name: http, port: 80, targetPort: http}]}
+spec: {selector: {app: iot-platform-web}, ports: [{name: http, port: 80, targetPort: http}]}
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
-metadata: {name: iot-platform, namespace: iot-platform}
+metadata: {name: iot-platform-api, namespace: iot-platform}
 spec:
-  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: iot-platform}
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: iot-platform-api}
   minReplicas: 3
   maxReplicas: 12
   behavior: {scaleDown: {stabilizationWindowSeconds: 300}}
@@ -77,14 +102,29 @@ spec:
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
-metadata: {name: iot-platform, namespace: iot-platform}
+metadata: {name: iot-platform-api, namespace: iot-platform}
 spec:
-  podSelector: {matchLabels: {app: iot-platform}}
+  podSelector: {matchLabels: {app: iot-platform-api}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from: [{podSelector: {matchLabels: {app: iot-platform-web}}}]
+      ports: [{protocol: TCP, port: 8080}]
+  egress:
+    - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: iot-infra}}}]
+    - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}}]
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: iot-platform-web, namespace: iot-platform}
+spec:
+  podSelector: {matchLabels: {app: iot-platform-web}}
   policyTypes: [Ingress, Egress]
   ingress:
     - from: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: ingress-nginx}}}]
       ports: [{protocol: TCP, port: 8080}]
   egress:
-    - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: iot-infra}}}]
+    - to: [{podSelector: {matchLabels: {app: iot-platform-api}}}]
+      ports: [{protocol: TCP, port: 8080}]
     - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}}]
       ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]

@@ -20,7 +20,8 @@
 | 回放 | 租户/产品/设备/时间筛选；DRY_RUN、REINGEST、真实 DIFF；指定 Parser 版本、限速、差异摘要和审计 |
 | 备份 | PostgreSQL 全量/WAL、ClickHouse Native、Redis RDB/AOF、Redpanda/EMQX/配置、MinIO 版本控制与独立 DR、Weaviate 快照；校验和恢复演练 |
 | 运维 | JSON 日志、健康检查、Prometheus 指标/告警、Grafana/Loki、Compose、K8s/HPA/NetworkPolicy、压测器 |
-| Web | Vue 3 + Vite + Element Plus 单页应用；中文总览、设备管理、产品管理、协议开发、数据接入、告警、原始报文、规则、AI 助手；按需加载与响应式布局 |
+| API | 独立 Gin 服务；JWT/RBAC、路径参数、安全响应头、访问日志、CORS 白名单和 MCP，不包含前端静态资源 |
+| Web | 独立 Vue 3 + Vite + Element Plus 单页应用；由 Nginx 托管并反向代理 API/MCP；按需加载与响应式布局 |
 
 ## 目录
 
@@ -30,35 +31,41 @@ cmd/backup-service     备份服务
 cmd/loadgen            稳定/突发流量压测器
 internal/core          归档后处理、状态、规则、告警、视频、AI、回放
 internal/adapters      PostgreSQL/Redis/MinIO/Kafka/MQTT/ClickHouse/AI/RAG 适配器
-internal/httpapi       REST、JWT、Webhook、中文 Web 前端
+internal/httpapi       Gin REST API、JWT/RBAC、Webhook 与 MCP
 internal/mcpserver     受控 MCP 工具
-web                    Vue 3 + Element Plus 前端源码和 Vite 构建配置
+frontend               Vue 3 + Element Plus 前端源码、Vite 和 Nginx 配置
 deploy/k8s             生产基线清单
 ops                    Prometheus/Grafana/Loki/EMQX 安全基线
 ```
 
-前端本地开发与生产构建：
-
-```powershell
-cd D:\iot\platform\web
-npm.cmd install
-npm.cmd run dev       # Vite 开发服务器，API 代理到 localhost:8080
-npm.cmd run build     # 构建到 internal/httpapi/static，供 Go embed 打包
-```
-
-Compose 和根目录 Dockerfile 已包含独立的 Node 构建阶段，正常部署无需预先手工执行前端构建。
-
-## 1. 零依赖启动
-
-只需要 Go 1.25.5 或更高版本：
+本地前后端分别启动：
 
 ```powershell
 cd D:\iot\platform
-$env:PATH='C:\Program Files\Go\bin;' + $env:PATH
+$env:IOT_HTTP_ADDR=':8081'
+$env:IOT_CORS_ALLOWED_ORIGINS='http://localhost:5173'
+go run ./cmd/iot-platform
+
+# 另开终端
+cd D:\iot\platform\frontend
+npm.cmd install
+npm.cmd run dev       # http://localhost:5173，代理 API/MCP 到 localhost:8081
+npm.cmd run build     # 独立构建到 frontend/dist
+```
+
+根目录 `Dockerfile` 只构建 Gin API；`frontend/Dockerfile` 只构建并托管 Vue。生产浏览器统一访问 Web，Nginx 将 `/api`、`/health` 和 `/mcp` 转发到 API。
+
+## 1. 零依赖启动
+
+只需要 Go 1.25.5 或更高版本即可单独启动 API：
+
+```powershell
+cd D:\iot\platform
+$env:IOT_HTTP_ADDR=':8081'
 go run ./cmd/iot-platform
 ```
 
-打开 `http://localhost:8080`。开发默认账号：
+API 地址为 `http://localhost:8081`；Web 请按上一节另行启动。开发默认账号：
 
 ```text
 租户: tenant_001
@@ -70,7 +77,7 @@ go run ./cmd/iot-platform
 
 ## 2. 完整 Compose 启动
 
-`compose.yaml` 已内联主服务/备份服务的 Dockerfile，以及 Prometheus、Grafana、Loki 配置；无需复制配置文件或预先创建 `.env`：
+`compose.yaml` 将 API 与 Web 作为两个独立服务运行，同时内置 Prometheus、Grafana、Loki 配置；无需复制配置文件或预先创建 `.env`：
 
 ```powershell
 cd D:\iot\platform
@@ -81,7 +88,7 @@ docker compose up -d --build
 
 ```powershell
 docker compose ps
-docker compose logs -f platform
+docker compose logs -f platform-api platform-web
 ```
 
 Compose 内置的默认账号和密码只用于本地开发。正式部署前可把 `.env.example` 复制为 `.env` 并修改其中密钥，或在 shell/部署平台注入同名环境变量；这不会改变一条命令启动的方式。
@@ -90,7 +97,8 @@ Compose 内置的默认账号和密码只用于本地开发。正式部署前可
 
 | 服务 | 地址 |
 |---|---|
-| 平台与 Web | `http://localhost:8080` |
+| 平台 Web（含 API 反向代理） | `http://localhost:8080` |
+| Gin API（直接调试） | `http://localhost:8081` |
 | EMQX MQTT | `tcp://localhost:1883` |
 | EMQX WebSocket | `ws://localhost:8083/mqtt` |
 | EMQX Dashboard | `http://localhost:18083` |
@@ -105,7 +113,7 @@ $env:IOT_OLLAMA_URL='http://ollama:11434'
 $env:IOT_WEAVIATE_URL='http://weaviate:8080'
 docker compose --profile ai up -d --build
 docker compose exec ollama ollama pull qwen3:8b
-docker compose restart platform
+docker compose restart platform-api
 ```
 
 也可以把这两个变量写入可选的 `.env`。模型未启用时，主链路照常运行并保存“待人工研判”的降级 AI 结果。

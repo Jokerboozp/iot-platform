@@ -9,6 +9,7 @@ import (
 
 type Config struct {
 	HTTPAddr            string
+	CORSAllowedOrigins  []string
 	DataDir             string
 	JWTSecret           string
 	AdminUser           string
@@ -42,6 +43,7 @@ type Config struct {
 func Load() Config {
 	return Config{
 		HTTPAddr:            get("IOT_HTTP_ADDR", ":8080"),
+		CORSAllowedOrigins:  split(os.Getenv("IOT_CORS_ALLOWED_ORIGINS")),
 		DataDir:             get("IOT_DATA_DIR", "./data"),
 		JWTSecret:           get("IOT_JWT_SECRET", "change-me-in-production"),
 		AdminUser:           get("IOT_ADMIN_USER", "admin"),
@@ -83,7 +85,14 @@ func split(v string) []string {
 	if strings.TrimSpace(v) == "" {
 		return nil
 	}
-	return strings.Split(v, ",")
+	values := strings.Split(v, ",")
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 func boolValue(name string, fallback bool) bool {
 	v, err := strconv.ParseBool(os.Getenv(name))

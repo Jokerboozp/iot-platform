@@ -7,12 +7,10 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"mime/multipart"
 	"net/http"
@@ -28,10 +26,9 @@ import (
 	"iot-platform/internal/metrics"
 	"iot-platform/internal/model"
 	"iot-platform/internal/ports"
-)
 
-//go:embed static/*
-var staticFS embed.FS
+	"github.com/gin-gonic/gin"
+)
 
 type ctxKey string
 
@@ -43,75 +40,80 @@ type Server struct {
 	auth    *auth.Manager
 	metrics *metrics.Registry
 	log     *slog.Logger
-	mux     *http.ServeMux
+	router  *gin.Engine
 }
 
 func New(cfg config.Config, engine *core.Engine, m *metrics.Registry, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, engine: engine, auth: auth.New(cfg.JWTSecret), metrics: m, log: log, mux: http.NewServeMux()}
+	gin.SetMode(gin.ReleaseMode)
+	router := gin.New()
+	router.HandleMethodNotAllowed = true
+	router.RedirectTrailingSlash = false
+	s := &Server{cfg: cfg, engine: engine, auth: auth.New(cfg.JWTSecret), metrics: m, log: log, router: router}
+	router.Use(s.cors(), s.security(), s.accessLog(), s.recovery())
 	s.routes()
 	return s
 }
-func (s *Server) Handler() http.Handler { return s.security(s.accessLog(s.mux)) }
+func (s *Server) Handler() http.Handler { return s.router }
 func (s *Server) routes() {
-	s.mux.HandleFunc("POST /api/v1/auth/login", s.login)
-	s.mux.HandleFunc("GET /health/live", func(w http.ResponseWriter, r *http.Request) { write(w, 200, map[string]string{"status": "ok"}) })
-	s.mux.HandleFunc("GET /health/ready", s.ready)
-	s.mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
+	s.router.POST("/api/v1/auth/login", s.endpoint(s.login))
+	s.router.GET("/health/live", s.endpoint(func(w http.ResponseWriter, r *http.Request) { write(w, 200, map[string]string{"status": "ok"}) }))
+	s.router.GET("/health/ready", s.endpoint(s.ready))
+	s.router.GET("/metrics", s.endpoint(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		_, _ = io.WriteString(w, s.metrics.Prometheus())
-	})
-	s.mux.HandleFunc("POST /api/v1/integrations/video/alarm", s.videoWebhook)
-	s.mux.Handle("GET /api/v1/integrations/video/cameras", s.protected("viewer", http.HandlerFunc(s.videoCameras)))
-	s.mux.Handle("POST /api/v1/integrations/video/cameras", s.protected("operator", http.HandlerFunc(s.saveVideoCamera)))
-	s.mux.Handle("PUT /api/v1/integrations/video/cameras/{id}", s.protected("operator", http.HandlerFunc(s.saveVideoCamera)))
-	s.mux.HandleFunc("POST /api/v1/device-ingest/{deviceId}", s.deviceIngest)
-	s.mux.Handle("GET /api/v1/products", s.protected("viewer", http.HandlerFunc(s.products)))
-	s.mux.Handle("POST /api/v1/products", s.protected("operator", http.HandlerFunc(s.saveProduct)))
-	s.mux.Handle("PUT /api/v1/products/{id}", s.protected("operator", http.HandlerFunc(s.saveProduct)))
-	s.mux.Handle("GET /api/v1/protocol-packages", s.protected("viewer", http.HandlerFunc(s.protocolPackages)))
-	s.mux.Handle("POST /api/v1/protocol-packages", s.protected("operator", http.HandlerFunc(s.saveProtocolPackage)))
-	s.mux.Handle("PUT /api/v1/protocol-packages/{id}", s.protected("operator", http.HandlerFunc(s.saveProtocolPackage)))
-	s.mux.Handle("POST /api/v1/protocol-packages/{id}/test", s.protected("operator", http.HandlerFunc(s.testProtocolPackage)))
-	s.mux.Handle("GET /api/v1/device-registry", s.protected("viewer", http.HandlerFunc(s.deviceRegistry)))
-	s.mux.Handle("POST /api/v1/device-registry", s.protected("operator", http.HandlerFunc(s.saveManagedDevice)))
-	s.mux.Handle("PUT /api/v1/device-registry/{id}", s.protected("operator", http.HandlerFunc(s.saveManagedDevice)))
-	s.mux.Handle("POST /api/v1/discovered-devices/{id}/register", s.protected("operator", http.HandlerFunc(s.registerDiscoveredDevice)))
-	s.mux.Handle("POST /api/v1/device-registry/{id}/credentials", s.protected("admin", http.HandlerFunc(s.rotateDeviceCredential)))
-	s.mux.Handle("GET /api/v1/device-registry/{id}/connection-guide", s.protected("viewer", http.HandlerFunc(s.deviceConnectionGuide)))
-	s.mux.Handle("POST /api/v1/device-registry/{id}/debug", s.protected("operator", http.HandlerFunc(s.debugDeviceIngest)))
-	s.mux.Handle("POST /api/v1/raw-messages", s.protected("operator", http.HandlerFunc(s.ingestRaw)))
-	s.mux.Handle("GET /api/v1/raw-messages", s.protected("viewer", http.HandlerFunc(s.listRaw)))
-	s.mux.Handle("POST /api/v1/raw-messages/download", s.protected("viewer", http.HandlerFunc(s.downloadRawBatch)))
-	s.mux.Handle("GET /api/v1/raw-messages/{id}", s.protected("viewer", http.HandlerFunc(s.rawDetail)))
-	s.mux.Handle("GET /api/v1/raw-messages/{id}/download", s.protected("viewer", http.HandlerFunc(s.downloadRaw)))
-	s.mux.Handle("POST /api/v1/raw-messages/replay", s.protected("admin", http.HandlerFunc(s.startReplay)))
-	s.mux.Handle("GET /api/v1/replays/{id}", s.protected("viewer", http.HandlerFunc(s.getReplay)))
-	s.mux.Handle("GET /api/v1/devices", s.protected("viewer", http.HandlerFunc(s.devices)))
-	s.mux.Handle("GET /api/v1/devices/{deviceId}/latest", s.protected("viewer", http.HandlerFunc(s.deviceLatest)))
-	s.mux.Handle("GET /api/v1/devices/{deviceId}/properties/history", s.protected("viewer", http.HandlerFunc(s.history)))
-	s.mux.Handle("POST /api/v1/device-states", s.protected("operator", http.HandlerFunc(s.stateEvent)))
-	s.mux.Handle("GET /api/v1/rules", s.protected("viewer", http.HandlerFunc(s.rules)))
-	s.mux.Handle("POST /api/v1/rules", s.protected("operator", http.HandlerFunc(s.saveRule)))
-	s.mux.Handle("PUT /api/v1/rules/{id}", s.protected("operator", http.HandlerFunc(s.saveRule)))
-	s.mux.Handle("DELETE /api/v1/rules/{id}", s.protected("operator", http.HandlerFunc(s.deleteRule)))
-	s.mux.Handle("GET /api/v1/alarms", s.protected("viewer", http.HandlerFunc(s.alarms)))
-	s.mux.Handle("GET /api/v1/alarms/{id}", s.protected("viewer", http.HandlerFunc(s.alarm)))
-	s.mux.Handle("POST /api/v1/alarms/{id}/actions", s.protected("operator", http.HandlerFunc(s.alarmAction)))
-	s.mux.Handle("GET /api/v1/ai/alarm-analysis/{alarmId}", s.protected("viewer", http.HandlerFunc(s.aiAnalysis)))
-	s.mux.Handle("POST /api/v1/ai/chat", s.protected("viewer", http.HandlerFunc(s.aiChat)))
-	s.mux.Handle("POST /api/v1/ai/rule-draft", s.protected("operator", http.HandlerFunc(s.aiRuleDraft)))
-	s.mux.Handle("POST /api/v1/ai/reports", s.protected("viewer", http.HandlerFunc(s.aiReport)))
-	s.mux.Handle("POST /api/v1/knowledge/documents", s.protected("operator", http.HandlerFunc(s.knowledgeUpload)))
-	s.mux.Handle("POST /api/v1/mqtt/token", s.protected("viewer", http.HandlerFunc(s.mqttToken)))
-	s.mux.Handle("POST /api/v1/mqtt/load-token", s.protected("admin", http.HandlerFunc(s.mqttLoadToken)))
-	s.mux.Handle("POST /api/v1/device-mqtt/token", http.HandlerFunc(s.deviceMQTTToken))
-	s.mux.Handle("POST /api/v1/integrations/thingspanel/sync", s.protected("admin", http.HandlerFunc(s.thingsPanelSync)))
-	mcpHandler := s.protected("viewer", mcpserver.New(s.engine))
-	s.mux.Handle("GET /mcp", mcpHandler)
-	s.mux.Handle("POST /mcp", mcpHandler)
-	s.mux.Handle("DELETE /mcp", mcpHandler)
-	web, _ := fs.Sub(staticFS, "static")
-	s.mux.Handle("GET /", http.FileServer(http.FS(web)))
+	}))
+	s.router.POST("/api/v1/integrations/video/alarm", s.endpoint(s.videoWebhook))
+	s.router.GET("/api/v1/integrations/video/cameras", s.authorize("viewer"), s.endpoint(s.videoCameras))
+	s.router.POST("/api/v1/integrations/video/cameras", s.authorize("operator"), s.endpoint(s.saveVideoCamera))
+	s.router.PUT("/api/v1/integrations/video/cameras/:id", s.authorize("operator"), s.endpoint(s.saveVideoCamera, "id"))
+	s.router.POST("/api/v1/device-ingest/:deviceId", s.endpoint(s.deviceIngest, "deviceId"))
+	s.router.GET("/api/v1/products", s.authorize("viewer"), s.endpoint(s.products))
+	s.router.POST("/api/v1/products", s.authorize("operator"), s.endpoint(s.saveProduct))
+	s.router.PUT("/api/v1/products/:id", s.authorize("operator"), s.endpoint(s.saveProduct, "id"))
+	s.router.GET("/api/v1/protocol-packages", s.authorize("viewer"), s.endpoint(s.protocolPackages))
+	s.router.POST("/api/v1/protocol-packages", s.authorize("operator"), s.endpoint(s.saveProtocolPackage))
+	s.router.PUT("/api/v1/protocol-packages/:id", s.authorize("operator"), s.endpoint(s.saveProtocolPackage, "id"))
+	s.router.POST("/api/v1/protocol-packages/:id/test", s.authorize("operator"), s.endpoint(s.testProtocolPackage, "id"))
+	s.router.GET("/api/v1/device-registry", s.authorize("viewer"), s.endpoint(s.deviceRegistry))
+	s.router.POST("/api/v1/device-registry", s.authorize("operator"), s.endpoint(s.saveManagedDevice))
+	s.router.PUT("/api/v1/device-registry/:id", s.authorize("operator"), s.endpoint(s.saveManagedDevice, "id"))
+	s.router.POST("/api/v1/discovered-devices/:id/register", s.authorize("operator"), s.endpoint(s.registerDiscoveredDevice, "id"))
+	s.router.POST("/api/v1/device-registry/:id/credentials", s.authorize("admin"), s.endpoint(s.rotateDeviceCredential, "id"))
+	s.router.GET("/api/v1/device-registry/:id/connection-guide", s.authorize("viewer"), s.endpoint(s.deviceConnectionGuide, "id"))
+	s.router.POST("/api/v1/device-registry/:id/debug", s.authorize("operator"), s.endpoint(s.debugDeviceIngest, "id"))
+	s.router.POST("/api/v1/raw-messages", s.authorize("operator"), s.endpoint(s.ingestRaw))
+	s.router.GET("/api/v1/raw-messages", s.authorize("viewer"), s.endpoint(s.listRaw))
+	s.router.POST("/api/v1/raw-messages/download", s.authorize("viewer"), s.endpoint(s.downloadRawBatch))
+	s.router.GET("/api/v1/raw-messages/:id", s.authorize("viewer"), s.endpoint(s.rawDetail, "id"))
+	s.router.GET("/api/v1/raw-messages/:id/download", s.authorize("viewer"), s.endpoint(s.downloadRaw, "id"))
+	s.router.POST("/api/v1/raw-messages/replay", s.authorize("admin"), s.endpoint(s.startReplay))
+	s.router.GET("/api/v1/replays/:id", s.authorize("viewer"), s.endpoint(s.getReplay, "id"))
+	s.router.GET("/api/v1/devices", s.authorize("viewer"), s.endpoint(s.devices))
+	s.router.GET("/api/v1/devices/:deviceId/latest", s.authorize("viewer"), s.endpoint(s.deviceLatest, "deviceId"))
+	s.router.GET("/api/v1/devices/:deviceId/properties/history", s.authorize("viewer"), s.endpoint(s.history, "deviceId"))
+	s.router.POST("/api/v1/device-states", s.authorize("operator"), s.endpoint(s.stateEvent))
+	s.router.GET("/api/v1/rules", s.authorize("viewer"), s.endpoint(s.rules))
+	s.router.POST("/api/v1/rules", s.authorize("operator"), s.endpoint(s.saveRule))
+	s.router.PUT("/api/v1/rules/:id", s.authorize("operator"), s.endpoint(s.saveRule, "id"))
+	s.router.DELETE("/api/v1/rules/:id", s.authorize("operator"), s.endpoint(s.deleteRule, "id"))
+	s.router.GET("/api/v1/alarms", s.authorize("viewer"), s.endpoint(s.alarms))
+	s.router.GET("/api/v1/alarms/:id", s.authorize("viewer"), s.endpoint(s.alarm, "id"))
+	s.router.POST("/api/v1/alarms/:id/actions", s.authorize("operator"), s.endpoint(s.alarmAction, "id"))
+	s.router.GET("/api/v1/ai/alarm-analysis/:alarmId", s.authorize("viewer"), s.endpoint(s.aiAnalysis, "alarmId"))
+	s.router.POST("/api/v1/ai/chat", s.authorize("viewer"), s.endpoint(s.aiChat))
+	s.router.POST("/api/v1/ai/rule-draft", s.authorize("operator"), s.endpoint(s.aiRuleDraft))
+	s.router.POST("/api/v1/ai/reports", s.authorize("viewer"), s.endpoint(s.aiReport))
+	s.router.POST("/api/v1/knowledge/documents", s.authorize("operator"), s.endpoint(s.knowledgeUpload))
+	s.router.POST("/api/v1/mqtt/token", s.authorize("viewer"), s.endpoint(s.mqttToken))
+	s.router.POST("/api/v1/mqtt/load-token", s.authorize("admin"), s.endpoint(s.mqttLoadToken))
+	s.router.POST("/api/v1/device-mqtt/token", s.endpoint(s.deviceMQTTToken))
+	s.router.POST("/api/v1/integrations/thingspanel/sync", s.authorize("admin"), s.endpoint(s.thingsPanelSync))
+	mcpHandler := gin.WrapH(mcpserver.New(s.engine))
+	s.router.GET("/mcp", s.authorize("viewer"), mcpHandler)
+	s.router.POST("/mcp", s.authorize("viewer"), mcpHandler)
+	s.router.DELETE("/mcp", s.authorize("viewer"), mcpHandler)
+	s.router.NoRoute(func(c *gin.Context) { ginProblem(c, http.StatusNotFound, "route not found") })
+	s.router.NoMethod(func(c *gin.Context) { ginProblem(c, http.StatusMethodNotAllowed, "method not allowed") })
 }
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	var in struct {
@@ -1231,38 +1233,102 @@ func verifySignature(secret, ts string, body []byte, sig string) bool {
 	expected := hex.EncodeToString(mac.Sum(nil))
 	return hmac.Equal([]byte(strings.ToLower(sig)), []byte(expected))
 }
-func (s *Server) protected(role string, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token := auth.Bearer(r.Header.Get("Authorization"))
-		c, err := s.auth.Parse(token)
+
+type endpointHandler func(http.ResponseWriter, *http.Request)
+
+// endpoint adapts the established net/http business handlers to Gin while
+// preserving Request.PathValue for code that reads named route parameters.
+func (s *Server) endpoint(handler endpointHandler, pathParams ...string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		for _, name := range pathParams {
+			c.Request.SetPathValue(name, c.Param(name))
+		}
+		handler(c.Writer, c.Request)
+	}
+}
+
+func (s *Server) authorize(role string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		token := auth.Bearer(c.GetHeader("Authorization"))
+		claimsValue, err := s.auth.Parse(token)
 		if err != nil {
-			problem(w, 401, err.Error())
+			ginProblem(c, http.StatusUnauthorized, err.Error())
+			c.Abort()
 			return
 		}
-		allowed := c.Role == "admin" || c.Role == role || role == "viewer" && (c.Role == "operator" || c.Role == "viewer")
+		allowed := claimsValue.Role == "admin" || claimsValue.Role == role || role == "viewer" && (claimsValue.Role == "operator" || claimsValue.Role == "viewer")
 		if !allowed {
-			problem(w, 403, "insufficient role")
+			ginProblem(c, http.StatusForbidden, "insufficient role")
+			c.Abort()
 			return
 		}
-		ctx := auth.ContextWithClaims(context.WithValue(r.Context(), claimsKey, c), c)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
+		ctx := auth.ContextWithClaims(context.WithValue(c.Request.Context(), claimsKey, claimsValue), claimsValue)
+		c.Request = c.Request.WithContext(ctx)
+		c.Next()
+	}
 }
-func (s *Server) security(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; script-src 'self'")
-		next.ServeHTTP(w, r)
-	})
+
+func (s *Server) security() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("X-Frame-Options", "DENY")
+		c.Header("Referrer-Policy", "no-referrer")
+		c.Header("Content-Security-Policy", "default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:")
+		c.Next()
+	}
 }
-func (s *Server) accessLog(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+
+func (s *Server) cors() gin.HandlerFunc {
+	allowedOrigins := make(map[string]struct{}, len(s.cfg.CORSAllowedOrigins))
+	for _, origin := range s.cfg.CORSAllowedOrigins {
+		allowedOrigins[strings.TrimRight(origin, "/")] = struct{}{}
+	}
+	return func(c *gin.Context) {
+		origin := strings.TrimRight(c.GetHeader("Origin"), "/")
+		if origin != "" {
+			if _, allowed := allowedOrigins[origin]; allowed {
+				c.Header("Access-Control-Allow-Origin", origin)
+				c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+				c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Device-Key, X-Device-Secret, X-Video-Platform-ID, X-Timestamp, X-Signature")
+				c.Header("Access-Control-Max-Age", "600")
+				c.Header("Vary", "Origin")
+			} else if c.Request.Method == http.MethodOptions {
+				ginProblem(c, http.StatusForbidden, "origin is not allowed")
+				c.Abort()
+				return
+			}
+		}
+		if c.Request.Method == http.MethodOptions {
+			c.Status(http.StatusNoContent)
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
+func (s *Server) accessLog() gin.HandlerFunc {
+	return func(c *gin.Context) {
 		start := time.Now()
-		next.ServeHTTP(w, r)
-		s.log.Info("http request", "method", r.Method, "path", r.URL.Path, "duration", time.Since(start).String())
+		c.Next()
+		if s.log != nil {
+			s.log.Info("http request", "method", c.Request.Method, "path", c.Request.URL.Path, "route", c.FullPath(), "status", c.Writer.Status(), "duration", time.Since(start).String())
+		}
+	}
+}
+
+func (s *Server) recovery() gin.HandlerFunc {
+	return gin.CustomRecovery(func(c *gin.Context, recovered any) {
+		if s.log != nil {
+			s.log.Error("http panic recovered", "method", c.Request.Method, "path", c.Request.URL.Path, "error", fmt.Sprint(recovered))
+		}
+		ginProblem(c, http.StatusInternalServerError, "internal server error")
+		c.Abort()
 	})
+}
+
+func ginProblem(c *gin.Context, status int, detail string) {
+	c.JSON(status, gin.H{"type": "about:blank", "title": http.StatusText(status), "status": status, "detail": detail})
 }
 func claims(r *http.Request) auth.Claims {
 	v, _ := r.Context().Value(claimsKey).(auth.Claims)

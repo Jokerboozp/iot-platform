@@ -11,35 +11,15 @@ x-service-defaults: &service-defaults
   networks: [iot]
 
 services:
-  platform:
+  platform-api:
     <<: *service-defaults
-    image: ${IOT_PLATFORM_IMAGE:-iot-platform:local}
+    image: ${IOT_PLATFORM_API_IMAGE:-iot-platform-api:local}
     build:
       context: .
-      dockerfile_inline: |
-        FROM node:22-alpine AS web-build
-        WORKDIR /src
-        COPY web/package.json web/package-lock.json ./web/
-        RUN npm ci --prefix web
-        COPY web ./web
-        COPY internal/httpapi ./internal/httpapi
-        RUN npm --prefix web run build
-        FROM golang:1.26-alpine AS build
-        WORKDIR /src
-        COPY go.mod go.sum ./
-        RUN go mod download
-        COPY . .
-        COPY --from=web-build /src/internal/httpapi/static ./internal/httpapi/static
-        RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/iot-platform ./cmd/iot-platform
-        FROM gcr.io/distroless/static-debian12:nonroot
-        WORKDIR /app
-        COPY --from=build /out/iot-platform /app/iot-platform
-        VOLUME ["/app/data"]
-        EXPOSE 8080
-        USER nonroot:nonroot
-        ENTRYPOINT ["/app/iot-platform"]
+      dockerfile: Dockerfile
     environment:
       IOT_HTTP_ADDR: :8080
+      IOT_CORS_ALLOWED_ORIGINS: ${IOT_CORS_ALLOWED_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080,http://localhost:5173,http://127.0.0.1:5173}
       IOT_DEV_MODE: "false"
       IOT_DATA_DIR: /app/data
       IOT_JWT_SECRET: ${IOT_JWT_SECRET:-local-iot-jwt-change-me-at-least-32-characters}
@@ -64,7 +44,7 @@ services:
       IOT_THINGSPANEL_USER: ${IOT_THINGSPANEL_USER:-}
       IOT_THINGSPANEL_PASSWORD: ${IOT_THINGSPANEL_PASSWORD:-}
       IOT_THINGSPANEL_SYNC_INTERVAL: ${IOT_THINGSPANEL_SYNC_INTERVAL:-5m}
-    ports: ["${IOT_HTTP_PORT:-8080}:8080"]
+    ports: ["${IOT_API_PORT:-8081}:8080"]
     volumes: ["platform-data:/app/data"]
     depends_on:
       postgres: {condition: service_healthy}
@@ -74,6 +54,16 @@ services:
       redpanda-init: {condition: service_completed_successfully}
       clickhouse: {condition: service_healthy}
       emqx: {condition: service_healthy}
+
+  platform-web:
+    <<: *service-defaults
+    image: ${IOT_PLATFORM_WEB_IMAGE:-iot-platform-web:local}
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports: ["${IOT_WEB_PORT:-8080}:8080"]
+    depends_on:
+      platform-api: {condition: service_started}
 
   backend:
     <<: *service-defaults
@@ -379,7 +369,7 @@ services:
       - ./compose.yaml:/sources/config/compose.yaml:ro
       - ./deploy:/sources/config/deploy:ro
     depends_on:
-      platform: {condition: service_started}
+      platform-api: {condition: service_started}
       minio-dr: {condition: service_healthy}
 
   ollama:
@@ -417,7 +407,7 @@ configs:
         - job_name: iot-platform
           metrics_path: /metrics
           static_configs:
-            - targets: ["platform:8080"]
+            - targets: ["platform-api:8080"]
         - job_name: redpanda
           metrics_path: /public_metrics
           static_configs:

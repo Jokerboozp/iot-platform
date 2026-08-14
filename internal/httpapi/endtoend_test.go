@@ -21,6 +21,8 @@ import (
 	"iot-platform/internal/core"
 	"iot-platform/internal/metrics"
 	"iot-platform/internal/parser"
+
+	"github.com/gin-gonic/gin"
 )
 
 func TestHTTPWorkflow(t *testing.T) {
@@ -40,8 +42,50 @@ func TestHTTPWorkflow(t *testing.T) {
 	cfg := config.Load()
 	cfg.DevMode = true
 	cfg.JWTSecret = "test-secret-at-least-32-characters"
-	server := httptest.NewServer(New(cfg, engine, engine.Metrics.(*metrics.Registry), slog.New(slog.NewTextHandler(io.Discard, nil))).Handler())
+	cfg.CORSAllowedOrigins = []string{"http://localhost:5173"}
+	api := New(cfg, engine, engine.Metrics.(*metrics.Registry), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if _, ok := api.Handler().(*gin.Engine); !ok {
+		t.Fatalf("HTTP server is not backed by Gin: %T", api.Handler())
+	}
+	api.router.GET("/__panic_test", func(c *gin.Context) { panic("test panic") })
+	server := httptest.NewServer(api.Handler())
 	defer server.Close()
+	healthResp, err := server.Client().Get(server.URL + "/health/live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	healthResp.Body.Close()
+	if healthResp.StatusCode != http.StatusOK || healthResp.Header.Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("Gin security middleware failed: status=%d headers=%v", healthResp.StatusCode, healthResp.Header)
+	}
+	preflight, _ := http.NewRequest(http.MethodOptions, server.URL+"/api/v1/products", nil)
+	preflight.Header.Set("Origin", "http://localhost:5173")
+	preflightResp, err := server.Client().Do(preflight)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preflightResp.Body.Close()
+	if preflightResp.StatusCode != http.StatusNoContent || preflightResp.Header.Get("Access-Control-Allow-Origin") != "http://localhost:5173" {
+		t.Fatalf("CORS preflight failed: status=%d headers=%v", preflightResp.StatusCode, preflightResp.Header)
+	}
+	methodReq, _ := http.NewRequest(http.MethodPost, server.URL+"/health/live", nil)
+	methodResp, err := server.Client().Do(methodReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	methodResp.Body.Close()
+	if methodResp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("Gin method handling status=%d want=%d", methodResp.StatusCode, http.StatusMethodNotAllowed)
+	}
+	panicResp, err := server.Client().Get(server.URL + "/__panic_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	panicResp.Body.Close()
+	if panicResp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("Gin recovery status=%d want=%d", panicResp.StatusCode, http.StatusInternalServerError)
+	}
+	requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/products", "", nil, http.StatusUnauthorized)
 	login := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/auth/login", "", map[string]any{"username": "admin", "password": "admin123", "tenantId": "tenant_001"}, 200)
 	token := login["accessToken"].(string)
 	requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/protocol-packages", token, map[string]any{"id": "protocol_json", "name": "JSON 通用协议", "version": "1.0.0", "protocol": "json", "transport": "HTTP", "payloadFormat": "json", "parserType": "custom_json_parser", "status": "PUBLISHED"}, 201)
@@ -190,10 +234,9 @@ func TestHTTPWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != 200 || !strings.Contains(string(body), "城市消防 IoT 智能平台") {
-		t.Fatalf("frontend failed status=%d", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("backend root status=%d, want=%d", resp.StatusCode, http.StatusNotFound)
 	}
 }
 
