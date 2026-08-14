@@ -1,0 +1,27 @@
+groups:
+  - name: iot-platform
+    rules:
+      - alert: IotPlatformDown
+        expr: up{job="iot-platform"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations: {summary: "IoT 平台不可用"}
+      - alert: RawArchiveFailures
+        expr: increase(raw_archive_failed_total[5m]) > 0
+        for: 1m
+        labels: {severity: critical}
+        annotations: {summary: "原始报文归档失败"}
+      - alert: ParseFailureSpike
+        expr: increase(parse_failed_total[5m]) > 100
+        for: 2m
+        labels: {severity: warning}
+        annotations: {summary: "解析失败量升高"}
+      - alert: AIAnalysisFailures
+        expr: increase(ai_analysis_failed_total[15m]) > 10
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "AI 分析失败率升高"}
+      - alert: BackupFailures
+        expr: increase(backup_failed_total[24h]) > 0
+        labels: {severity: critical}
+        annotations: {summary: "备份任务失败"}

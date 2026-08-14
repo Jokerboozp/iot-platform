@@ -1,0 +1,514 @@
+name: iot-platform
+
+# 单文件部署入口：
+#   docker compose up -d --build
+# 可选 AI：
+#   docker compose --profile ai up -d --build
+# 所有 ${VAR:-default} 均可由 shell 环境变量或可选 .env 覆盖。
+
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  networks: [iot]
+
+services:
+  platform:
+    <<: *service-defaults
+    image: ${IOT_PLATFORM_IMAGE:-iot-platform:local}
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM golang:1.26-alpine AS build
+        WORKDIR /src
+        COPY go.mod go.sum ./
+        RUN go mod download
+        COPY . .
+        RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/iot-platform ./cmd/iot-platform
+        FROM gcr.io/distroless/static-debian12:nonroot
+        WORKDIR /app
+        COPY --from=build /out/iot-platform /app/iot-platform
+        VOLUME ["/app/data"]
+        EXPOSE 8080
+        USER nonroot:nonroot
+        ENTRYPOINT ["/app/iot-platform"]
+    environment:
+      IOT_HTTP_ADDR: :8080
+      IOT_DEV_MODE: "false"
+      IOT_DATA_DIR: /app/data
+      IOT_JWT_SECRET: ${IOT_JWT_SECRET:-local-iot-jwt-change-me-at-least-32-characters}
+      IOT_ADMIN_USER: ${IOT_ADMIN_USER:-admin}
+      IOT_ADMIN_PASSWORD: ${IOT_ADMIN_PASSWORD:-admin123}
+      IOT_VIDEO_PLATFORM_SECRETS: ${IOT_VIDEO_PLATFORM_SECRETS:-video-platform-1:local-video-secret-change-me}
+      IOT_VIDEO_MEDIA_ALLOWED_HOSTS: ${IOT_VIDEO_MEDIA_ALLOWED_HOSTS:-}
+      IOT_POSTGRES_DSN: postgres://iot:${POSTGRES_PASSWORD:-local-iot-postgres-change-me}@postgres:5432/iot?sslmode=disable
+      IOT_REDIS_ADDR: redis:6379
+      IOT_REDIS_PASSWORD: ${REDIS_PASSWORD:-local-iot-redis-change-me}
+      IOT_CLICKHOUSE_URL: http://iot:${CLICKHOUSE_PASSWORD:-local-iot-clickhouse-change-me}@clickhouse:8123?database=iot
+      IOT_MINIO_ENDPOINT: minio:9000
+      IOT_MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-iotadmin}
+      IOT_MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-local-iot-minio-change-me}
+      IOT_KAFKA_BROKERS: redpanda:9092
+      IOT_MQTT_BROKER: tcp://emqx:1883
+      IOT_MQTT_WEBSOCKET_PUBLIC_URL: ${IOT_MQTT_WEBSOCKET_PUBLIC_URL:-}
+      IOT_OLLAMA_URL: ${IOT_OLLAMA_URL:-}
+      IOT_OLLAMA_MODEL: ${IOT_OLLAMA_MODEL:-qwen3:8b}
+      IOT_WEAVIATE_URL: ${IOT_WEAVIATE_URL:-}
+      IOT_THINGSPANEL_URL: ${IOT_THINGSPANEL_URL:-}
+      IOT_THINGSPANEL_USER: ${IOT_THINGSPANEL_USER:-}
+      IOT_THINGSPANEL_PASSWORD: ${IOT_THINGSPANEL_PASSWORD:-}
+      IOT_THINGSPANEL_SYNC_INTERVAL: ${IOT_THINGSPANEL_SYNC_INTERVAL:-5m}
+    ports: ["${IOT_HTTP_PORT:-8080}:8080"]
+    volumes: ["platform-data:/app/data"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      minio: {condition: service_healthy}
+      redpanda: {condition: service_healthy}
+      redpanda-init: {condition: service_completed_successfully}
+      clickhouse: {condition: service_healthy}
+      emqx: {condition: service_healthy}
+
+  backend:
+    <<: *service-defaults
+    profiles: [thingspanel]
+    build:
+      context: ../upstream/thingspanel-backend-community
+      dockerfile_inline: |
+        FROM golang:1.25-alpine AS builder
+        WORKDIR /go/src/app
+        COPY . .
+        ENV GOPROXY=https://goproxy.cn,direct
+        RUN go build -trimpath -o /out/ThingsPanel-Go .
+        FROM alpine:3.22
+        WORKDIR /go/src/app
+        RUN apk add --no-cache tzdata openssl
+        COPY --from=builder /out/ThingsPanel-Go ./ThingsPanel-Go
+        COPY --from=builder /go/src/app/configs ./configs
+        COPY --from=builder /go/src/app/sql ./sql
+        EXPOSE 9999
+    environment:
+      GOTP_SERVICE_HTTP_HOST: 0.0.0.0
+      GOTP_SERVICE_HTTP_PORT: "9999"
+      GOTP_DB_PSQL_HOST: thingspanel-postgres
+      GOTP_DB_PSQL_PORT: "5432"
+      GOTP_DB_PSQL_DBNAME: ThingsPanel
+      GOTP_DB_PSQL_USERNAME: postgres
+      GOTP_DB_PSQL_PASSWORD: ${THINGSPANEL_POSTGRES_PASSWORD:-local-thingspanel-postgres-change-me}
+      GOTP_DB_PSQL_LOG_LEVEL: "2"
+      GOTP_DB_REDIS_ADDR: redis:6379
+      GOTP_DB_REDIS_PASSWORD: ${REDIS_PASSWORD:-local-iot-redis-change-me}
+      GOTP_MQTT_BROKER: emqx:1883
+      GOTP_MQTT_ACCESS_ADDRESS: localhost:1883
+      GOTP_MQTT_USER: thingspanel
+      IOT_JWT_SECRET: ${IOT_JWT_SECRET:-local-iot-jwt-change-me-at-least-32-characters}
+      GOTP_MARKET_ENABLED: "false"
+      GOTP_TELEMETRY_ENABLED: "false"
+      GOTP_LOG_LEVEL: info
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+        jwt_header="$$(printf '%s' '{"alg":"HS256","typ":"JWT"}' | b64url)"
+        jwt_exp="$$(($$(date +%s) + 315360000))"
+        jwt_payload="$$(printf '{"username":"thingspanel","sub":"thingspanel","exp":%s,"acl":[{"permission":"allow","action":"all","topic":"#"}]}' "$$jwt_exp" | b64url)"
+        jwt_signature="$$(printf '%s' "$$jwt_header.$$jwt_payload" | openssl dgst -sha256 -hmac "$$IOT_JWT_SECRET" -binary | b64url)"
+        export GOTP_MQTT_PASS="$$jwt_header.$$jwt_payload.$$jwt_signature"
+        exec ./ThingsPanel-Go
+    depends_on:
+      thingspanel-db-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      emqx: {condition: service_healthy}
+    ports: ["${THINGSPANEL_API_PORT:-9999}:9999"]
+
+  thingspanel:
+    <<: *service-defaults
+    profiles: [thingspanel]
+    build:
+      context: ../upstream/thingspanel-frontend-community
+      dockerfile_inline: |
+        FROM node:22-alpine AS build
+        WORKDIR /src
+        RUN corepack enable
+        COPY . .
+        RUN pnpm install --frozen-lockfile
+        RUN pnpm build
+        FROM nginx:1.27-alpine
+        COPY --from=build /src/dist /usr/share/nginx/html
+        COPY nginx.conf /etc/nginx/nginx.conf
+        EXPOSE 8080
+        ENTRYPOINT ["nginx", "-g", "daemon off;"]
+    depends_on: {backend: {condition: service_started}}
+    ports: ["${THINGSPANEL_WEB_PORT:-8088}:8080"]
+
+  thingspanel-postgres:
+    <<: *service-defaults
+    profiles: [thingspanel]
+    image: timescale/timescaledb:latest-pg17
+    command: ["postgres", "-c", "shared_preload_libraries=timescaledb"]
+    environment:
+      POSTGRES_DB: ThingsPanel
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${THINGSPANEL_POSTGRES_PASSWORD:-local-thingspanel-postgres-change-me}
+    volumes: ["thingspanel-postgres-data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ThingsPanel"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  thingspanel-db-init:
+    profiles: [thingspanel]
+    image: postgres:17-alpine
+    restart: "no"
+    environment:
+      PGPASSWORD: ${THINGSPANEL_POSTGRES_PASSWORD:-local-thingspanel-postgres-change-me}
+    command: ["/bin/sh", "-ec", "psql -h thingspanel-postgres -U postgres -d ThingsPanel -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS timescaledb'"]
+    depends_on:
+      thingspanel-postgres: {condition: service_healthy}
+    networks: [iot]
+
+  postgres:
+    <<: *service-defaults
+    image: postgres:17-alpine
+    command: ["postgres", "-c", "wal_level=replica", "-c", "archive_mode=on", "-c", "archive_timeout=300s", "-c", "archive_command=test ! -f /wal-archive/%f && cp %p /wal-archive/%f"]
+    environment:
+      POSTGRES_DB: iot
+      POSTGRES_USER: iot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-iot-postgres-change-me}
+    volumes: ["postgres-data:/var/lib/postgresql/data", "postgres-wal:/wal-archive"]
+    depends_on:
+      postgres-wal-init: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U iot -d iot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  postgres-wal-init:
+    image: alpine:3.22
+    restart: "no"
+    command: ["/bin/sh", "-ec", "chown -R 70:70 /wal-archive && chmod 750 /wal-archive"]
+    volumes: ["postgres-wal:/wal-archive"]
+    networks: [iot]
+
+  redis:
+    <<: *service-defaults
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:-local-iot-redis-change-me}"]
+    volumes: ["redis-data:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-local-iot-redis-change-me}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    <<: *service-defaults
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-iotadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-local-iot-minio-change-me}
+    ports: ["${MINIO_CONSOLE_PORT:-9001}:9001"]
+    volumes: ["minio-data:/data"]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio-dr:
+    <<: *service-defaults
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: ${MINIO_DR_ROOT_USER:-iotdradmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_DR_ROOT_PASSWORD:-local-iot-minio-dr-change-me}
+    volumes: ["minio-dr-data:/data"]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redpanda:
+    <<: *service-defaults
+    image: redpandadata/redpanda:v25.2.11
+    command: ["redpanda", "start", "--overprovisioned", "--smp", "1", "--memory", "1G", "--reserve-memory", "0M", "--node-id", "0", "--check=false", "--kafka-addr", "0.0.0.0:9092", "--advertise-kafka-addr", "redpanda:9092"]
+    volumes: ["redpanda-data:/var/lib/redpanda/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q Healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  redpanda-init:
+    image: redpandadata/redpanda:v25.2.11
+    restart: "no"
+    depends_on: {redpanda: {condition: service_healthy}}
+    entrypoint: ["/bin/bash", "-ec"]
+    command:
+      - |
+        for topic in iot.raw.message iot.parse.failed iot.property.report iot.event.report iot.device.state iot.video.alarm iot.alarm.raised iot.alarm.recovered iot.alarm.confirmed iot.alarm.ai-analysis iot.replay.request; do
+          rpk -X brokers=redpanda:9092 topic create "$$topic" --partitions 12 --replicas 1 || true
+        done
+    networks: [iot]
+
+  clickhouse:
+    <<: *service-defaults
+    image: clickhouse/clickhouse-server:25.7-alpine
+    environment:
+      CLICKHOUSE_DB: iot
+      CLICKHOUSE_USER: iot
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-local-iot-clickhouse-change-me}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes: ["clickhouse-data:/var/lib/clickhouse"]
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user iot --password \"$$CLICKHOUSE_PASSWORD\" --query 'SELECT 1'"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  emqx:
+    <<: *service-defaults
+    image: emqx/emqx:5.8.8
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        umask 077
+        jwt_secret_b64="$$(printf '%s' "$$IOT_JWT_SECRET" | base64 | tr -d '\n')"
+        printf 'authentication = [{mechanism = jwt, from = password, algorithm = "hmac-based", use_jwks = false, secret = "%s", secret_base64_encoded = true, acl_claim_name = "acl"}]\n' "$$jwt_secret_b64" > /opt/emqx/etc/base.hocon
+        sed -i 's/{allow, all}\./{deny, all}./' /opt/emqx/etc/acl.conf
+        exec /usr/bin/docker-entrypoint.sh /opt/emqx/bin/emqx foreground
+    environment:
+      EMQX_NAME: iot-emqx
+      IOT_JWT_SECRET: ${IOT_JWT_SECRET:-local-iot-jwt-change-me-at-least-32-characters}
+      EMQX_AUTHORIZATION__NO_MATCH: deny
+      EMQX_AUTHORIZATION__DENY_ACTION: ignore
+      EMQX_DASHBOARD__DEFAULT_USERNAME: ${EMQX_DASHBOARD_USER:-admin}
+      EMQX_DASHBOARD__DEFAULT_PASSWORD: ${EMQX_DASHBOARD_PASSWORD:-public-change-me}
+    ports:
+      - "${MQTT_PORT:-1883}:1883"
+      - "${MQTT_WS_PORT:-8083}:8083"
+      - "${EMQX_DASHBOARD_PORT:-18083}:18083"
+    volumes: ["emqx-data:/opt/emqx/data", "emqx-log:/opt/emqx/log"]
+    healthcheck:
+      test: ["CMD", "/opt/emqx/bin/emqx", "ctl", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  prometheus:
+    <<: *service-defaults
+    image: prom/prometheus:v3.5.0
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-30d}"]
+    configs:
+      - {source: prometheus-main, target: /etc/prometheus/prometheus.yml}
+      - {source: prometheus-alerts, target: /etc/prometheus/alerts.yml}
+    volumes: ["prometheus-data:/prometheus"]
+    ports: ["${PROMETHEUS_PORT:-9090}:9090"]
+
+  grafana:
+    <<: *service-defaults
+    image: grafana/grafana:12.1.0
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin-change-me}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    configs:
+      - {source: grafana-datasources, target: /etc/grafana/provisioning/datasources/iot.yml}
+    volumes: ["grafana-data:/var/lib/grafana"]
+    ports: ["${GRAFANA_PORT:-3000}:3000"]
+    depends_on:
+      prometheus: {condition: service_started}
+      loki: {condition: service_started}
+
+  loki:
+    <<: *service-defaults
+    image: grafana/loki:3.5.3
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    configs:
+      - {source: loki-main, target: /etc/loki/local-config.yaml}
+    volumes: ["loki-data:/loki"]
+
+  backup-service:
+    <<: *service-defaults
+    image: ${IOT_BACKUP_IMAGE:-iot-platform-backup:local}
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM golang:1.26-alpine AS build
+        WORKDIR /src
+        COPY go.mod go.sum ./
+        RUN go mod download
+        COPY . .
+        RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/backup-service ./cmd/backup-service
+        FROM postgres:17-alpine
+        RUN apk add --no-cache redis
+        COPY --from=build /out/backup-service /usr/local/bin/backup-service
+        ENTRYPOINT ["backup-service"]
+    environment:
+      IOT_POSTGRES_DSN: postgres://iot:${POSTGRES_PASSWORD:-local-iot-postgres-change-me}@postgres:5432/iot?sslmode=disable
+      IOT_MINIO_ENDPOINT: minio:9000
+      IOT_MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-iotadmin}
+      IOT_MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-local-iot-minio-change-me}
+      IOT_MINIO_DR_ENDPOINT: minio-dr:9000
+      IOT_MINIO_DR_ACCESS_KEY: ${MINIO_DR_ROOT_USER:-iotdradmin}
+      IOT_MINIO_DR_SECRET_KEY: ${MINIO_DR_ROOT_PASSWORD:-local-iot-minio-dr-change-me}
+      IOT_CLICKHOUSE_URL: http://iot:${CLICKHOUSE_PASSWORD:-local-iot-clickhouse-change-me}@clickhouse:8123?database=iot
+      IOT_REDIS_ADDR: redis:6379
+      IOT_REDIS_PASSWORD: ${REDIS_PASSWORD:-local-iot-redis-change-me}
+      IOT_REDPANDA_ADMIN_URL: http://redpanda:9644
+      IOT_WEAVIATE_URL: ${IOT_WEAVIATE_URL:-}
+      IOT_BACKUP_CONFIG_PATHS: /sources/config,/sources/emqx
+      IOT_BACKUP_INTERVAL: ${IOT_BACKUP_INTERVAL:-24h}
+      IOT_BACKUP_INCREMENTAL_INTERVAL: ${IOT_BACKUP_INCREMENTAL_INTERVAL:-15m}
+      IOT_BACKUP_ADMIN_TOKEN: ${IOT_BACKUP_ADMIN_TOKEN:-change-me-backup-admin-token}
+    ports: ["127.0.0.1:${IOT_BACKUP_HTTP_PORT:-8090}:8090"]
+    volumes:
+      - backup-staging:/app/data/backups
+      - postgres-wal:/sources/postgres-wal:ro
+      - emqx-data:/sources/emqx:ro
+      - ./compose.yaml:/sources/config/compose.yaml:ro
+      - ./deploy:/sources/config/deploy:ro
+    depends_on:
+      platform: {condition: service_started}
+      minio-dr: {condition: service_healthy}
+
+  ollama:
+    <<: *service-defaults
+    image: ollama/ollama:0.11.4
+    profiles: [ai]
+    volumes: ["ollama-data:/root/.ollama"]
+
+  weaviate:
+    <<: *service-defaults
+    image: cr.weaviate.io/semitechnologies/weaviate:1.32.8
+    profiles: [ai]
+    environment:
+      QUERY_DEFAULTS_LIMIT: "25"
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+      PERSISTENCE_DATA_PATH: /var/lib/weaviate
+      DEFAULT_VECTORIZER_MODULE: text2vec-ollama
+      ENABLE_MODULES: text2vec-ollama,backup-filesystem
+      OLLAMA_APIENDPOINT: http://ollama:11434
+      BACKUP_FILESYSTEM_PATH: /var/lib/weaviate/backups
+      CLUSTER_HOSTNAME: node1
+    volumes: ["weaviate-data:/var/lib/weaviate"]
+    depends_on:
+      ollama: {condition: service_started}
+
+configs:
+  prometheus-main:
+    content: |
+      global:
+        scrape_interval: 15s
+        evaluation_interval: 15s
+      rule_files:
+        - /etc/prometheus/alerts.yml
+      scrape_configs:
+        - job_name: iot-platform
+          metrics_path: /metrics
+          static_configs:
+            - targets: ["platform:8080"]
+        - job_name: redpanda
+          metrics_path: /public_metrics
+          static_configs:
+            - targets: ["redpanda:9644"]
+        - job_name: backup-service
+          metrics_path: /metrics
+          static_configs:
+            - targets: ["backup-service:8090"]
+        - job_name: emqx
+          metrics_path: /api/v5/prometheus/stats
+          static_configs:
+            - targets: ["emqx:18083"]
+  prometheus-alerts:
+    content: |
+      groups:
+        - name: iot-platform
+          rules:
+            - alert: IotPlatformDown
+              expr: up{job="iot-platform"} == 0
+              for: 1m
+              labels: {severity: critical}
+              annotations: {summary: "IoT 平台不可用"}
+            - alert: RawArchiveFailures
+              expr: increase(raw_archive_failed_total[5m]) > 0
+              for: 1m
+              labels: {severity: critical}
+              annotations: {summary: "原始报文归档失败"}
+            - alert: ParseFailureSpike
+              expr: increase(parse_failed_total[5m]) > 100
+              for: 2m
+              labels: {severity: warning}
+              annotations: {summary: "解析失败量升高"}
+            - alert: AIAnalysisFailures
+              expr: increase(ai_analysis_failed_total[15m]) > 10
+              for: 5m
+              labels: {severity: warning}
+              annotations: {summary: "AI 分析失败量升高"}
+            - alert: BackupFailures
+              expr: increase(backup_failed_total[30m]) > 0
+              for: 1m
+              labels: {severity: critical}
+              annotations: {summary: "备份或恢复演练失败"}
+  grafana-datasources:
+    content: |
+      apiVersion: 1
+      datasources:
+        - name: Prometheus
+          type: prometheus
+          access: proxy
+          url: http://prometheus:9090
+          isDefault: true
+        - name: Loki
+          type: loki
+          access: proxy
+          url: http://loki:3100
+  loki-main:
+    content: |
+      auth_enabled: false
+      server:
+        http_listen_port: 3100
+      common:
+        path_prefix: /loki
+        storage:
+          filesystem:
+            chunks_directory: /loki/chunks
+            rules_directory: /loki/rules
+        replication_factor: 1
+        ring:
+          kvstore:
+            store: inmemory
+      schema_config:
+        configs:
+          - from: "2024-01-01"
+            store: tsdb
+            object_store: filesystem
+            schema: v13
+            index:
+              prefix: index_
+              period: 24h
+
+networks:
+  iot:
+    driver: bridge
+
+volumes:
+  platform-data: {}
+  postgres-data: {}
+  redis-data: {}
+  minio-data: {}
+  minio-dr-data: {}
+  postgres-wal: {}
+  redpanda-data: {}
+  clickhouse-data: {}
+  emqx-data: {}
+  emqx-log: {}
+  prometheus-data: {}
+  grafana-data: {}
+  loki-data: {}
+  backup-staging: {}
+  ollama-data: {}
+  weaviate-data: {}
+  thingspanel-postgres-data: {}

@@ -1,0 +1,32 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata: {name: iot-backup, namespace: iot-platform}
+spec:
+  schedule: "15 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 7
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: backup
+              image: your-registry/iot-backup-service:1.0.0
+              env:
+                - {name: IOT_BACKUP_ONCE, value: "true"}
+                - {name: IOT_BACKUP_TYPE, value: "FULL"}
+                - {name: IOT_BACKUP_CONFIG_PATHS, value: "/sources/config,/sources/emqx"}
+              envFrom: [{configMapRef: {name: iot-platform}}, {secretRef: {name: iot-platform}}]
+              resources: {requests: {cpu: "250m", memory: "256Mi"}, limits: {cpu: "1", memory: "1Gi"}}
+              securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: ["ALL"]}}
+              volumeMounts:
+                - {name: postgres-wal, mountPath: /sources/postgres-wal, readOnly: true}
+                - {name: emqx-config, mountPath: /sources/emqx, readOnly: true}
+                - {name: platform-config, mountPath: /sources/config, readOnly: true}
+          volumes:
+            - {name: postgres-wal, persistentVolumeClaim: {claimName: postgres-wal}}
+            - {name: emqx-config, persistentVolumeClaim: {claimName: emqx-data}}
+            - {name: platform-config, configMap: {name: iot-platform-deployment-config}}

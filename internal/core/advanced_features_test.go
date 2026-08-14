@@ -1,0 +1,164 @@
+package core
+
+import (
+	"archive/zip"
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"iot-platform/internal/adapters/local"
+	"iot-platform/internal/adapters/memory"
+	"iot-platform/internal/model"
+	"iot-platform/internal/parser"
+	"iot-platform/internal/ports"
+)
+
+func TestGengineExpressionAndSafety(t *testing.T) {
+	message := model.StandardMessage{TenantID: "t1", ProductID: "p1", Properties: map[string]any{"temperature": 88.5, "smoke": true}}
+	rule := model.AlarmRule{TenantID: "t1", ProductID: "p1", Enabled: true, Expression: `Properties["temperature"] > 80 && Properties["smoke"] == true`}
+	matched, err := EvaluateGengineExpression(rule.Expression, message)
+	if err != nil || !matched {
+		t.Fatalf("expected controlled Gengine expression to match: matched=%v err=%v", matched, err)
+	}
+	if err := ValidateGengineExpression(`system("rm")`); err == nil {
+		t.Fatal("expected unsafe expression to be rejected")
+	}
+}
+
+func TestRuleDraftValidatesThingModelAndConflicts(t *testing.T) {
+	ctx := context.Background()
+	repo := memory.NewRepository()
+	archive, _ := local.NewArchive(t.TempDir())
+	engine := New(repo, archive, local.NewBus(), local.NewRealtime(), parser.NewRegistry(parser.JSONParser{}), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	product := model.Product{ID: "p1", TenantID: "t1", Metadata: map[string]any{"properties": []any{map[string]any{"id": "temperature"}}}}
+	if err := repo.SaveProduct(ctx, product); err != nil {
+		t.Fatal(err)
+	}
+	base := model.AlarmRule{ID: "r1", TenantID: "t1", ProductID: "p1", Name: "high temperature", AlarmType: "FIRE_RISK", Level: "HIGH", Match: "all", Conditions: []model.RuleCondition{{Field: "temperature", Operator: ">", Value: 80}}}
+	if err := repo.SaveRule(ctx, base); err != nil {
+		t.Fatal(err)
+	}
+	draft := base
+	draft.ID = "r2"
+	draft.Name = "duplicate"
+	_, conflicts, err := engine.ValidateRuleDraft(ctx, draft)
+	if err != nil || len(conflicts) == 0 {
+		t.Fatalf("expected conflict, got conflicts=%v err=%v", conflicts, err)
+	}
+	draft.Conditions[0].Field = "undeclared"
+	if _, _, err = engine.ValidateRuleDraft(ctx, draft); err == nil {
+		t.Fatal("expected undeclared thing-model field to fail")
+	}
+}
+
+func TestOfficeKnowledgeExtractionAndChunking(t *testing.T) {
+	var data bytes.Buffer
+	zw := zip.NewWriter(&data)
+	file, _ := zw.Create("word/document.xml")
+	_, _ = file.Write([]byte(`<w:document><w:body><w:p><w:r><w:t>消防泵维护步骤</w:t></w:r></w:p><w:p><w:r><w:t>检查水压</w:t></w:r></w:p></w:body></w:document>`))
+	_ = zw.Close()
+	text, err := ExtractKnowledgeText("manual.docx", data.Bytes())
+	if err != nil || !strings.Contains(text, "消防泵维护步骤") {
+		t.Fatalf("text=%q err=%v", text, err)
+	}
+	chunks := ChunkKnowledgeText(strings.Repeat(text, 20), 80, 10)
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple overlapping chunks, got %d", len(chunks))
+	}
+}
+
+func TestReplayDiffAndVideoFusion(t *testing.T) {
+	ctx := context.Background()
+	repo := memory.NewRepository()
+	archive, _ := local.NewArchive(t.TempDir())
+	bus := local.NewBus()
+	engine := New(repo, archive, bus, local.NewRealtime(), parser.NewRegistry(parser.JSONParser{}), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := engine.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UnixMilli()
+	raw := model.RawMessage{MessageID: "replay-1", TenantID: "t1", ProductID: "p1", DeviceID: "d1", Protocol: "json", PayloadFormat: "json", ReceivedAt: now, Payload: json.RawMessage(`{"properties":{"temperature":42}}`)}
+	if _, _, err := engine.IngestRaw(ctx, raw); err != nil {
+		t.Fatal(err)
+	}
+	replay, err := engine.StartReplay(ctx, model.ReplayRequest{TenantID: "t1", Start: now - 1, End: now + 1, Mode: "DIFF", RatePerSecond: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		replay, err = repo.GetReplay(ctx, replay.ID)
+		if err == nil && replay.Status == "COMPLETED" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if replay.Status != "COMPLETED" || replay.DiffSummary["unchanged"] != 1 {
+		if len(replay.Diffs) > 0 {
+			t.Fatalf("unexpected replay previous=%#v current=%#v summary=%#v", *replay.Diffs[0].Previous, *replay.Diffs[0].Current, replay.DiffSummary)
+		}
+		t.Fatalf("unexpected replay %#v", replay)
+	}
+
+	if err = repo.SaveVideoCameraMapping(ctx, model.VideoCameraMapping{TenantID: "t1", CameraID: "cam1", CameraName: "Lobby", AreaID: "area-a", CityCode: "city", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	first, created, err := engine.IngestVideo(ctx, model.VideoAlarmEvent{EventID: "v1", TenantID: "t1", CameraID: "cam1", AlarmType: "FIRE", Confidence: .8, EventTime: now})
+	if err != nil || !created || first.AreaID != "area-a" {
+		t.Fatalf("first=%#v created=%v err=%v", first, created, err)
+	}
+	second, created, err := engine.IngestVideo(ctx, model.VideoAlarmEvent{EventID: "v2", TenantID: "t1", CameraID: "cam1", AlarmType: "FIRE", Confidence: .9, EventTime: now + 1000})
+	if err != nil || created || second.TriggerCount != 2 || second.Confidence != .9 {
+		t.Fatalf("second=%#v created=%v err=%v", second, created, err)
+	}
+}
+
+func TestVideoMediaTransferIsAsynchronousAndUpdatesAlarm(t *testing.T) {
+	release := make(chan struct{})
+	media := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-release
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write([]byte("image"))
+	}))
+	defer media.Close()
+	ctx := context.Background()
+	repo := memory.NewRepository()
+	archive, _ := local.NewArchive(t.TempDir())
+	engine := New(repo, archive, local.NewBus(), local.NewRealtime(), parser.NewRegistry(parser.JSONParser{}), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine.VideoMediaAllowedHosts = []string{"127.0.0.1"}
+	if err := engine.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := engine.IngestVideo(ctx, model.VideoAlarmEvent{EventID: "async-media", TenantID: "t1", CameraID: "cam-media", CameraName: "Media camera", AreaID: "a1", AlarmType: "FIRE", EventTime: time.Now().UnixMilli(), SnapshotURL: media.URL + "/snapshot.jpg"})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("video ingest blocked on external media download")
+	}
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		alarms, _ := repo.ListAlarms(ctx, ports.AlarmFilter{TenantID: "t1", Status: "ACTIVE"})
+		if len(alarms) > 0 {
+			if event, ok := alarms[0].Details["videoEvent"].(model.VideoAlarmEvent); ok && strings.HasPrefix(event.SnapshotURL, "local://") {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("archived media URL was not written back to active alarm")
+}

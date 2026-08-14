@@ -1,0 +1,119 @@
+CREATE TABLE IF NOT EXISTS iot_product (
+  tenant_id text NOT NULL, id text NOT NULL, status text NOT NULL,
+  protocol_package_id text, body jsonb NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, id)
+);
+CREATE TABLE IF NOT EXISTS protocol_package (
+  tenant_id text NOT NULL, id text NOT NULL, status text NOT NULL,
+  parser_type text NOT NULL, body jsonb NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, id)
+);
+CREATE TABLE IF NOT EXISTS device_registry (
+  tenant_id text NOT NULL, id text NOT NULL, product_id text NOT NULL, status text NOT NULL,
+  access_key text NOT NULL UNIQUE, secret_hash text NOT NULL, body jsonb NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (tenant_id, id)
+);
+CREATE INDEX IF NOT EXISTS device_registry_product_idx ON device_registry(tenant_id, product_id);
+
+CREATE TABLE IF NOT EXISTS raw_archive_index (
+  tenant_id text NOT NULL, product_id text NOT NULL, device_id text NOT NULL,
+  message_id text NOT NULL, protocol text, payload_format text,
+  object_bucket text NOT NULL, object_key text NOT NULL, object_offset bigint NOT NULL DEFAULT 0,
+  payload_hash text NOT NULL, payload_size integer NOT NULL,
+  received_at bigint NOT NULL, archived_at bigint NOT NULL, published_at bigint NOT NULL DEFAULT 0,
+  publish_attempts integer NOT NULL DEFAULT 0, last_publish_error text NOT NULL DEFAULT '',
+  PRIMARY KEY (tenant_id, message_id)
+);
+ALTER TABLE raw_archive_index ADD COLUMN IF NOT EXISTS published_at bigint NOT NULL DEFAULT 0;
+ALTER TABLE raw_archive_index ADD COLUMN IF NOT EXISTS publish_attempts integer NOT NULL DEFAULT 0;
+ALTER TABLE raw_archive_index ADD COLUMN IF NOT EXISTS last_publish_error text NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS raw_archive_device_time_idx ON raw_archive_index(tenant_id, device_id, received_at DESC);
+CREATE INDEX IF NOT EXISTS raw_archive_product_time_idx ON raw_archive_index(tenant_id, product_id, received_at DESC);
+
+CREATE TABLE IF NOT EXISTS standard_message (
+  tenant_id text NOT NULL, message_id text NOT NULL, raw_message_id text NOT NULL,
+  product_id text NOT NULL, device_id text NOT NULL, message_type text NOT NULL,
+  ts bigint NOT NULL, properties jsonb NOT NULL DEFAULT '{}', event jsonb NOT NULL DEFAULT '{}',
+  tags jsonb NOT NULL DEFAULT '{}', body jsonb NOT NULL,
+  PRIMARY KEY (tenant_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS standard_message_device_time_idx ON standard_message(tenant_id, device_id, ts DESC);
+CREATE INDEX IF NOT EXISTS standard_message_raw_idx ON standard_message(tenant_id, raw_message_id);
+
+CREATE TABLE IF NOT EXISTS device_state (
+  tenant_id text NOT NULL, device_id text NOT NULL, product_id text NOT NULL,
+  business_status text NOT NULL, last_seen_at bigint NOT NULL DEFAULT 0, body jsonb NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (tenant_id, device_id)
+);
+CREATE INDEX IF NOT EXISTS device_state_status_idx ON device_state(tenant_id, business_status);
+CREATE TABLE IF NOT EXISTS device_state_event (
+  id bigserial PRIMARY KEY, tenant_id text NOT NULL, device_id text NOT NULL,
+  business_status text NOT NULL, body jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS alarm_rule (
+  tenant_id text NOT NULL, id text NOT NULL, product_id text, enabled boolean NOT NULL,
+  body jsonb NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (tenant_id, id)
+);
+CREATE TABLE IF NOT EXISTS alarm_record (
+  tenant_id text NOT NULL, id text NOT NULL, rule_id text NOT NULL, device_id text NOT NULL,
+  status text NOT NULL, level text NOT NULL, source text NOT NULL,
+  last_triggered_at bigint NOT NULL, body jsonb NOT NULL,
+  PRIMARY KEY (tenant_id, id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS alarm_active_dedup_idx ON alarm_record(tenant_id, device_id, rule_id) WHERE status IN ('ACTIVE','ACKED');
+CREATE INDEX IF NOT EXISTS alarm_query_idx ON alarm_record(tenant_id, status, last_triggered_at DESC);
+
+CREATE TABLE IF NOT EXISTS video_alarm_event (
+  tenant_id text NOT NULL, event_id text NOT NULL, camera_id text NOT NULL,
+  alarm_type text NOT NULL, event_time bigint NOT NULL, body jsonb NOT NULL,
+  PRIMARY KEY (tenant_id, event_id)
+);
+CREATE TABLE IF NOT EXISTS video_camera_mapping (
+  tenant_id text NOT NULL, camera_id text NOT NULL, camera_name text, project_id text,
+  city_code text, district_code text, building text, floor text, area_id text, related_device_ids jsonb NOT NULL DEFAULT '[]',
+  video_platform_id text, stream_url text, enabled boolean NOT NULL DEFAULT true,
+  PRIMARY KEY (tenant_id, camera_id)
+);
+ALTER TABLE video_camera_mapping ADD COLUMN IF NOT EXISTS city_code text;
+ALTER TABLE video_camera_mapping ADD COLUMN IF NOT EXISTS district_code text;
+CREATE TABLE IF NOT EXISTS video_alarm_media (
+  tenant_id text NOT NULL, event_id text NOT NULL, media_type text NOT NULL,
+  object_bucket text NOT NULL, object_key text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, event_id, media_type, object_key)
+);
+
+CREATE TABLE IF NOT EXISTS ai_model_config (
+  id text PRIMARY KEY, tenant_id text NOT NULL, provider text NOT NULL, model text NOT NULL,
+  config jsonb NOT NULL DEFAULT '{}', enabled boolean NOT NULL DEFAULT true, updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS ai_prompt_template (
+  id text NOT NULL, version text NOT NULL, tenant_id text NOT NULL, content text NOT NULL,
+  enabled boolean NOT NULL DEFAULT true, created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(id, version, tenant_id)
+);
+CREATE TABLE IF NOT EXISTS alarm_ai_analysis (
+  alarm_id text PRIMARY KEY, body jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS ai_knowledge_doc (
+  id text PRIMARY KEY, tenant_id text NOT NULL, product_id text, object_bucket text NOT NULL,
+  object_key text NOT NULL, filename text NOT NULL, status text NOT NULL, metadata jsonb NOT NULL DEFAULT '{}',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS ai_tool_call_log (
+  id bigserial PRIMARY KEY, tenant_id text NOT NULL, actor text, tool text NOT NULL,
+  input jsonb, output jsonb, success boolean NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS replay_task (
+  id text PRIMARY KEY, tenant_id text NOT NULL, status text NOT NULL, body jsonb NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS backup_task (
+  id text PRIMARY KEY, backup_type text NOT NULL, status text NOT NULL, object_key text,
+  checksum text, details jsonb NOT NULL DEFAULT '{}', started_at timestamptz, completed_at timestamptz
+);
+CREATE TABLE IF NOT EXISTS audit_log (
+  id text PRIMARY KEY, tenant_id text NOT NULL, actor text NOT NULL, action text NOT NULL,
+  target_type text NOT NULL, target_id text NOT NULL, details jsonb NOT NULL DEFAULT '{}',
+  created_at bigint NOT NULL
+);

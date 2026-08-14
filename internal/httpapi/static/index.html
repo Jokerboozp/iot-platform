@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>城市消防 IoT 智能平台</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="login" class="login-shell">
+  <section class="login-intro" aria-label="平台简介">
+    <div class="intro-brand"><span>火</span><strong>消防智联</strong></div>
+    <div class="intro-copy">
+      <span class="eyebrow">CITY FIRE SAFETY CLOUD</span>
+      <h2>让每一次设备信号，<br>都清晰可见。</h2>
+      <p>统一接入城市消防设备，实时汇聚状态、告警与智能分析，让运维判断更快、更准确。</p>
+    </div>
+    <div class="intro-points"><span>实时感知</span><span>统一告警</span><span>智能研判</span></div>
+  </section>
+  <form id="login-form" class="login-card">
+    <div class="brand-mark">火</div>
+    <div class="login-heading"><span>欢迎回来</span><h1>登录管理平台</h1><p>使用您的平台账号继续</p></div>
+    <label>租户<input name="tenantId" value="tenant_001"></label>
+    <label>用户名<input name="username" value="admin"></label>
+    <label>密码<input name="password" type="password" value="admin123"></label>
+    <button type="submit">进入平台</button><div id="login-error" class="error"></div>
+  </form>
+</div>
+
+<div id="app" class="app hidden">
+  <aside>
+    <div class="logo"><span>火</span><div><strong>消防智联</strong><small>IoT CONTROL</small></div></div>
+    <nav>
+      <button data-page="dashboard" data-icon="⌂" class="active">总览</button>
+      <p class="nav-group">设备接入</p>
+      <button data-page="devices" data-icon="◫">设备管理</button>
+      <button data-page="products" data-icon="◇">产品管理</button>
+      <button data-page="protocols" data-icon="⌘">协议开发</button>
+      <button data-page="integration" data-icon="↗">数据接入</button>
+      <p class="nav-group">运行中心</p>
+      <button data-page="alarms" data-icon="!">告警中心</button>
+      <button data-page="raw" data-icon="≡">原始报文</button>
+      <button data-page="rules" data-icon="⌁">告警规则</button>
+      <button data-page="ai" data-icon="AI">AI 运维助手</button>
+    </nav>
+    <button id="logout" class="logout">退出登录</button>
+  </aside>
+  <main>
+    <header><div><span class="page-eyebrow">控制中心</span><h2 id="page-title">运行总览</h2><p id="subtitle">城市级消防感知与告警态势</p></div><div class="header-actions"><div class="health"><i></i><span>平台运行中</span></div><div class="user-chip">A</div></div></header>
+
+    <section id="page-dashboard" class="page active">
+      <div class="stats"><article><span>设备总数</span><strong id="stat-devices">0</strong><small>当前租户</small></article><article><span>在线设备</span><strong id="stat-online">0</strong><small class="good">实时状态</small></article><article><span>活动告警</span><strong id="stat-alarms">0</strong><small class="warn">待处置</small></article><article><span>高等级告警</span><strong id="stat-high">0</strong><small class="bad">优先关注</small></article></div>
+      <div class="grid two"><article class="panel"><div class="panel-title"><h3>最新告警</h3><button data-jump="alarms">查看全部</button></div><div id="latest-alarms"></div></article><article class="panel"><div class="panel-title"><h3>设备在线概况</h3></div><div class="donut-wrap"><div id="donut" class="donut"><span id="online-rate">0%</span></div><div class="legend"><p><i class="dot online"></i>在线 <b id="legend-online">0</b></p><p><i class="dot offline"></i>离线/疑似 <b id="legend-offline">0</b></p></div></div></article></div>
+    </section>
+
+    <section id="page-devices" class="page">
+      <div class="toolbar"><button id="new-device">注册设备</button><button class="secondary" id="refresh-devices">刷新</button></div>
+      <article class="panel table-wrap"><table><thead><tr><th>设备</th><th>产品</th><th>设备角色</th><th>所属关系</th><th>启用状态</th><th>运行状态</th><th>接入密钥</th><th>最后活跃</th><th>操作</th></tr></thead><tbody id="registry-table"></tbody></table></article>
+      <article class="panel discovered"><div class="panel-title"><h3>未注册设备</h3><small>仅显示已经上报过数据、但尚未纳入正式设备管理的设备</small></div><div class="table-wrap"><table><thead><tr><th>设备 ID</th><th>产品</th><th>业务状态</th><th>连接状态</th><th>数据状态</th><th>最后活跃</th><th>操作</th></tr></thead><tbody id="device-state-table"></tbody></table></div></article>
+    </section>
+
+    <section id="page-products" class="page">
+      <div class="workspace-grid"><article class="panel"><div class="panel-title"><h3>产品列表</h3><button id="new-product">新建产品</button></div><div id="product-list" class="card-list"></div></article>
+      <article class="panel"><div class="panel-title"><h3 id="product-form-title">新建产品</h3></div><form id="product-form" class="edit-form"><input name="id" type="hidden"><label>产品名称<input name="name" required placeholder="例如：智能烟感"></label><label>产品标识<input name="code" placeholder="留空自动生成"></label><label>设备分类<select name="category"><option value="smoke">烟雾探测器</option><option value="fire">火灾探测器</option><option value="water_pressure">水压传感器</option><option value="camera">摄像机</option><option value="gateway">边缘网关</option><option value="sensor">通用传感器</option><option value="video_ai">视频智能分析设备</option><option value="other">其他设备</option></select></label><label>协议包<select name="protocolPackageId" id="product-protocol" required></select></label><div class="form-row"><label>传输协议<select name="transport"><option value="MQTT">消息队列遥测传输</option><option value="HTTP">网页接口传输</option><option value="TCP">传输控制协议</option><option value="MODBUS_TCP">工业总线网络协议</option></select></label><label>数据格式<select name="payloadFormat"><option value="json">结构化文本</option><option value="hex">十六进制</option><option value="binary">二进制</option></select></label></div><label>产品状态<select name="status"><option value="ENABLED">已启用</option><option value="DISABLED">已停用</option><option value="DRAFT">草稿</option></select></label><label>说明<textarea name="description" rows="3"></textarea></label><button type="submit">保存产品</button></form></article></div>
+    </section>
+
+    <section id="page-protocols" class="page">
+      <div class="workspace-grid protocol-workspace"><article class="panel"><div class="panel-title"><h3>协议包版本</h3><button id="new-protocol">新建协议包</button></div><div id="protocol-list" class="card-list"></div></article>
+      <article class="panel"><div class="panel-title"><h3 id="protocol-form-title">协议包工作台</h3><span class="safe-note">受控解析器</span></div><form id="protocol-form" class="edit-form"><input name="id" type="hidden"><div class="form-row"><label>名称<input name="name" required placeholder="通用结构化数据传感器"></label><label>版本<input name="version" value="1.0.0" required></label></div><div class="form-row"><label>协议标识<input name="protocol" value="json"></label><label>传输方式<select name="transport"><option value="MQTT">消息队列遥测传输</option><option value="HTTP">网页接口传输</option><option value="TCP">传输控制协议</option><option value="MODBUS_TCP">工业总线网络协议</option></select></label></div><div class="form-row"><label>载荷格式<select name="payloadFormat"><option value="json">结构化文本</option><option value="hex">十六进制</option></select></label><label>解析器<select name="parserType"><option value="custom_json_parser">通用结构化数据</option><option value="fire_smoke_parser">烟感十六进制</option><option value="modbus_parser">工业总线寄存器</option></select></label></div><label>发布状态<select name="status"><option value="DRAFT">草稿</option><option value="PUBLISHED">已发布</option><option value="DISABLED">已停用</option></select></label><label>配置 JSON<textarea name="config" rows="5">{}</textarea></label><label>说明<textarea name="description" rows="2"></textarea></label><button type="submit">保存协议包</button></form><div class="protocol-test"><h4>解析调试</h4><textarea id="protocol-test-payload" rows="5">{"properties":{"temperature":26.5,"smoke":false},"tags":{"deviceType":"smoke"}}</textarea><button id="run-protocol-test" type="button">运行解析</button><pre id="protocol-test-result">选择或保存一个协议包后可进行调试。</pre></div></article></div>
+    </section>
+
+    <section id="page-integration" class="page">
+      <div class="grid two integration-grid"><article class="panel"><div class="panel-title"><h3>选择设备</h3><button data-jump="devices">管理设备</button></div><select id="integration-device" class="wide-select"></select><div id="connection-guide" class="guide"><p>选择已注册设备，查看 HTTP 与 MQTT 接入参数。</p></div></article>
+      <article class="panel"><div class="panel-title"><h3>在线数据调试</h3><span class="safe-note">通过管理端代发</span></div><label class="block-label">设备原始报文<textarea id="debug-payload" rows="12">{"payload":{"properties":{"temperature":88.5,"smoke":true,"battery":92},"tags":{"cityCode":"city_001","districtCode":"district_01","buildingId":"A","deviceType":"smoke"}}}</textarea></label><button id="send-debug-data">发送测试数据</button><pre id="debug-result">等待发送。</pre></article></div>
+      <div class="grid two integration-grid"><article class="panel table-wrap"><div class="panel-title"><h3>视频摄像机映射</h3><span class="safe-note">告警空间关联</span></div><table><thead><tr><th>摄像机</th><th>平台/项目</th><th>位置</th><th>关联设备</th><th>状态</th><th>操作</th></tr></thead><tbody id="camera-table"></tbody></table></article>
+      <article class="panel"><div class="panel-title"><h3 id="camera-form-title">新增摄像机映射</h3></div><form id="camera-form" class="edit-form"><div class="form-row"><label>摄像机 ID<input name="cameraId" required></label><label>摄像机名称<input name="cameraName" required></label></div><div class="form-row"><label>视频平台 ID<input name="videoPlatformId"></label><label>项目 ID<input name="projectId"></label></div><div class="form-row"><label>城市编码<input name="cityCode"></label><label>区县编码<input name="districtCode"></label></div><div class="form-row"><label>建筑<input name="building"></label><label>楼层<input name="floor"></label></div><label>区域 ID<input name="areaId" required></label><label>关联设备 ID（逗号分隔）<input name="relatedDeviceIds"></label><label>视频流地址<input name="streamUrl" type="url"></label><label class="check-label"><input name="enabled" type="checkbox" checked> 启用该摄像机</label><button type="submit">保存映射</button><button type="button" id="reset-camera" class="secondary">清空</button></form></article></div>
+    </section>
+
+    <section id="page-alarms" class="page"><div class="toolbar"><select id="alarm-status"><option value="">全部状态</option><option value="ACTIVE">活动中</option><option value="ACKED">已确认</option><option value="RECOVERED">已恢复</option><option value="CLOSED">已关闭</option><option value="SUPPRESSED">已抑制</option></select><select id="alarm-level"><option value="">全部等级</option><option value="CRITICAL">紧急</option><option value="HIGH">高</option><option value="MEDIUM">中</option><option value="LOW">低</option></select><button id="refresh-alarms">刷新</button></div><article class="panel table-wrap"><table><thead><tr><th>时间</th><th>设备/来源</th><th>告警类型</th><th>等级</th><th>状态</th><th>操作</th></tr></thead><tbody id="alarm-table"></tbody></table></article></section>
+    <section id="page-raw" class="page"><div class="toolbar raw-toolbar"><input id="raw-device" placeholder="设备 ID"><button id="refresh-raw">查询</button><button id="download-selected-raw" class="secondary" disabled>批量下载（0）</button><span id="raw-selection-hint">可勾选当前页报文，自动整合为压缩包</span></div><article class="panel table-wrap"><table><thead><tr><th><label class="batch-select"><input id="raw-select-all" type="checkbox"> 全选</label></th><th>接收时间</th><th>消息 ID</th><th>产品</th><th>设备</th><th>协议</th><th>大小</th><th>校验摘要</th><th>操作</th></tr></thead><tbody id="raw-table"></tbody></table></article></section>
+    <section id="page-rules" class="page"><div class="grid two"><article class="panel"><div class="panel-title"><h3>规则列表</h3><button id="new-rule">手动添加规则</button></div><div id="rule-list"></div></article><article class="panel"><div class="panel-title"><h3>AI 规则草稿</h3></div><textarea id="rule-prompt" rows="6" placeholder="例如：A 区烟感温度超过 80 度且烟雾为 true，触发高级别火警。"></textarea><button id="draft-rule">生成草稿</button><button id="use-rule-draft" class="secondary hidden">载入草稿并编辑</button><pre id="rule-result"></pre></article></div></section>
+    <section id="page-ai" class="page"><article class="panel chat"><div id="chat-log"><div class="assistant-msg">你好，我可以协助查询设备、告警、趋势和消防知识。AI 不会直接控制设备或修改规则。</div></div><form id="chat-form"><input id="chat-input" placeholder="输入运维问题…" autocomplete="off"><button>发送</button></form></article></section>
+  </main>
+</div>
+
+<dialog id="device-dialog"><form id="device-form" method="dialog" class="edit-form dialog-form"><div class="panel-title"><h3>注册设备</h3><button type="button" class="icon-button" data-close-dialog>×</button></div><input name="id" type="hidden"><label>设备名称<input name="name" required placeholder="A区 3 楼烟感 001"></label><label>设备标识<input name="code" placeholder="留空自动生成"></label><label>所属产品<select name="productId" id="device-product" required></select></label><div class="form-row"><label>设备角色<select name="deviceRole" id="device-role"><option value="DIRECT">直接设备</option><option value="GATEWAY">网关设备</option><option value="CHILD">子设备</option></select></label><label id="device-gateway-field">所属网关<select name="gatewayId" id="device-gateway"><option value="">请选择网关</option></select></label></div><label>设备状态<select name="status"><option value="ENABLED">已启用</option><option value="DISABLED">已停用</option></select></label><label>标签 JSON<textarea name="tags" rows="4">{"buildingId":"A","deviceType":"smoke"}</textarea></label><label>说明<textarea name="description" rows="2"></textarea></label><button type="submit">保存设备</button></form></dialog>
+<dialog id="credential-dialog"><div class="credential-box"><h3>设备凭证</h3><p class="warn-text">Secret 只显示这一次，请立即复制并安全保存。</p><label>Access Key<code id="credential-key"></code></label><label>Device Secret<code id="credential-secret"></code></label><button id="copy-credential">复制凭证</button><button class="secondary" data-close-credential>关闭</button></div></dialog>
+<dialog id="alarm-detail-dialog"><div class="detail-dialog"><div class="panel-title"><h3>告警详情</h3><button type="button" class="icon-button" data-close-alarm-detail>×</button></div><div id="alarm-detail"></div><button class="secondary" data-close-alarm-detail>关闭</button></div></dialog>
+<dialog id="raw-detail-dialog"><div class="detail-dialog"><div class="panel-title"><h3>原始报文详情</h3><button type="button" class="icon-button" data-close-raw-detail>×</button></div><div id="raw-detail"></div><button id="download-current-raw">下载该报文</button><button class="secondary" data-close-raw-detail>关闭</button></div></dialog>
+<dialog id="rule-dialog"><form id="rule-form" method="dialog" class="edit-form dialog-form"><div class="panel-title"><h3 id="rule-form-title">手动添加规则</h3><button type="button" class="icon-button" data-close-rule>×</button></div><input name="id" type="hidden"><label>规则名称<input name="name" required placeholder="高温烟雾告警"></label><div class="form-row"><label>告警类型<select name="alarmType" required><option value="FIRE_RISK">火灾风险</option><option value="FIRE">火灾告警</option><option value="SMOKE_DETECTED">检测到烟雾</option><option value="FLAME_DETECTED">检测到火焰</option><option value="HIGH_TEMPERATURE">温度过高</option><option value="DEVICE_OFFLINE">设备离线</option><option value="WATER_PRESSURE_LOW">水压过低</option><option value="WATER_LEVEL_ABNORMAL">水位异常</option><option value="ELECTRICAL_FIRE">电气火灾</option><option value="GAS_LEAK">可燃气体泄漏</option><option value="MANUAL_ALARM">手动报警</option></select></label><label>告警等级<select name="level"><option value="CRITICAL">紧急</option><option value="HIGH" selected>高</option><option value="MEDIUM">中</option><option value="LOW">低</option></select></label></div><div class="form-row"><label>所属产品（可选）<select name="productId" id="rule-product"></select></label><label>条件关系<select name="match"><option value="all">全部满足</option><option value="any">任一满足</option></select></label></div><label>Gengine 表达式（与条件 JSON 二选一）<textarea name="expression" rows="3" placeholder='Properties["temperature"] > 80 && Properties["smoke"] == true'></textarea></label><label>触发条件 JSON<textarea name="conditions" rows="6">[{"field":"temperature","operator":">","value":80}]</textarea></label><label>恢复条件 JSON<textarea name="recovery" rows="4">[{"field":"temperature","operator":"<=","value":70}]</textarea></label><div class="form-row"><label>持续秒数<input name="durationSeconds" type="number" min="0" value="0"></label><label class="check-label"><input name="enabled" type="checkbox" checked> 保存后立即启用</label></div><button type="submit">保存规则</button></form></dialog>
+<div id="toast"></div><script src="/mqtt-client.js" defer></script><script src="/app.js" defer></script>
+</body></html>

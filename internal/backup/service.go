@@ -1,0 +1,600 @@
+package backup
+
+import (
+	"archive/tar"
+	"compress/gzip"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
+)
+
+type Config struct {
+	PostgresDSN, BackupDir, BackupBucket, MinIOEndpoint, MinIOAccessKey, MinIOSecretKey string
+	MinIODREndpoint, MinIODRAccessKey, MinIODRSecretKey, ClickHouseURL, RedisAddr       string
+	RedisPassword, RedpandaAdminURL, WeaviateURL, ConfigPaths                           string
+	MinIOUseTLS, MinIODRUseTLS                                                          bool
+}
+
+type Artifact struct {
+	Component string `json:"component"`
+	Filename  string `json:"filename"`
+	ObjectKey string `json:"objectKey"`
+	SHA256    string `json:"sha256"`
+	Size      int64  `json:"size"`
+}
+
+type Manifest struct {
+	ID         string         `json:"id"`
+	Type       string         `json:"type"`
+	CreatedAt  time.Time      `json:"createdAt"`
+	Artifacts  []Artifact     `json:"artifacts"`
+	Components map[string]any `json:"components"`
+}
+
+type Service struct {
+	cfg       Config
+	pool      *pgxpool.Pool
+	store     *minio.Client
+	dr        *minio.Client
+	mu        sync.Mutex
+	success   atomic.Uint64
+	failed    atomic.Uint64
+	lastOK    atomic.Int64
+	lastError atomic.Value
+}
+
+func New(ctx context.Context, cfg Config) (*Service, error) {
+	if cfg.PostgresDSN == "" || cfg.MinIOEndpoint == "" {
+		return nil, fmt.Errorf("postgres and minio configuration are required")
+	}
+	pool, err := pgxpool.New(ctx, cfg.PostgresDSN)
+	if err != nil {
+		return nil, err
+	}
+	store, err := minio.New(cfg.MinIOEndpoint, &minio.Options{Creds: credentials.NewStaticV4(cfg.MinIOAccessKey, cfg.MinIOSecretKey, ""), Secure: cfg.MinIOUseTLS})
+	if err != nil {
+		pool.Close()
+		return nil, err
+	}
+	var dr *minio.Client
+	if cfg.MinIODREndpoint != "" {
+		dr, err = minio.New(cfg.MinIODREndpoint, &minio.Options{Creds: credentials.NewStaticV4(cfg.MinIODRAccessKey, cfg.MinIODRSecretKey, ""), Secure: cfg.MinIODRUseTLS})
+		if err != nil {
+			pool.Close()
+			return nil, err
+		}
+	}
+	if cfg.BackupDir == "" {
+		cfg.BackupDir = "./data/backups"
+	}
+	if cfg.BackupBucket == "" {
+		cfg.BackupBucket = "iot-backups"
+	}
+	return &Service{cfg: cfg, pool: pool, store: store, dr: dr}, nil
+}
+
+func (s *Service) Close() { s.pool.Close() }
+
+func (s *Service) Run(ctx context.Context, backupType string) (manifest Manifest, err error) {
+	if !s.mu.TryLock() {
+		return manifest, fmt.Errorf("a backup is already running")
+	}
+	defer s.mu.Unlock()
+	backupType = strings.ToUpper(backupType)
+	if backupType != "FULL" && backupType != "INCREMENTAL" {
+		return manifest, fmt.Errorf("backup type must be FULL or INCREMENTAL")
+	}
+	id := "backup_" + strings.ToLower(backupType) + "_" + time.Now().UTC().Format("20060102T150405.000Z")
+	manifest = Manifest{ID: id, Type: backupType, CreatedAt: time.Now().UTC(), Components: map[string]any{}}
+	_, _ = s.pool.Exec(ctx, `INSERT INTO backup_task(id,backup_type,status,started_at) VALUES($1,$2,'RUNNING',now()) ON CONFLICT DO NOTHING`, id, backupType)
+	defer func() {
+		if err != nil {
+			s.failed.Add(1)
+			s.lastError.Store(err.Error())
+			details, _ := json.Marshal(map[string]any{"error": err.Error(), "components": manifest.Components})
+			_, _ = s.pool.Exec(context.Background(), `UPDATE backup_task SET status='FAILED',details=$2,completed_at=now() WHERE id=$1`, id, details)
+		}
+	}()
+	dir := filepath.Join(s.cfg.BackupDir, id)
+	if err = os.MkdirAll(dir, 0o750); err != nil {
+		return manifest, err
+	}
+
+	if backupType == "FULL" {
+		if err = s.postgresDump(ctx, filepath.Join(dir, "postgres.dump")); err != nil {
+			return manifest, fmt.Errorf("postgres: %w", err)
+		}
+		manifest.Components["postgres"] = "full logical dump"
+	} else if exists("/sources/postgres-wal") {
+		if err = tarPaths(filepath.Join(dir, "postgres-wal.tar.gz"), []string{"/sources/postgres-wal"}); err != nil {
+			return manifest, fmt.Errorf("postgres wal: %w", err)
+		}
+		manifest.Components["postgres"] = "WAL archive"
+	}
+	if s.cfg.ClickHouseURL != "" {
+		count, clickErr := s.clickHouseExport(ctx, dir)
+		if clickErr != nil {
+			return manifest, fmt.Errorf("clickhouse: %w", clickErr)
+		}
+		manifest.Components["clickhouse"] = map[string]any{"format": "Native", "tables": count}
+	}
+	if s.cfg.RedisAddr != "" {
+		if err = s.redisSnapshot(ctx, filepath.Join(dir, "redis.rdb")); err != nil {
+			return manifest, fmt.Errorf("redis: %w", err)
+		}
+		manifest.Components["redis"] = "RDB snapshot; server AOF remains enabled"
+	}
+	if s.cfg.RedpandaAdminURL != "" {
+		if err = downloadJSON(ctx, strings.TrimRight(s.cfg.RedpandaAdminURL, "/")+"/v1/partitions", filepath.Join(dir, "redpanda-partitions.json")); err != nil {
+			return manifest, fmt.Errorf("redpanda inventory: %w", err)
+		}
+		manifest.Components["redpanda"] = "topic and partition inventory; messages retained by broker and raw archive"
+	}
+	if backupType == "FULL" {
+		paths := splitPaths(s.cfg.ConfigPaths)
+		if len(paths) > 0 {
+			if err = tarPaths(filepath.Join(dir, "platform-config.tar.gz"), paths); err != nil {
+				return manifest, fmt.Errorf("configuration: %w", err)
+			}
+			manifest.Components["configuration"] = paths
+		}
+	}
+	inv, invErr := s.minioInventory(ctx)
+	if invErr != nil {
+		return manifest, fmt.Errorf("minio inventory: %w", invErr)
+	}
+	if err = writeJSON(filepath.Join(dir, "minio-inventory.json"), inv); err != nil {
+		return manifest, err
+	}
+	manifest.Components["minio"] = map[string]any{"versioning": "enabled", "inventory": inv}
+	if s.cfg.WeaviateURL != "" {
+		if err = s.weaviateBackup(ctx, id); err != nil {
+			return manifest, fmt.Errorf("weaviate: %w", err)
+		}
+		manifest.Components["weaviate"] = "filesystem snapshot " + id
+	}
+
+	if err = s.ensureBucket(ctx, s.store, s.cfg.BackupBucket); err != nil {
+		return manifest, err
+	}
+	files, _ := filepath.Glob(filepath.Join(dir, "*"))
+	sort.Strings(files)
+	for _, path := range files {
+		if info, statErr := os.Stat(path); statErr != nil || info.IsDir() {
+			continue
+		}
+		artifact, uploadErr := s.uploadAndVerify(ctx, id, path)
+		if uploadErr != nil {
+			return manifest, uploadErr
+		}
+		manifest.Artifacts = append(manifest.Artifacts, artifact)
+	}
+	if s.dr != nil {
+		stats, syncErr := s.replicateMinIO(ctx)
+		if syncErr != nil {
+			return manifest, fmt.Errorf("minio DR replication: %w", syncErr)
+		}
+		manifest.Components["minioDR"] = stats
+	}
+	manifestPath := filepath.Join(dir, "manifest.json")
+	if err = writeJSON(manifestPath, manifest); err != nil {
+		return manifest, err
+	}
+	manifestArtifact, err := s.uploadAndVerify(ctx, id, manifestPath)
+	if err != nil {
+		return manifest, err
+	}
+	manifest.Artifacts = append(manifest.Artifacts, manifestArtifact)
+	// The first replication pass covers every data artifact. Run a second
+	// incremental pass so the final manifest, including DR statistics, is also
+	// available at the recovery site.
+	if s.dr != nil {
+		if _, syncErr := s.replicateMinIO(ctx); syncErr != nil {
+			return manifest, fmt.Errorf("minio DR manifest replication: %w", syncErr)
+		}
+	}
+	details, _ := json.Marshal(manifest)
+	_, err = s.pool.Exec(ctx, `UPDATE backup_task SET status='COMPLETED',object_key=$2,checksum=$3,details=$4,completed_at=now() WHERE id=$1`, id, manifestArtifact.ObjectKey, manifestArtifact.SHA256, details)
+	if err != nil {
+		return manifest, err
+	}
+	s.success.Add(1)
+	s.lastOK.Store(time.Now().Unix())
+	return manifest, nil
+}
+
+func (s *Service) Verify(ctx context.Context, backupID string) (map[string]any, error) {
+	if backupID == "" || backupID == "latest" {
+		if err := s.pool.QueryRow(ctx, `SELECT id FROM backup_task WHERE status='COMPLETED' AND backup_type IN ('FULL','INCREMENTAL') ORDER BY completed_at DESC LIMIT 1`).Scan(&backupID); err != nil {
+			return nil, err
+		}
+	}
+	drillID := "drill_" + time.Now().UTC().Format("20060102T150405.000Z")
+	_, _ = s.pool.Exec(ctx, `INSERT INTO backup_task(id,backup_type,status,started_at) VALUES($1,'RESTORE_DRILL','RUNNING',now())`, drillID)
+	key := "backup/" + backupID + "/manifest.json"
+	object, err := s.store.GetObject(ctx, s.cfg.BackupBucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, err
+	}
+	defer object.Close()
+	var manifest Manifest
+	if err = json.NewDecoder(object).Decode(&manifest); err != nil {
+		return nil, err
+	}
+	checked := 0
+	for _, artifact := range manifest.Artifacts {
+		if artifact.Filename == "manifest.json" {
+			continue
+		}
+		obj, getErr := s.store.GetObject(ctx, s.cfg.BackupBucket, artifact.ObjectKey, minio.GetObjectOptions{})
+		if getErr != nil {
+			err = getErr
+			break
+		}
+		h := sha256.New()
+		_, copyErr := io.Copy(h, obj)
+		obj.Close()
+		if copyErr != nil || hex.EncodeToString(h.Sum(nil)) != artifact.SHA256 {
+			err = fmt.Errorf("checksum mismatch: %s", artifact.Filename)
+			break
+		}
+		checked++
+	}
+	status := "COMPLETED"
+	if err != nil {
+		status = "FAILED"
+	}
+	details, _ := json.Marshal(map[string]any{"backupId": backupID, "artifactsChecked": checked, "error": errorString(err)})
+	_, _ = s.pool.Exec(ctx, `UPDATE backup_task SET status=$2,details=$3,completed_at=now() WHERE id=$1`, drillID, status, details)
+	return map[string]any{"drillId": drillID, "backupId": backupID, "status": status, "artifactsChecked": checked}, err
+}
+
+func (s *Service) Metrics() string {
+	lastError, _ := s.lastError.Load().(string)
+	return fmt.Sprintf("# TYPE backup_success_total counter\nbackup_success_total %d\n# TYPE backup_failed_total counter\nbackup_failed_total %d\n# TYPE backup_last_success_timestamp_seconds gauge\nbackup_last_success_timestamp_seconds %d\n# backup_last_error %q\n", s.success.Load(), s.failed.Load(), s.lastOK.Load(), lastError)
+}
+
+func (s *Service) postgresDump(ctx context.Context, path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, env("PG_DUMP_BIN", "pg_dump"), "--format=custom", "--no-owner", "--dbname", s.cfg.PostgresDSN)
+	cmd.Stdout, cmd.Stderr = f, os.Stderr
+	runErr := cmd.Run()
+	closeErr := f.Close()
+	if runErr != nil {
+		return runErr
+	}
+	return closeErr
+}
+
+func (s *Service) redisSnapshot(ctx context.Context, path string) error {
+	host, port := splitHostPort(s.cfg.RedisAddr, "6379")
+	args := []string{"-h", host, "-p", port}
+	if s.cfg.RedisPassword != "" {
+		args = append(args, "-a", s.cfg.RedisPassword, "--no-auth-warning")
+	}
+	args = append(args, "--rdb", path)
+	cmd := exec.CommandContext(ctx, env("REDIS_CLI_BIN", "redis-cli"), args...)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	return cmd.Run()
+}
+
+func (s *Service) clickHouseExport(ctx context.Context, dir string) (int, error) {
+	tables, err := s.clickQuery(ctx, "SELECT name FROM system.tables WHERE database = currentDatabase() AND is_temporary = 0 AND engine NOT IN ('View','MaterializedView') FORMAT TabSeparated")
+	if err != nil {
+		return 0, err
+	}
+	names := strings.Fields(string(tables))
+	schema := map[string]string{}
+	for _, table := range names {
+		ddl, queryErr := s.clickQuery(ctx, "SHOW CREATE TABLE `"+strings.ReplaceAll(table, "`", "``")+"`")
+		if queryErr != nil {
+			return 0, queryErr
+		}
+		schema[table] = string(ddl)
+		data, queryErr := s.clickQuery(ctx, "SELECT * FROM `"+strings.ReplaceAll(table, "`", "``")+"` FORMAT Native")
+		if queryErr != nil {
+			return 0, queryErr
+		}
+		if err = os.WriteFile(filepath.Join(dir, "clickhouse-"+safeName(table)+".native"), data, 0o600); err != nil {
+			return 0, err
+		}
+	}
+	return len(names), writeJSON(filepath.Join(dir, "clickhouse-schema.json"), schema)
+}
+
+func (s *Service) clickQuery(ctx context.Context, query string) ([]byte, error) {
+	u, err := url.Parse(s.cfg.ClickHouseURL)
+	if err != nil {
+		return nil, err
+	}
+	user := u.User
+	u.User = nil
+	q := u.Query()
+	q.Set("query", query)
+	u.RawQuery = q.Encode()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), nil)
+	if user != nil {
+		password, _ := user.Password()
+		req.SetBasicAuth(user.Username(), password)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return nil, readErr
+	}
+	if resp.StatusCode/100 != 2 {
+		return nil, fmt.Errorf("clickhouse HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	return data, nil
+}
+
+func (s *Service) minioInventory(ctx context.Context) (map[string]any, error) {
+	buckets, err := s.store.ListBuckets(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := map[string]any{}
+	for _, bucket := range buckets {
+		_ = s.store.SetBucketVersioning(ctx, bucket.Name, minio.BucketVersioningConfiguration{Status: "Enabled"})
+		var count, size int64
+		for object := range s.store.ListObjects(ctx, bucket.Name, minio.ListObjectsOptions{Recursive: true}) {
+			if object.Err != nil {
+				return nil, object.Err
+			}
+			count++
+			size += object.Size
+		}
+		result[bucket.Name] = map[string]int64{"objects": count, "bytes": size}
+	}
+	return result, nil
+}
+
+func (s *Service) replicateMinIO(ctx context.Context) (map[string]int64, error) {
+	buckets, err := s.store.ListBuckets(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var copied, skipped int64
+	for _, bucket := range buckets {
+		if err = s.ensureBucket(ctx, s.dr, bucket.Name); err != nil {
+			return nil, err
+		}
+		_ = s.dr.SetBucketVersioning(ctx, bucket.Name, minio.BucketVersioningConfiguration{Status: "Enabled"})
+		for item := range s.store.ListObjects(ctx, bucket.Name, minio.ListObjectsOptions{Recursive: true}) {
+			if item.Err != nil {
+				return nil, item.Err
+			}
+			if dst, statErr := s.dr.StatObject(ctx, bucket.Name, item.Key, minio.StatObjectOptions{}); statErr == nil && dst.Size == item.Size && dst.ETag == item.ETag {
+				skipped++
+				continue
+			}
+			obj, getErr := s.store.GetObject(ctx, bucket.Name, item.Key, minio.GetObjectOptions{})
+			if getErr != nil {
+				return nil, getErr
+			}
+			_, putErr := s.dr.PutObject(ctx, bucket.Name, item.Key, obj, item.Size, minio.PutObjectOptions{ContentType: item.ContentType})
+			obj.Close()
+			if putErr != nil {
+				return nil, putErr
+			}
+			copied++
+		}
+	}
+	return map[string]int64{"copied": copied, "unchanged": skipped}, nil
+}
+
+func (s *Service) weaviateBackup(ctx context.Context, id string) error {
+	endpoint := strings.TrimRight(s.cfg.WeaviateURL, "/") + "/v1/backups/filesystem"
+	body := strings.NewReader(fmt.Sprintf(`{"id":%q}`, id))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, body)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		data, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, data)
+	}
+	return nil
+}
+
+func (s *Service) uploadAndVerify(ctx context.Context, id, path string) (Artifact, error) {
+	checksum, size, err := hashFile(path)
+	if err != nil {
+		return Artifact{}, err
+	}
+	filename := filepath.Base(path)
+	key := "backup/" + id + "/" + filename
+	_, err = s.store.FPutObject(ctx, s.cfg.BackupBucket, key, path, minio.PutObjectOptions{ContentType: "application/octet-stream", UserMetadata: map[string]string{"sha256": checksum}})
+	if err != nil {
+		return Artifact{}, err
+	}
+	obj, err := s.store.GetObject(ctx, s.cfg.BackupBucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		return Artifact{}, err
+	}
+	h := sha256.New()
+	n, err := io.Copy(h, obj)
+	obj.Close()
+	if err != nil || n != size || hex.EncodeToString(h.Sum(nil)) != checksum {
+		return Artifact{}, fmt.Errorf("uploaded object verification failed: %s", filename)
+	}
+	return Artifact{Component: componentName(filename), Filename: filename, ObjectKey: key, SHA256: checksum, Size: size}, nil
+}
+
+func (s *Service) ensureBucket(ctx context.Context, client *minio.Client, bucket string) error {
+	exists, err := client.BucketExists(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return client.MakeBucket(ctx, bucket, minio.MakeBucketOptions{})
+	}
+	return nil
+}
+
+func tarPaths(target string, paths []string) error {
+	f, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	gz := gzip.NewWriter(f)
+	tw := tar.NewWriter(gz)
+	for _, root := range paths {
+		root = strings.TrimSpace(root)
+		if root == "" || !exists(root) {
+			continue
+		}
+		base := filepath.Base(root)
+		err = filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				return nil
+			}
+			header, headerErr := tar.FileInfoHeader(info, "")
+			if headerErr != nil {
+				return headerErr
+			}
+			rel, _ := filepath.Rel(root, path)
+			header.Name = filepath.ToSlash(filepath.Join(base, rel))
+			if headerErr = tw.WriteHeader(header); headerErr != nil || info.IsDir() {
+				return headerErr
+			}
+			in, openErr := os.Open(path)
+			if openErr != nil {
+				return openErr
+			}
+			_, copyErr := io.Copy(tw, in)
+			in.Close()
+			return copyErr
+		})
+		if err != nil {
+			break
+		}
+	}
+	closeErr := tw.Close()
+	if err == nil {
+		err = closeErr
+	}
+	closeErr = gz.Close()
+	if err == nil {
+		err = closeErr
+	}
+	closeErr = f.Close()
+	if err == nil {
+		err = closeErr
+	}
+	return err
+}
+
+func downloadJSON(ctx context.Context, endpoint, path string) error {
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	var parsed any
+	if err = json.Unmarshal(data, &parsed); err != nil {
+		return err
+	}
+	return writeJSON(path, parsed)
+}
+func writeJSON(path string, value any) error {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
+}
+func hashFile(path string) (string, int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	n, err := io.Copy(h, f)
+	return hex.EncodeToString(h.Sum(nil)), n, err
+}
+func exists(path string) bool { _, err := os.Stat(path); return err == nil }
+func splitPaths(value string) []string {
+	var out []string
+	for _, v := range strings.Split(value, ",") {
+		if strings.TrimSpace(v) != "" {
+			out = append(out, strings.TrimSpace(v))
+		}
+	}
+	return out
+}
+func splitHostPort(value, defaultPort string) (string, string) {
+	parts := strings.Split(value, ":")
+	if len(parts) == 1 {
+		return parts[0], defaultPort
+	}
+	return strings.Join(parts[:len(parts)-1], ":"), parts[len(parts)-1]
+}
+func safeName(value string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
+			return r
+		}
+		return '_'
+	}, value)
+}
+func componentName(filename string) string {
+	if i := strings.Index(filename, "-"); i > 0 {
+		return filename[:i]
+	}
+	if i := strings.Index(filename, "."); i > 0 {
+		return filename[:i]
+	}
+	return filename
+}
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+func env(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
+}

@@ -1,0 +1,6 @@
+.env
+data/
+.e2e/
+*.exe
+*.log
+coverage.out
