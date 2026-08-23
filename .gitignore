@@ -6,5 +6,3 @@ data/
 coverage.out
 frontend/node_modules/
 frontend/dist/
-upstream/deepseek-harness/
-upstream/deepseek-harness.revision
