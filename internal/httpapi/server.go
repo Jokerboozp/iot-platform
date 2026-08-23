@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -66,6 +67,7 @@ func (s *Server) routes() {
 	s.router.GET("/api/v1/integrations/video/cameras", s.authorize("viewer"), s.endpoint(s.videoCameras))
 	s.router.POST("/api/v1/integrations/video/cameras", s.authorize("operator"), s.endpoint(s.saveVideoCamera))
 	s.router.PUT("/api/v1/integrations/video/cameras/:id", s.authorize("operator"), s.endpoint(s.saveVideoCamera, "id"))
+	s.router.POST("/api/v1/integrations/video/cameras/:id/preview", s.authorize("viewer"), s.endpoint(s.previewVideoCamera, "id"))
 	s.router.POST("/api/v1/device-ingest/:deviceId", s.endpoint(s.deviceIngest, "deviceId"))
 	s.router.GET("/api/v1/products", s.authorize("viewer"), s.endpoint(s.products))
 	s.router.POST("/api/v1/products", s.authorize("operator"), s.endpoint(s.saveProduct))
@@ -100,7 +102,11 @@ func (s *Server) routes() {
 	s.router.GET("/api/v1/alarms/:id", s.authorize("viewer"), s.endpoint(s.alarm, "id"))
 	s.router.POST("/api/v1/alarms/:id/actions", s.authorize("operator"), s.endpoint(s.alarmAction, "id"))
 	s.router.GET("/api/v1/ai/alarm-analysis/:alarmId", s.authorize("viewer"), s.endpoint(s.aiAnalysis, "alarmId"))
+	s.router.GET("/api/v1/ai/providers", s.authorize("viewer"), s.endpoint(s.aiProviders))
+	s.router.POST("/api/v1/ai/providers/test", s.authorize("admin"), s.endpoint(s.testAIProvider))
+	s.router.GET("/api/v1/ai/workflows", s.authorize("viewer"), s.endpoint(s.aiWorkflows))
 	s.router.POST("/api/v1/ai/chat", s.authorize("viewer"), s.endpoint(s.aiChat))
+	s.router.POST("/api/v1/ai/chat/stream", s.authorize("viewer"), s.endpoint(s.aiChatStream))
 	s.router.POST("/api/v1/ai/rule-draft", s.authorize("operator"), s.endpoint(s.aiRuleDraft))
 	s.router.POST("/api/v1/ai/reports", s.authorize("viewer"), s.endpoint(s.aiReport))
 	s.router.POST("/api/v1/knowledge/documents", s.authorize("operator"), s.endpoint(s.knowledgeUpload))
@@ -112,6 +118,8 @@ func (s *Server) routes() {
 	s.router.GET("/mcp", s.authorize("viewer"), mcpHandler)
 	s.router.POST("/mcp", s.authorize("viewer"), mcpHandler)
 	s.router.DELETE("/mcp", s.authorize("viewer"), mcpHandler)
+	harnessMCPHandler := gin.WrapH(mcpserver.NewHarness(s.engine))
+	s.router.POST("/mcp/harness", s.authorizeHarness(), harnessMCPHandler)
 	s.router.NoRoute(func(c *gin.Context) { ginProblem(c, http.StatusNotFound, "route not found") })
 	s.router.NoMethod(func(c *gin.Context) { ginProblem(c, http.StatusMethodNotAllowed, "method not allowed") })
 }
@@ -933,18 +941,186 @@ func (s *Server) alarmAction(w http.ResponseWriter, r *http.Request) {
 	write(w, 200, v)
 }
 func (s *Server) aiAnalysis(w http.ResponseWriter, r *http.Request) {
-	v, err := s.engine.Repo.GetAIAnalysis(r.Context(), r.PathValue("alarmId"))
+	v, err := s.engine.Repo.GetAIAnalysis(r.Context(), claims(r).TenantID, r.PathValue("alarmId"))
 	if err != nil {
 		problem(w, 404, "analysis not found or still pending")
 		return
 	}
 	write(w, 200, v)
 }
-func (s *Server) aiChat(w http.ResponseWriter, r *http.Request) {
+func (s *Server) aiProviders(w http.ResponseWriter, r *http.Request) {
+	items := []ports.AIPluginInfo{}
+	if s.engine.AIPlugins != nil {
+		items = s.engine.AIPlugins.List()
+	}
+	for index := range items {
+		if claims(r).Role != "admin" {
+			items[index].DefaultBaseURL = ""
+		} else if items[index].ID == "ollama" {
+			items[index].DefaultBaseURL = s.cfg.AITestOllamaURL
+		}
+	}
+	active := ports.AIPluginInfo{ID: "disabled", Name: "未启用", Enabled: false}
+	if provider, ok := s.engine.AI.(ports.AIInspectable); ok {
+		active = provider.ProviderInfo()
+	}
+	healthy := false
+	healthMessage := "AI provider is disabled"
+	if active.Enabled && s.engine.AI != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+		if err := s.engine.AI.Health(ctx); err != nil {
+			healthMessage = "连接异常"
+			if s.log != nil {
+				s.log.Warn("AI provider health check failed", "provider", active.ID, "model", active.Model, "error", err)
+			}
+		} else {
+			healthy = true
+			healthMessage = "连接正常"
+		}
+	}
+	active.DefaultBaseURL = ""
+	write(w, 200, map[string]any{"items": items, "active": active, "healthy": healthy, "healthMessage": healthMessage, "mode": "plugin-harness"})
+}
+func (s *Server) testAIProvider(w http.ResponseWriter, r *http.Request) {
 	var in struct {
+		ports.AIPluginConfig
 		Question string `json:"question"`
 	}
 	if decode(w, r, &in) != nil {
+		return
+	}
+	if s.engine.AIPlugins == nil {
+		problem(w, 503, "AI plugin registry is unavailable")
+		return
+	}
+	if strings.TrimSpace(in.Question) == "" {
+		in.Question = "请用一句话说明你已经连接到消防物联网 AI 测试台。"
+	}
+	if len([]rune(in.Question)) > 2000 {
+		problem(w, 422, "question is too long")
+		return
+	}
+	baseURL := strings.TrimSpace(in.BaseURL)
+	if baseURL == "" {
+		baseURL = map[string]string{"deepseek": "https://api.deepseek.com", "ollama": s.cfg.AITestOllamaURL}[strings.ToLower(in.Provider)]
+	}
+	if !originAllowed(baseURL, s.cfg.AITestOrigins) {
+		problem(w, 422, "AI provider origin is not allowed for online testing")
+		return
+	}
+	in.BaseURL = baseURL
+	client, err := s.engine.AIPlugins.Create(in.AIPluginConfig)
+	if err != nil {
+		problem(w, 422, err.Error())
+		return
+	}
+	info := ports.AIPluginInfo{ID: in.Provider, Model: in.Model}
+	if provider, ok := client.(ports.AIInspectable); ok {
+		info = provider.ProviderInfo()
+	}
+	if !info.Enabled {
+		problem(w, 422, "select an enabled AI provider plugin")
+		return
+	}
+	traceID := "ai_trace_" + randomHex(10)
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+	answer, callErr := client.Chat(ctx, claims(r).TenantID, in.Question)
+	latency := time.Since(started).Milliseconds()
+	audit := model.AIToolCallLog{ID: traceID, TenantID: claims(r).TenantID, Actor: claims(r).Username, Tool: "ai.provider.test", Input: map[string]any{"provider": info.ID, "model": info.Model, "questionLength": len([]rune(in.Question))}, Success: callErr == nil, CreatedAt: time.Now().UnixMilli()}
+	result := map[string]any{"traceId": traceID, "success": callErr == nil, "provider": info.ID, "providerName": info.Name, "model": info.Model, "latencyMs": latency}
+	if callErr != nil {
+		errorCode, publicError := safeProviderTestError(callErr)
+		audit.Error = errorCode
+		result["errorCode"] = errorCode
+		result["error"] = publicError
+	} else {
+		audit.Output = map[string]any{"answerLength": len([]rune(answer)), "latencyMs": latency}
+		result["answer"] = answer
+	}
+	auditCtx, auditCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 3*time.Second)
+	defer auditCancel()
+	if auditErr := s.engine.Repo.SaveAIToolCall(auditCtx, audit); auditErr != nil {
+		if s.log != nil {
+			s.log.Error("persist AI provider test audit", "traceId", traceID, "error", auditErr)
+		}
+		problem(w, 500, "AI provider test completed but its audit trace could not be persisted")
+		return
+	}
+	write(w, 200, result)
+}
+func safeProviderTestError(err error) (string, string) {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "AI_PROVIDER_TIMEOUT", "AI provider 请求超时，请检查服务状态后重试"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "AI_PROVIDER_CANCELED", "AI provider 请求已取消"
+	}
+	return "AI_PROVIDER_REQUEST_FAILED", "AI provider 请求失败，请检查地址、凭据、模型和服务状态"
+}
+func normalizedOrigin(rawURL string) (string, bool) {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Hostname() == "" || u.User != nil {
+		return "", false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", false
+	}
+	host := strings.ToLower(u.Hostname())
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	port := u.Port()
+	if port == "80" && scheme == "http" || port == "443" && scheme == "https" {
+		port = ""
+	}
+	if port != "" {
+		host += ":" + port
+	}
+	return scheme + "://" + host, true
+}
+func originAllowed(rawURL string, allowed []string) bool {
+	origin, ok := normalizedOrigin(rawURL)
+	if !ok {
+		return false
+	}
+	for _, candidate := range allowed {
+		allowedOrigin, valid := normalizedOrigin(candidate)
+		if valid && allowedOrigin == origin {
+			return true
+		}
+	}
+	return false
+}
+func (s *Server) aiChat(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Question       string `json:"question"`
+		Workflow       string `json:"workflow,omitempty"`
+		WorkflowID     string `json:"workflowId,omitempty"`
+		ConversationID string `json:"conversationId,omitempty"`
+		Model          string `json:"model,omitempty"`
+		MaxTokens      int    `json:"maxTokens,omitempty"`
+	}
+	if decode(w, r, &in) != nil {
+		return
+	}
+	if s.engine.AIWorkflows != nil {
+		workflowID := in.WorkflowID
+		if workflowID == "" {
+			workflowID = in.Workflow
+		}
+		result, err := s.runAIWorkflow(r.Context(), claims(r), in.Question, workflowID, in.ConversationID, in.Model, in.MaxTokens, nil)
+		if err != nil {
+			if s.log != nil {
+				s.log.Warn("run AI workflow failed", "error", err)
+			}
+			problem(w, 502, "AI workflow request failed")
+			return
+		}
+		write(w, 200, result)
 		return
 	}
 	answer, err := s.engine.OpsChat(r.Context(), claims(r).TenantID, in.Question)
@@ -953,6 +1129,178 @@ func (s *Server) aiChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	write(w, 200, map[string]string{"answer": answer})
+}
+
+func (s *Server) aiWorkflows(w http.ResponseWriter, r *http.Request) {
+	if s.engine.AIWorkflows == nil {
+		write(w, 200, map[string]any{"items": []ports.AIWorkflowPlugin{}, "count": 0, "configured": false, "mode": "local", "healthy": false, "healthMessage": "AI workflow harness is not configured"})
+		return
+	}
+	items, err := s.engine.AIWorkflows.ListWorkflows(r.Context())
+	if err != nil {
+		if s.log != nil {
+			s.log.Warn("list AI workflows failed", "error", err)
+		}
+		write(w, 200, map[string]any{"items": []ports.AIWorkflowPlugin{}, "count": 0, "configured": true, "mode": "harness", "healthy": false, "healthMessage": "AI workflow harness is unavailable"})
+		return
+	}
+	write(w, 200, map[string]any{"items": items, "count": len(items), "configured": true, "mode": "harness", "healthy": true, "healthMessage": "AI workflow harness is reachable"})
+}
+
+func (s *Server) aiChatStream(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Question       string `json:"question"`
+		Workflow       string `json:"workflow,omitempty"`
+		WorkflowID     string `json:"workflowId,omitempty"`
+		ConversationID string `json:"conversationId,omitempty"`
+		Model          string `json:"model,omitempty"`
+		MaxTokens      int    `json:"maxTokens,omitempty"`
+	}
+	if decode(w, r, &in) != nil {
+		return
+	}
+	if s.engine.AIWorkflows == nil {
+		problem(w, http.StatusServiceUnavailable, "AI workflow harness is not configured")
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		problem(w, http.StatusInternalServerError, "streaming is not supported")
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	workflowID := in.WorkflowID
+	if workflowID == "" {
+		workflowID = in.Workflow
+	}
+	terminal := false
+	result, err := s.runAIWorkflow(r.Context(), claims(r), in.Question, workflowID, in.ConversationID, in.Model, in.MaxTokens, func(event ports.AIWorkflowEvent) error {
+		if event.Type == "run.completed" || event.Type == "run.failed" {
+			terminal = true
+		}
+		event = sanitizeWorkflowEvent(event)
+		if err := writeWorkflowSSE(w, event); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return r.Context().Err()
+	})
+	if err != nil {
+		if r.Context().Err() == nil && !terminal {
+			_ = writeWorkflowSSE(w, ports.AIWorkflowEvent{Type: "run.failed", RunID: result.RunID, Code: "workflow_failed", Message: "AI workflow request failed"})
+			flusher.Flush()
+		}
+		return
+	}
+	if !terminal {
+		_ = writeWorkflowSSE(w, ports.AIWorkflowEvent{Type: "run.completed", RunID: result.RunID, WorkflowID: result.WorkflowID, Model: result.Model, Answer: result.Answer})
+		flusher.Flush()
+	}
+}
+
+func (s *Server) runAIWorkflow(ctx context.Context, c auth.Claims, question, workflowID, conversationID, modelName string, maxTokens int, emit func(ports.AIWorkflowEvent) error) (ports.AIWorkflowResult, error) {
+	question = strings.TrimSpace(question)
+	if question == "" {
+		return ports.AIWorkflowResult{}, errors.New("question is required")
+	}
+	if len(question) > 8000 {
+		return ports.AIWorkflowResult{}, errors.New("question exceeds 8000 bytes")
+	}
+	runID := "ai_run_" + randomHex(10)
+	if conversationID == "" {
+		conversationID = runID
+	}
+	conversationID = harnessConversationID(c.TenantID, c.Username, conversationID)
+	if maxTokens <= 0 {
+		maxTokens = 2048
+	}
+	if maxTokens > 8192 {
+		maxTokens = 8192
+	}
+	mcpToken, err := s.auth.IssueHarness(c.Username, c.TenantID, runID, auth.HarnessReadScopes(), 2*time.Minute)
+	if err != nil {
+		return ports.AIWorkflowResult{RunID: runID}, fmt.Errorf("issue harness token: %w", err)
+	}
+	result, err := s.engine.AIWorkflows.StreamChat(ctx, ports.AIWorkflowRequest{RunID: runID, ConversationID: strings.TrimSpace(conversationID), WorkflowID: strings.TrimSpace(workflowID), Question: question, Model: strings.TrimSpace(modelName), MaxTokens: maxTokens, MCPToken: mcpToken}, emit)
+	if result.RunID == "" {
+		result.RunID = runID
+	}
+	return result, err
+}
+
+func harnessConversationID(tenantID, username, conversationID string) string {
+	sum := sha256.Sum256([]byte(tenantID + "\x00" + username + "\x00" + conversationID))
+	return "conv_" + hex.EncodeToString(sum[:])
+}
+
+func sanitizeWorkflowEvent(event ports.AIWorkflowEvent) ports.AIWorkflowEvent {
+	event.Data = sanitizeWorkflowData(event.Data)
+	return event
+}
+
+func sanitizeWorkflowData(data map[string]any) map[string]any {
+	if data == nil {
+		return nil
+	}
+	out := make(map[string]any, len(data))
+	for key, value := range data {
+		canonicalKey := strings.NewReplacer("_", "", "-", "").Replace(strings.ToLower(key))
+		if canonicalKey == "conversationid" || canonicalKey == "sessionid" || canonicalKey == "authorization" || canonicalKey == "apikey" ||
+			strings.HasSuffix(canonicalKey, "token") || strings.Contains(canonicalKey, "secret") || strings.Contains(canonicalKey, "password") ||
+			strings.Contains(canonicalKey, "credential") || strings.Contains(canonicalKey, "cookie") {
+			continue
+		}
+		out[key] = sanitizeWorkflowValue(value)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func sanitizeWorkflowValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return sanitizeWorkflowData(typed)
+	case []any:
+		items := make([]any, len(typed))
+		for i, item := range typed {
+			items[i] = sanitizeWorkflowValue(item)
+		}
+		return items
+	default:
+		return value
+	}
+}
+
+func writeWorkflowSSE(w io.Writer, event ports.AIWorkflowEvent) error {
+	if !allowedWorkflowEvent(event.Type) {
+		return fmt.Errorf("unsupported workflow event type %q", event.Type)
+	}
+	b, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	if len(b) > 64<<10 {
+		return errors.New("workflow event exceeds 64 KiB")
+	}
+	_, err = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Type, b)
+	return err
+}
+
+func allowedWorkflowEvent(eventType string) bool {
+	switch eventType {
+	case "run.started", "text.delta", "tool.started", "tool.completed", "run.completed", "run.failed":
+		return true
+	default:
+		return false
+	}
 }
 func (s *Server) aiRuleDraft(w http.ResponseWriter, r *http.Request) {
 	var in struct {
@@ -1184,6 +1532,16 @@ func (s *Server) videoCameras(w http.ResponseWriter, r *http.Request) {
 		problem(w, 500, err.Error())
 		return
 	}
+	canConfigure := claims(r).Role == "admin" || claims(r).Role == "operator"
+	for index := range items {
+		items[index].StreamConfigured = strings.TrimSpace(items[index].StreamURL) != ""
+		streamType, streamErr := resolveBrowserStreamType(items[index].StreamURL, items[index].StreamType)
+		browserType := streamType == "hls" || streamType == "mp4" || streamType == "webm" || streamType == "native"
+		items[index].PreviewEligible = items[index].Enabled && streamErr == nil && browserType && streamOriginAllowed(items[index].StreamURL, s.cfg.VideoPreviewOrigins)
+		if !canConfigure {
+			items[index].StreamURL = ""
+		}
+	}
 	write(w, 200, map[string]any{"items": items, "count": len(items)})
 }
 func (s *Server) saveVideoCamera(w http.ResponseWriter, r *http.Request) {
@@ -1200,6 +1558,14 @@ func (s *Server) saveVideoCamera(w http.ResponseWriter, r *http.Request) {
 		problem(w, 422, "cameraId, cameraName and areaId are required")
 		return
 	}
+	if v.StreamURL != "" {
+		streamType, streamErr := resolveBrowserStreamType(v.StreamURL, v.StreamType)
+		if streamErr != nil {
+			problem(w, 422, streamErr.Error())
+			return
+		}
+		v.StreamType = streamType
+	}
 	v.UpdatedAt = time.Now().UnixMilli()
 	if err := s.engine.Repo.SaveVideoCameraMapping(r.Context(), v); err != nil {
 		problem(w, 500, err.Error())
@@ -1207,6 +1573,108 @@ func (s *Server) saveVideoCamera(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, "video.camera.save", "video-camera", v.CameraID, map[string]any{"areaId": v.AreaID, "enabled": v.Enabled})
 	write(w, map[bool]int{true: 200, false: 201}[r.Method == http.MethodPut], v)
+}
+func (s *Server) previewVideoCamera(w http.ResponseWriter, r *http.Request) {
+	v, err := s.engine.Repo.GetVideoCameraMapping(r.Context(), claims(r).TenantID, r.PathValue("id"))
+	if err != nil {
+		problem(w, 404, "camera not found")
+		return
+	}
+	if !v.Enabled {
+		problem(w, 422, "camera is disabled")
+		return
+	}
+	if !streamOriginAllowed(v.StreamURL, s.cfg.VideoPreviewOrigins) {
+		problem(w, 422, "camera stream origin is not allowlisted for browser preview")
+		return
+	}
+	streamType, err := resolveBrowserStreamType(v.StreamURL, v.StreamType)
+	if err != nil {
+		problem(w, 422, err.Error())
+		return
+	}
+	if streamType == "rtsp" || streamType == "rtmp" || streamType == "webrtc" {
+		problem(w, 422, "browser preview requires an HLS, MP4 or WebM stream; convert RTSP/RTMP/WebRTC through a media gateway first")
+		return
+	}
+	write(w, 200, map[string]any{"cameraId": v.CameraID, "cameraName": v.CameraName, "playbackUrl": v.StreamURL, "streamType": streamType})
+}
+func resolveBrowserStreamType(rawURL, configured string) (string, error) {
+	if strings.TrimSpace(rawURL) == "" {
+		return "", fmt.Errorf("camera stream URL is not configured")
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return "", fmt.Errorf("camera stream URL is invalid")
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" && scheme != "rtsp" && scheme != "rtmp" && scheme != "webrtc" {
+		return "", fmt.Errorf("unsupported camera stream URL scheme %q", scheme)
+	}
+	streamType := strings.ToLower(strings.TrimSpace(configured))
+	if streamType == "" {
+		lower := strings.ToLower(u.Path)
+		switch {
+		case scheme == "rtsp", scheme == "rtmp", scheme == "webrtc":
+			streamType = scheme
+		case strings.HasSuffix(lower, ".m3u8") || strings.EqualFold(u.Query().Get("format"), "hls"):
+			streamType = "hls"
+		case strings.HasSuffix(lower, ".mp4"):
+			streamType = "mp4"
+		case strings.HasSuffix(lower, ".webm"):
+			streamType = "webm"
+		default:
+			streamType = "native"
+		}
+	}
+	nonHTTPType := streamType == "rtsp" || streamType == "rtmp" || streamType == "webrtc"
+	nonHTTPScheme := scheme == "rtsp" || scheme == "rtmp" || scheme == "webrtc"
+	if nonHTTPScheme && streamType != scheme || !nonHTTPScheme && nonHTTPType {
+		return "", fmt.Errorf("camera stream type %q is incompatible with URL scheme %q", streamType, scheme)
+	}
+	switch streamType {
+	case "hls", "mp4", "webm", "native", "rtsp", "rtmp", "webrtc":
+		return streamType, nil
+	default:
+		return "", fmt.Errorf("unsupported camera stream type %q", streamType)
+	}
+}
+func streamOriginAllowed(rawURL string, allowed []string) bool {
+	target, valid := normalizedStreamOrigin(rawURL)
+	if !valid {
+		return false
+	}
+	for _, candidate := range allowed {
+		origin, ok := normalizedStreamOrigin(candidate)
+		if ok && origin == target {
+			return true
+		}
+	}
+	return false
+}
+func normalizedStreamOrigin(rawURL string) (string, bool) {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Hostname() == "" || u.User != nil {
+		return "", false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	switch scheme {
+	case "http", "https", "rtsp", "rtmp", "webrtc":
+	default:
+		return "", false
+	}
+	host := strings.ToLower(u.Hostname())
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	port := u.Port()
+	if port == "80" && scheme == "http" || port == "443" && scheme == "https" {
+		port = ""
+	}
+	if port != "" {
+		host += ":" + port
+	}
+	return scheme + "://" + host, true
 }
 func randomHex(size int) string {
 	b := make([]byte, size)
@@ -1256,12 +1724,49 @@ func (s *Server) authorize(role string) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
+		if claimsValue.TokenUse == "harness" {
+			ginProblem(c, http.StatusForbidden, "harness tokens are restricted to the MCP harness endpoint")
+			c.Abort()
+			return
+		}
 		allowed := claimsValue.Role == "admin" || claimsValue.Role == role || role == "viewer" && (claimsValue.Role == "operator" || claimsValue.Role == "viewer")
 		if !allowed {
 			ginProblem(c, http.StatusForbidden, "insufficient role")
 			c.Abort()
 			return
 		}
+		ctx := auth.ContextWithClaims(context.WithValue(c.Request.Context(), claimsKey, claimsValue), claimsValue)
+		c.Request = c.Request.WithContext(ctx)
+		c.Next()
+	}
+}
+
+func (s *Server) authorizeHarness() gin.HandlerFunc {
+	allowedScopes := make(map[string]struct{})
+	for _, scope := range auth.HarnessReadScopes() {
+		allowedScopes[scope] = struct{}{}
+	}
+	return func(c *gin.Context) {
+		token := auth.Bearer(c.GetHeader("Authorization"))
+		claimsValue, err := s.auth.Parse(token)
+		if err != nil {
+			ginProblem(c, http.StatusUnauthorized, err.Error())
+			c.Abort()
+			return
+		}
+		if claimsValue.TokenUse != "harness" || !claimsValue.HasAudience(auth.HarnessAudience) || claimsValue.RunID == "" || claimsValue.TenantID == "" || len(claimsValue.Scopes) == 0 {
+			ginProblem(c, http.StatusForbidden, "invalid harness token")
+			c.Abort()
+			return
+		}
+		for _, scope := range claimsValue.Scopes {
+			if _, ok := allowedScopes[scope]; !ok {
+				ginProblem(c, http.StatusForbidden, "invalid harness scope")
+				c.Abort()
+				return
+			}
+		}
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
 		ctx := auth.ContextWithClaims(context.WithValue(c.Request.Context(), claimsKey, claimsValue), claimsValue)
 		c.Request = c.Request.WithContext(ctx)
 		c.Next()

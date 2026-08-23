@@ -34,6 +34,7 @@ func TestHTTPWorkflow(t *testing.T) {
 	}
 	engine := core.New(repo, archive, local.NewBus(), local.NewRealtime(), parser.NewRegistry(parser.JSONParser{}), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	engine.AI = aiadapter.NoopAI{}
+	engine.AIPlugins = aiadapter.NewProviderRegistry()
 	engine.KB = knowledge.NewLocal()
 	engine.Metrics = metrics.New()
 	if err = engine.Start(ctx); err != nil {
@@ -88,6 +89,60 @@ func TestHTTPWorkflow(t *testing.T) {
 	requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/products", "", nil, http.StatusUnauthorized)
 	login := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/auth/login", "", map[string]any{"username": "admin", "password": "admin123", "tenantId": "tenant_001"}, 200)
 	token := login["accessToken"].(string)
+	providers := requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/ai/providers", token, nil, 200)
+	if providers["mode"] != "plugin-harness" || len(providers["items"].([]any)) < 4 {
+		t.Fatalf("unexpected AI provider registry %#v", providers)
+	}
+	viewerToken, err := api.auth.Issue("viewer", "tenant_001", "viewer", nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	viewerProviders := requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/ai/providers", viewerToken, nil, 200)
+	for _, item := range viewerProviders["items"].([]any) {
+		if _, exposed := item.(map[string]any)["defaultBaseUrl"]; exposed {
+			t.Fatalf("viewer received provider endpoint %#v", item)
+		}
+	}
+	providerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": "AI 插件测试成功"}}}})
+	}))
+	defer providerServer.Close()
+	api.cfg.AITestOrigins = []string{providerServer.URL}
+	providerTest := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/ai/providers/test", token, map[string]any{"provider": "openai-compatible", "baseUrl": providerServer.URL, "model": "test-model", "question": "连接测试"}, 200)
+	if providerTest["success"] != true || providerTest["answer"] != "AI 插件测试成功" || !strings.HasPrefix(providerTest["traceId"].(string), "ai_trace_") {
+		t.Fatalf("unexpected AI provider test %#v", providerTest)
+	}
+	ollamaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/chat" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"message": map[string]any{"content": "Ollama 沙箱地址生效"}})
+	}))
+	defer ollamaServer.Close()
+	api.cfg.AITestOllamaURL = ollamaServer.URL
+	api.cfg.AITestOrigins = append(api.cfg.AITestOrigins, ollamaServer.URL)
+	ollamaTest := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/ai/providers/test", token, map[string]any{"provider": "ollama", "model": "test-model", "question": "连接测试"}, 200)
+	if ollamaTest["success"] != true || ollamaTest["answer"] != "Ollama 沙箱地址生效" {
+		t.Fatalf("unexpected Ollama provider test %#v", ollamaTest)
+	}
+	api.cfg.VideoPreviewOrigins = []string{"https://media.example"}
+	requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/integrations/video/cameras", token, map[string]any{"cameraId": "camera_preview", "cameraName": "园区入口", "areaId": "area_gate", "streamUrl": "https://media.example/live/gate.m3u8", "enabled": true}, 201)
+	preview := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/integrations/video/cameras/camera_preview/preview", token, map[string]any{}, 200)
+	if preview["streamType"] != "hls" || preview["playbackUrl"] != "https://media.example/live/gate.m3u8" {
+		t.Fatalf("unexpected video preview session %#v", preview)
+	}
+	viewerCameras := requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/integrations/video/cameras", viewerToken, nil, 200)
+	viewerCamera := viewerCameras["items"].([]any)[0].(map[string]any)
+	if _, exposed := viewerCamera["streamUrl"]; exposed || viewerCamera["streamConfigured"] != true || viewerCamera["previewEligible"] != true {
+		t.Fatalf("viewer camera stream metadata is unsafe or incomplete %#v", viewerCamera)
+	}
+	requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/integrations/video/cameras", token, map[string]any{"cameraId": "camera_blocked", "cameraName": "未授权来源", "areaId": "area_gate", "streamUrl": "http://127.0.0.1:8080/private.m3u8", "enabled": true}, http.StatusCreated)
+	requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/integrations/video/cameras/camera_blocked/preview", token, map[string]any{}, http.StatusUnprocessableEntity)
+	requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/integrations/video/cameras", token, map[string]any{"cameraId": "camera_disabled", "cameraName": "停用摄像头", "areaId": "area_gate", "streamUrl": "https://media.example/live/disabled.m3u8", "enabled": false}, http.StatusCreated)
+	requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/integrations/video/cameras/camera_disabled/preview", token, map[string]any{}, http.StatusUnprocessableEntity)
+	otherVideoLogin := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/auth/login", "", map[string]any{"username": "admin", "password": "admin123", "tenantId": "tenant_video_other"}, 200)
+	requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/integrations/video/cameras/camera_preview/preview", otherVideoLogin["accessToken"].(string), map[string]any{}, http.StatusNotFound)
 	requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/protocol-packages", token, map[string]any{"id": "protocol_json", "name": "JSON 通用协议", "version": "1.0.0", "protocol": "json", "transport": "HTTP", "payloadFormat": "json", "parserType": "custom_json_parser", "status": "PUBLISHED"}, 201)
 	protocolTest := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/protocol-packages/protocol_json/test", token, map[string]any{"payload": map[string]any{"properties": map[string]any{"temperature": 22.5}}}, 200)
 	if protocolTest["success"] != true {
@@ -171,6 +226,9 @@ func TestHTTPWorkflow(t *testing.T) {
 		t.Fatalf("rule not deleted %#v", rules)
 	}
 	requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/ai/alarm-analysis/"+alarmID, token, nil, 200)
+	otherLogin := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/auth/login", "", map[string]any{"username": "admin", "password": "admin123", "tenantId": "tenant_002"}, 200)
+	otherToken := otherLogin["accessToken"].(string)
+	requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/ai/alarm-analysis/"+alarmID, otherToken, nil, http.StatusNotFound)
 	devices := requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/devices", token, nil, 200)
 	if devices["online"].(float64) != 2 {
 		t.Fatalf("unexpected devices %#v", devices)

@@ -21,6 +21,35 @@ test('management controls and Chinese labels remain available', async () => {
   }
 })
 
+test('video preview and AI provider playground remain available', async () => {
+  const source = await sourceText()
+  for (const label of ['视频流预览', '浏览器可直接预览 HLS', 'Provider 临时测试', '连接并测试插件', 'AI 运维助手', '运行轨迹', '工具调用']) {
+    assert.match(source, new RegExp(label), `missing feature label: ${label}`)
+  }
+  const packageJson = JSON.parse(await readFile(new URL('package.json', root), 'utf8'))
+  assert.ok(packageJson.dependencies?.['hls.js'], 'hls.js is required for browser HLS playback')
+})
+
+test('AI workbench uses cancellable SSE workflows and stable message keys', async () => {
+  const aiView = await readFile(new URL('src/views/AiView.vue', root), 'utf8')
+  const apiSource = await readFile(new URL('src/api.js', root), 'utf8')
+  const sseSource = await readFile(new URL('src/sse.js', root), 'utf8')
+
+  assert.match(aiView, /api\('\/api\/v1\/ai\/workflows'\)/)
+  assert.match(aiView, /apiStream\('\/api\/v1\/ai\/chat\/stream'/)
+  assert.match(aiView, /new AbortController\(\)/)
+  assert.match(aiView, /:key="message\.id"/)
+  for (const field of ['question','conversationId','workflowId','model','maxTokens']) assert.match(aiView, new RegExp(`\\b${field}\\b`), `missing AI request field: ${field}`)
+  for (const eventType of ['run.started','text.delta','tool.started','tool.completed','run.completed','run.failed']) assert.ok(aiView.includes(`'${eventType}'`), `missing stream event: ${eventType}`)
+  assert.doesNotMatch(aiView, /event\.reasoning/)
+  assert.doesNotMatch(aiView, /conversationId\.value\s*=\s*event\.conversationId/)
+  assert.doesNotMatch(aiView, /model:[^\n]*runtime\.value\.active/)
+  assert.match(aiView, /conversationId\.value\s*=\s*makeId\('conversation'\)/)
+  assert.match(apiSource, /export async function apiStream/)
+  assert.match(apiSource, /text\/event-stream/)
+  assert.match(sseSource, /getReader\(\)/)
+})
+
 test('frontend builds independently and proxies backend routes', async () => {
   const vite = await readFile(new URL('vite.config.js', root), 'utf8')
   const nginx = await readFile(new URL('nginx.conf', root), 'utf8')
@@ -28,6 +57,9 @@ test('frontend builds independently and proxies backend routes', async () => {
   assert.doesNotMatch(vite, /internal\/httpapi\/static/)
   for (const route of ['/api/', '/health/', '/mcp']) assert.ok(nginx.includes(route), `nginx is missing ${route}`)
   assert.ok(nginx.includes('platform-api:8080'))
+  assert.match(nginx, /location = \/api\/v1\/ai\/chat\/stream\s*\{[\s\S]*?proxy_buffering off;[\s\S]*?proxy_cache off;[\s\S]*?gzip off;[\s\S]*?proxy_read_timeout 3600s;[\s\S]*?proxy_set_header Connection "";/)
+  assert.match(nginx, /IOT_VIDEO_PREVIEW_CSP_SOURCES/)
+  assert.doesNotMatch(nginx, /connect-src[^;]*\bhttp:\s+https:/)
 })
 
 test('frontend rejects Node versions unsupported by the build toolchain', async () => {

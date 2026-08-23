@@ -14,6 +14,19 @@ type contextKey string
 
 const claimsContextKey contextKey = "iot-auth-claims"
 
+const (
+	HarnessAudience           = "iot-platform-mcp"
+	ScopeQueryDeviceLatest    = "mcp:tool:query_device_latest"
+	ScopeQueryAlarmList       = "mcp:tool:query_alarm_list"
+	ScopeQueryPropertyHistory = "mcp:tool:query_property_history"
+	ScopeQuerySimilarAlarms   = "mcp:tool:query_similar_alarms"
+	ScopeQueryKnowledgeBase   = "mcp:tool:query_knowledge_base"
+)
+
+func HarnessReadScopes() []string {
+	return []string{ScopeQueryDeviceLatest, ScopeQueryAlarmList, ScopeQueryPropertyHistory, ScopeQuerySimilarAlarms, ScopeQueryKnowledgeBase}
+}
+
 func ContextWithClaims(ctx context.Context, claims Claims) context.Context {
 	return context.WithValue(ctx, claimsContextKey, claims)
 }
@@ -29,6 +42,8 @@ type Claims struct {
 	Role     string    `json:"role"`
 	Scopes   []string  `json:"scopes,omitempty"`
 	ACL      []ACLRule `json:"acl,omitempty"`
+	TokenUse string    `json:"tokenUse,omitempty"`
+	RunID    string    `json:"runId,omitempty"`
 	jwt.RegisteredClaims
 }
 type ACLRule struct {
@@ -52,6 +67,30 @@ func (m *Manager) Issue(user, tenant, role string, scopes []string, ttl time.Dur
 func (m *Manager) IssueWithACL(user, tenant, role string, scopes []string, acl []ACLRule, ttl time.Duration) (string, error) {
 	now := time.Now()
 	claims := Claims{Username: user, TenantID: tenant, Role: role, Scopes: scopes, ACL: acl, RegisteredClaims: jwt.RegisteredClaims{Issuer: m.issuer, Subject: user, IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(ttl)), ID: fmt.Sprintf("%d", now.UnixNano())}}
+	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(m.secret)
+}
+
+func (m *Manager) IssueHarness(user, tenant, runID string, scopes []string, ttl time.Duration) (string, error) {
+	if user == "" || tenant == "" || runID == "" || ttl <= 0 {
+		return "", errors.New("user, tenant, runId and positive ttl are required")
+	}
+	now := time.Now()
+	claims := Claims{
+		Username: user,
+		TenantID: tenant,
+		Role:     "viewer",
+		Scopes:   append([]string(nil), scopes...),
+		TokenUse: "harness",
+		RunID:    runID,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    m.issuer,
+			Subject:   "harness:" + user,
+			Audience:  jwt.ClaimStrings{HarnessAudience},
+			IssuedAt:  jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
+			ID:        fmt.Sprintf("%d", now.UnixNano()),
+		},
+	}
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(m.secret)
 }
 func (m *Manager) Parse(token string) (Claims, error) {
@@ -79,4 +118,22 @@ func (c Claims) Can(role string) bool {
 		return true
 	}
 	return c.Role == role
+}
+
+func (c Claims) HasScope(scope string) bool {
+	for _, candidate := range c.Scopes {
+		if candidate == scope {
+			return true
+		}
+	}
+	return false
+}
+
+func (c Claims) HasAudience(audience string) bool {
+	for _, candidate := range c.Audience {
+		if candidate == audience {
+			return true
+		}
+	}
+	return false
 }

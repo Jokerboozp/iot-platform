@@ -1,6 +1,15 @@
 .git
+.env
 data
 *.log
 bin
 frontend/node_modules
 frontend/dist
+upstream/deepseek-harness/.git
+upstream/deepseek-harness/**/node_modules
+upstream/deepseek-harness/**/lib
+upstream/deepseek-harness/**/dist
+upstream/deepseek-harness/**/*.tsbuildinfo
+upstream/deepseek-harness/.cache
+upstream/deepseek-harness/dist-exe
+upstream/deepseek-harness/python/sdk-runtime/src/deepseek_harness_runtime/runtime/node

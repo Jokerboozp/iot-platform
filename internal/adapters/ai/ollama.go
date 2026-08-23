@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"iot-platform/internal/model"
+	"iot-platform/internal/ports"
 )
 
 type Ollama struct {
@@ -18,8 +20,28 @@ type Ollama struct {
 	http           *http.Client
 }
 
-func NewOllama(url, model string) *Ollama {
-	return &Ollama{strings.TrimRight(url, "/"), model, &http.Client{Timeout: 2 * time.Minute}}
+func NewOllama(baseURL, model string) (*Ollama, error) {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	u, err := url.Parse(baseURL)
+	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return nil, fmt.Errorf("Ollama base URL must be an absolute HTTP(S) URL")
+	}
+	if strings.TrimSpace(model) == "" {
+		return nil, fmt.Errorf("Ollama model is required")
+	}
+	client := &http.Client{
+		Timeout: 2 * time.Minute,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("too many Ollama redirects")
+			}
+			if !strings.EqualFold(req.URL.Scheme, u.Scheme) || !strings.EqualFold(req.URL.Host, u.Host) {
+				return fmt.Errorf("cross-origin Ollama redirect rejected")
+			}
+			return nil
+		},
+	}
+	return &Ollama{baseURL, strings.TrimSpace(model), client}, nil
 }
 
 type chatRequest struct {
@@ -35,21 +57,39 @@ type chatResponse struct {
 }
 
 func (o *Ollama) call(ctx context.Context, system, user string) (string, error) {
-	body, _ := json.Marshal(chatRequest{Model: o.model, Stream: false, Messages: []map[string]string{{"role": "system", "content": system}, {"role": "user", "content": user}}})
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/api/chat", bytes.NewReader(body))
+	body, err := json.Marshal(chatRequest{Model: o.model, Stream: false, Messages: []map[string]string{{"role": "system", "content": system}, {"role": "user", "content": user}}})
+	if err != nil {
+		return "", fmt.Errorf("Ollama request could not be encoded")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/api/chat", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("Ollama request could not be created")
+	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := o.http.Do(req)
 	if err != nil {
-		return "", err
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("Ollama request failed")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return "", fmt.Errorf("ollama %s: %s", resp.Status, string(b))
+		return "", fmt.Errorf("ollama request failed with HTTP %d", resp.StatusCode)
+	}
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, maxAIProviderResponseBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("ollama response could not be read")
+	}
+	if len(responseBody) > maxAIProviderResponseBytes {
+		return "", fmt.Errorf("ollama response exceeded the size limit")
 	}
 	var out chatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "", err
+	if err := json.Unmarshal(responseBody, &out); err != nil {
+		return "", fmt.Errorf("ollama returned an invalid response")
+	}
+	if strings.TrimSpace(out.Message.Content) == "" {
+		return "", fmt.Errorf("ollama returned an empty response")
 	}
 	return out.Message.Content, nil
 }
@@ -91,16 +131,25 @@ func (o *Ollama) RuleDraft(ctx context.Context, tenant, text string) (model.Alar
 	return rule, nil
 }
 func (o *Ollama) Health(ctx context.Context) error {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, o.baseURL+"/api/tags", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, o.baseURL+"/api/tags", nil)
+	if err != nil {
+		return fmt.Errorf("Ollama health check could not be created")
+	}
 	resp, err := o.http.Do(req)
 	if err != nil {
-		return err
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("Ollama health check failed")
 	}
 	resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("ollama %s", resp.Status)
 	}
 	return nil
+}
+func (o *Ollama) ProviderInfo() ports.AIPluginInfo {
+	return ports.AIPluginInfo{ID: "ollama", Name: "Ollama", Description: "Local Ollama model provider plugin", DefaultBaseURL: o.baseURL, DefaultModel: o.model, Model: o.model, Enabled: true, Capabilities: []string{"chat", "alarm-analysis", "rule-draft", "local-model"}}
 }
 func extractJSON(s string) string {
 	start := strings.Index(s, "{")
@@ -123,3 +172,6 @@ func (NoopAI) RuleDraft(context.Context, string, string) (model.AlarmRule, error
 	return model.AlarmRule{}, fmt.Errorf("AI model disabled")
 }
 func (NoopAI) Health(context.Context) error { return nil }
+func (NoopAI) ProviderInfo() ports.AIPluginInfo {
+	return ports.AIPluginInfo{ID: "disabled", Name: "未启用", Description: "AI provider is disabled", Enabled: false, Capabilities: []string{"fallback"}}
+}

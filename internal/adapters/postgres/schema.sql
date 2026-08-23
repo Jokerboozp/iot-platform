@@ -72,11 +72,12 @@ CREATE TABLE IF NOT EXISTS video_alarm_event (
 CREATE TABLE IF NOT EXISTS video_camera_mapping (
   tenant_id text NOT NULL, camera_id text NOT NULL, camera_name text, project_id text,
   city_code text, district_code text, building text, floor text, area_id text, related_device_ids jsonb NOT NULL DEFAULT '[]',
-  video_platform_id text, stream_url text, enabled boolean NOT NULL DEFAULT true,
+  video_platform_id text, stream_url text, stream_type text, enabled boolean NOT NULL DEFAULT true,
   PRIMARY KEY (tenant_id, camera_id)
 );
 ALTER TABLE video_camera_mapping ADD COLUMN IF NOT EXISTS city_code text;
 ALTER TABLE video_camera_mapping ADD COLUMN IF NOT EXISTS district_code text;
+ALTER TABLE video_camera_mapping ADD COLUMN IF NOT EXISTS stream_type text;
 CREATE TABLE IF NOT EXISTS video_alarm_media (
   tenant_id text NOT NULL, event_id text NOT NULL, media_type text NOT NULL,
   object_bucket text NOT NULL, object_key text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
@@ -92,8 +93,35 @@ CREATE TABLE IF NOT EXISTS ai_prompt_template (
   enabled boolean NOT NULL DEFAULT true, created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(id, version, tenant_id)
 );
 CREATE TABLE IF NOT EXISTS alarm_ai_analysis (
-  alarm_id text PRIMARY KEY, body jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
+  tenant_id text NOT NULL, alarm_id text NOT NULL, body jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY(tenant_id, alarm_id)
 );
+ALTER TABLE alarm_ai_analysis ADD COLUMN IF NOT EXISTS tenant_id text;
+WITH unambiguous_alarm_owner AS (
+  SELECT id AS alarm_id, min(tenant_id) AS tenant_id
+  FROM alarm_record
+  GROUP BY id
+  HAVING count(*)=1
+)
+UPDATE alarm_ai_analysis AS analysis
+SET tenant_id=owner.tenant_id
+FROM unambiguous_alarm_owner AS owner
+WHERE analysis.tenant_id IS NULL AND analysis.alarm_id=owner.alarm_id;
+-- Preserve unmatched or ambiguous legacy rows without exposing them to a real tenant.
+UPDATE alarm_ai_analysis SET tenant_id='__legacy_orphaned__' WHERE tenant_id IS NULL;
+ALTER TABLE alarm_ai_analysis ALTER COLUMN tenant_id SET NOT NULL;
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid='alarm_ai_analysis'::regclass
+      AND conname='alarm_ai_analysis_pkey'
+      AND array_length(conkey, 1)=1
+  ) THEN
+    ALTER TABLE alarm_ai_analysis DROP CONSTRAINT alarm_ai_analysis_pkey;
+    ALTER TABLE alarm_ai_analysis ADD CONSTRAINT alarm_ai_analysis_pkey PRIMARY KEY(tenant_id, alarm_id);
+  END IF;
+END $$;
 CREATE TABLE IF NOT EXISTS ai_knowledge_doc (
   id text PRIMARY KEY, tenant_id text NOT NULL, product_id text, object_bucket text NOT NULL,
   object_key text NOT NULL, filename text NOT NULL, status text NOT NULL, metadata jsonb NOT NULL DEFAULT '{}',
@@ -101,8 +129,10 @@ CREATE TABLE IF NOT EXISTS ai_knowledge_doc (
 );
 CREATE TABLE IF NOT EXISTS ai_tool_call_log (
   id bigserial PRIMARY KEY, tenant_id text NOT NULL, actor text, tool text NOT NULL,
-  input jsonb, output jsonb, success boolean NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
+  trace_id text, input jsonb, output jsonb, success boolean NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE ai_tool_call_log ADD COLUMN IF NOT EXISTS trace_id text;
+CREATE INDEX IF NOT EXISTS ai_tool_call_trace_idx ON ai_tool_call_log(tenant_id, trace_id) WHERE trace_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS replay_task (
   id text PRIMARY KEY, tenant_id text NOT NULL, status text NOT NULL, body jsonb NOT NULL,

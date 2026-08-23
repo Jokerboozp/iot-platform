@@ -105,13 +105,32 @@ func main() {
 	engine := core.New(repo, archivePort, bus, realtime, parsers, log)
 	engine.VideoMediaAllowedHosts = cfg.VideoMediaHosts
 	engine.Metrics = registry
-	var baseAI ports.AIClient = aiadapter.NoopAI{}
-	if os.Getenv("IOT_OLLAMA_URL") != "" {
-		baseAI = aiadapter.NewOllama(cfg.OllamaURL, cfg.OllamaModel)
+	aiPlugins := aiadapter.NewProviderRegistry()
+	engine.AIPlugins = aiPlugins
+	providerID := cfg.AIProvider
+	if providerID == "" && os.Getenv("IOT_OLLAMA_URL") != "" {
+		providerID = "ollama"
 	}
+	providerConfig := ports.AIPluginConfig{Provider: providerID, BaseURL: cfg.AIBaseURL, Model: cfg.AIModel, APIKey: cfg.AIAPIKey}
+	if providerID == "ollama" {
+		if providerConfig.BaseURL == "" {
+			providerConfig.BaseURL = cfg.OllamaURL
+		}
+		if providerConfig.Model == "" {
+			providerConfig.Model = cfg.OllamaModel
+		}
+	}
+	baseAI, providerErr := aiPlugins.Create(providerConfig)
+	fatal(log, "initialize AI provider plugin", providerErr)
 	einoAI, einoErr := aiadapter.NewEino(ctx, baseAI)
 	fatal(log, "initialize Eino AI workflows", einoErr)
 	engine.AI = einoAI
+	if cfg.AIHarnessURL != "" {
+		harness, harnessErr := aiadapter.NewHarness(cfg.AIHarnessURL, cfg.AIHarnessToken, cfg.AIHarnessMCPURL, cfg.AIHarnessModel, cfg.AIHarnessTimeout)
+		fatal(log, "initialize AI workflow harness", harnessErr)
+		engine.AIWorkflows = harness
+		log.Info("AI workflow harness enabled", "url", cfg.AIHarnessURL, "model", cfg.AIHarnessModel)
+	}
 	if cfg.WeaviateURL != "" {
 		engine.KB = knowledge.NewWeaviate(cfg.WeaviateURL)
 	} else {

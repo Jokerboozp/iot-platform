@@ -58,7 +58,7 @@ type Repository interface {
 	GetVideoCameraMapping(context.Context, string, string) (model.VideoCameraMapping, error)
 	ListVideoCameraMappings(context.Context, string) ([]model.VideoCameraMapping, error)
 	SaveAIAnalysis(context.Context, model.AIAnalysis) error
-	GetAIAnalysis(context.Context, string) (model.AIAnalysis, error)
+	GetAIAnalysis(context.Context, string, string) (model.AIAnalysis, error)
 	SaveKnowledgeDoc(context.Context, model.KnowledgeDoc) error
 	SaveReplay(context.Context, model.ReplayRequest) error
 	UpdateReplay(context.Context, model.ReplayRequest) error
@@ -96,6 +96,91 @@ type AIClient interface {
 	AnalyzeAlarm(context.Context, model.Alarm, []map[string]any, []string) (model.AIAnalysis, error)
 	Chat(context.Context, string, string) (string, error)
 	RuleDraft(context.Context, string, string) (model.AlarmRule, error)
+	Health(context.Context) error
+}
+
+type AIPluginConfig struct {
+	Provider string `json:"provider"`
+	BaseURL  string `json:"baseUrl,omitempty"`
+	Model    string `json:"model,omitempty"`
+	APIKey   string `json:"apiKey,omitempty"`
+}
+
+type AIPluginInfo struct {
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	Description    string   `json:"description"`
+	DefaultBaseURL string   `json:"defaultBaseUrl,omitempty"`
+	DefaultModel   string   `json:"defaultModel,omitempty"`
+	Model          string   `json:"model,omitempty"`
+	RequiresAPIKey bool     `json:"requiresApiKey"`
+	Enabled        bool     `json:"enabled"`
+	Capabilities   []string `json:"capabilities"`
+}
+
+type AIInspectable interface {
+	ProviderInfo() AIPluginInfo
+}
+
+type AIPluginRegistry interface {
+	List() []AIPluginInfo
+	Create(AIPluginConfig) (AIClient, error)
+}
+
+// AIWorkflowPlugin describes a business workflow exposed by an external AI
+// runtime. Provider plugins and workflow plugins deliberately use separate
+// contracts: providers generate text, workflows may orchestrate read-only MCP
+// tools and stream progress events.
+type AIWorkflowPlugin struct {
+	SchemaVersion int      `json:"schemaVersion,omitempty"`
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	Description   string   `json:"description,omitempty"`
+	Version       string   `json:"version,omitempty"`
+	DefaultModel  string   `json:"defaultModel,omitempty"`
+	MaxTokens     int      `json:"maxTokens,omitempty"`
+	Enabled       bool     `json:"enabled"`
+	Capabilities  []string `json:"capabilities,omitempty"`
+}
+
+type AIWorkflowRequest struct {
+	RunID          string `json:"runId"`
+	ConversationID string `json:"conversationId"`
+	WorkflowID     string `json:"workflowId"`
+	Question       string `json:"question"`
+	MCPURL         string `json:"mcpUrl"`
+	Model          string `json:"model,omitempty"`
+	MaxTokens      int    `json:"maxTokens"`
+	MCPToken       string `json:"-"`
+}
+
+type AIWorkflowEvent struct {
+	Type       string         `json:"type"`
+	RunID      string         `json:"runId,omitempty"`
+	WorkflowID string         `json:"workflowId,omitempty"`
+	Model      string         `json:"model,omitempty"`
+	Text       string         `json:"text,omitempty"`
+	Delta      string         `json:"delta,omitempty"`
+	Answer     string         `json:"answer,omitempty"`
+	Message    string         `json:"message,omitempty"`
+	Tool       string         `json:"tool,omitempty"`
+	CallID     string         `json:"callId,omitempty"`
+	Status     string         `json:"status,omitempty"`
+	Success    *bool          `json:"success,omitempty"`
+	Code       string         `json:"code,omitempty"`
+	Data       map[string]any `json:"data,omitempty"`
+}
+
+type AIWorkflowResult struct {
+	RunID      string `json:"runId"`
+	WorkflowID string `json:"workflowId,omitempty"`
+	Model      string `json:"model,omitempty"`
+	Answer     string `json:"answer"`
+}
+
+type AIWorkflowRuntime interface {
+	ListWorkflows(context.Context) ([]AIWorkflowPlugin, error)
+	StreamChat(context.Context, AIWorkflowRequest, func(AIWorkflowEvent) error) (AIWorkflowResult, error)
 	Health(context.Context) error
 }
 

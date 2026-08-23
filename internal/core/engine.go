@@ -24,6 +24,8 @@ type Engine struct {
 	Bus                    ports.EventBus
 	Realtime               ports.RealtimePublisher
 	AI                     ports.AIClient
+	AIPlugins              ports.AIPluginRegistry
+	AIWorkflows            ports.AIWorkflowRuntime
 	KB                     ports.KnowledgeBase
 	Catalog                ports.PlatformCatalog
 	Parsers                *parser.Registry
@@ -563,6 +565,8 @@ func (e *Engine) handleAI(ctx context.Context, b []byte) error {
 	if err == nil && e.Metrics != nil {
 		e.Metrics.Inc("ai_analysis_success_total")
 	}
+	analysis.TenantID = alarm.TenantID
+	analysis.AlarmID = alarm.ID
 	if saveErr := e.Repo.SaveAIAnalysis(ctx, analysis); saveErr != nil {
 		return saveErr
 	}

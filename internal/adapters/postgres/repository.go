@@ -467,27 +467,27 @@ func (r *Repository) ListPendingVideoEvents(ctx context.Context, limit int) ([]m
 }
 func (r *Repository) SaveVideoCameraMapping(ctx context.Context, v model.VideoCameraMapping) error {
 	related, _ := json.Marshal(v.RelatedDeviceIDs)
-	_, err := r.pool.Exec(ctx, `INSERT INTO video_camera_mapping(tenant_id,camera_id,camera_name,project_id,city_code,district_code,building,floor,area_id,related_device_ids,video_platform_id,stream_url,enabled) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT(tenant_id,camera_id) DO UPDATE SET camera_name=excluded.camera_name,project_id=excluded.project_id,city_code=excluded.city_code,district_code=excluded.district_code,building=excluded.building,floor=excluded.floor,area_id=excluded.area_id,related_device_ids=excluded.related_device_ids,video_platform_id=excluded.video_platform_id,stream_url=excluded.stream_url,enabled=excluded.enabled`, v.TenantID, v.CameraID, v.CameraName, v.ProjectID, v.CityCode, v.DistrictCode, v.Building, v.Floor, v.AreaID, related, v.VideoPlatformID, v.StreamURL, v.Enabled)
+	_, err := r.pool.Exec(ctx, `INSERT INTO video_camera_mapping(tenant_id,camera_id,camera_name,project_id,city_code,district_code,building,floor,area_id,related_device_ids,video_platform_id,stream_url,stream_type,enabled) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT(tenant_id,camera_id) DO UPDATE SET camera_name=excluded.camera_name,project_id=excluded.project_id,city_code=excluded.city_code,district_code=excluded.district_code,building=excluded.building,floor=excluded.floor,area_id=excluded.area_id,related_device_ids=excluded.related_device_ids,video_platform_id=excluded.video_platform_id,stream_url=excluded.stream_url,stream_type=excluded.stream_type,enabled=excluded.enabled`, v.TenantID, v.CameraID, v.CameraName, v.ProjectID, v.CityCode, v.DistrictCode, v.Building, v.Floor, v.AreaID, related, v.VideoPlatformID, v.StreamURL, v.StreamType, v.Enabled)
 	return err
 }
 func (r *Repository) scanVideoMapping(row rowScanner) (model.VideoCameraMapping, error) {
 	var v model.VideoCameraMapping
 	var related []byte
-	err := row.Scan(&v.TenantID, &v.CameraID, &v.CameraName, &v.ProjectID, &v.CityCode, &v.DistrictCode, &v.Building, &v.Floor, &v.AreaID, &related, &v.VideoPlatformID, &v.StreamURL, &v.Enabled)
+	err := row.Scan(&v.TenantID, &v.CameraID, &v.CameraName, &v.ProjectID, &v.CityCode, &v.DistrictCode, &v.Building, &v.Floor, &v.AreaID, &related, &v.VideoPlatformID, &v.StreamURL, &v.StreamType, &v.Enabled)
 	if err == nil {
 		_ = json.Unmarshal(related, &v.RelatedDeviceIDs)
 	}
 	return v, err
 }
 func (r *Repository) GetVideoCameraMapping(ctx context.Context, tenant, camera string) (model.VideoCameraMapping, error) {
-	v, err := r.scanVideoMapping(r.pool.QueryRow(ctx, `SELECT tenant_id,camera_id,coalesce(camera_name,''),coalesce(project_id,''),coalesce(city_code,''),coalesce(district_code,''),coalesce(building,''),coalesce(floor,''),coalesce(area_id,''),related_device_ids,coalesce(video_platform_id,''),coalesce(stream_url,''),enabled FROM video_camera_mapping WHERE tenant_id=$1 AND camera_id=$2`, tenant, camera))
+	v, err := r.scanVideoMapping(r.pool.QueryRow(ctx, `SELECT tenant_id,camera_id,coalesce(camera_name,''),coalesce(project_id,''),coalesce(city_code,''),coalesce(district_code,''),coalesce(building,''),coalesce(floor,''),coalesce(area_id,''),related_device_ids,coalesce(video_platform_id,''),coalesce(stream_url,''),coalesce(stream_type,''),enabled FROM video_camera_mapping WHERE tenant_id=$1 AND camera_id=$2`, tenant, camera))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return v, ErrNotFound
 	}
 	return v, err
 }
 func (r *Repository) ListVideoCameraMappings(ctx context.Context, tenant string) ([]model.VideoCameraMapping, error) {
-	rows, err := r.pool.Query(ctx, `SELECT tenant_id,camera_id,coalesce(camera_name,''),coalesce(project_id,''),coalesce(city_code,''),coalesce(district_code,''),coalesce(building,''),coalesce(floor,''),coalesce(area_id,''),related_device_ids,coalesce(video_platform_id,''),coalesce(stream_url,''),enabled FROM video_camera_mapping WHERE tenant_id=$1 ORDER BY camera_id`, tenant)
+	rows, err := r.pool.Query(ctx, `SELECT tenant_id,camera_id,coalesce(camera_name,''),coalesce(project_id,''),coalesce(city_code,''),coalesce(district_code,''),coalesce(building,''),coalesce(floor,''),coalesce(area_id,''),related_device_ids,coalesce(video_platform_id,''),coalesce(stream_url,''),coalesce(stream_type,''),enabled FROM video_camera_mapping WHERE tenant_id=$1 ORDER BY camera_id`, tenant)
 	if err != nil {
 		return nil, err
 	}
@@ -504,13 +504,13 @@ func (r *Repository) ListVideoCameraMappings(ctx context.Context, tenant string)
 }
 func (r *Repository) SaveAIAnalysis(ctx context.Context, v model.AIAnalysis) error {
 	b, _ := json.Marshal(v)
-	_, err := r.pool.Exec(ctx, `INSERT INTO alarm_ai_analysis(alarm_id,body) VALUES($1,$2) ON CONFLICT(alarm_id) DO UPDATE SET body=excluded.body,created_at=now()`, v.AlarmID, b)
+	_, err := r.pool.Exec(ctx, `INSERT INTO alarm_ai_analysis(tenant_id,alarm_id,body) VALUES($1,$2,$3) ON CONFLICT(tenant_id,alarm_id) DO UPDATE SET body=excluded.body,created_at=now()`, v.TenantID, v.AlarmID, b)
 	return err
 }
-func (r *Repository) GetAIAnalysis(ctx context.Context, id string) (model.AIAnalysis, error) {
+func (r *Repository) GetAIAnalysis(ctx context.Context, tenant, id string) (model.AIAnalysis, error) {
 	var v model.AIAnalysis
 	var b []byte
-	err := r.pool.QueryRow(ctx, `SELECT body FROM alarm_ai_analysis WHERE alarm_id=$1`, id).Scan(&b)
+	err := r.pool.QueryRow(ctx, `SELECT body FROM alarm_ai_analysis WHERE tenant_id=$1 AND alarm_id=$2`, tenant, id).Scan(&b)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return v, ErrNotFound
 	}
@@ -557,7 +557,7 @@ func (r *Repository) SaveAIToolCall(ctx context.Context, v model.AIToolCallLog) 
 	if v.Error != "" {
 		out, _ = json.Marshal(map[string]any{"error": v.Error, "output": v.Output})
 	}
-	_, err := r.pool.Exec(ctx, `INSERT INTO ai_tool_call_log(tenant_id,actor,tool,input,output,success,created_at) VALUES($1,$2,$3,$4,$5,$6,to_timestamp($7::double precision/1000))`, v.TenantID, v.Actor, v.Tool, in, out, v.Success, v.CreatedAt)
+	_, err := r.pool.Exec(ctx, `INSERT INTO ai_tool_call_log(tenant_id,actor,tool,trace_id,input,output,success,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,to_timestamp($8::double precision/1000))`, v.TenantID, v.Actor, v.Tool, v.ID, in, out, v.Success, v.CreatedAt)
 	return err
 }
 func (r *Repository) Health(ctx context.Context) error { return r.pool.Ping(ctx) }

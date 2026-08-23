@@ -116,7 +116,47 @@ docker compose exec ollama ollama pull qwen3:8b
 docker compose restart platform-api
 ```
 
-也可以把这两个变量写入可选的 `.env`。模型未启用时，主链路照常运行并保存“待人工研判”的降级 AI 结果。
+也可以使用 DeepSeek/OpenAI-compatible Provider 插件。以下示例启用 DeepSeek；密钥只通过环境变量注入：
+
+```powershell
+$env:IOT_AI_PROVIDER='deepseek'
+$env:IOT_AI_BASE_URL='https://api.deepseek.com'
+$env:IOT_AI_MODEL='deepseek-v4-flash'
+$env:DEEPSEEK_API_KEY='<your-api-key>'
+docker compose up -d --build platform-api platform-web
+```
+
+进入“AI 运维助手”可以查看当前运行时状态，或在 Provider 插件沙箱中临时填写 DeepSeek、Ollama 或 OpenAI-compatible 配置并执行连接测试。沙箱中的 API Key 不会保存到数据库或审计日志。AI Provider 采用静态注册、运行时组装的插件模式，业务核心仍只依赖统一 `AIClient` 接口。
+
+### DeepSeek Harness 源码模式
+
+修改版“AI 运维助手”可以直接使用 DeepSeek Harness 源码侧车。源码固定到 `deploy/deepseek-harness/REVISION` 记录的提交；首次使用先拉取源码：
+
+```bash
+./scripts/fetch-deepseek-harness.sh
+```
+
+在 `.env` 中设置：
+
+```text
+DEEPSEEK_API_KEY=<your-api-key>
+IOT_AI_HARNESS_URL=http://deepseek-harness:8091
+IOT_AI_HARNESS_TOKEN=<至少 32 字节随机内部密钥>
+IOT_AI_HARNESS_MCP_URL=http://platform-api:8080/mcp/harness
+IOT_AI_HARNESS_MODEL=deepseek-v4-flash
+IOT_AI_HARNESS_TIMEOUT=90s
+```
+
+然后从本地源码构建并启动：
+
+```bash
+docker compose --profile harness up -d --build platform-api deepseek-harness platform-web
+docker compose logs -f deepseek-harness platform-api
+```
+
+Harness 侧车只加载 IoT 运维 Workflow 和平台提供的受控 MCP 只读工具，不加载 shell、文件写入、子 Agent 或设备控制能力。浏览器不会直接拿到 MCP 凭据；平台为每次运行签发短期、绑定租户和 Run ID 的内部令牌。业务插件清单位于 `deploy/deepseek-harness/plugins/`，新增或调整 Workflow 不需要修改模型 Provider。
+
+上述环境变量均可写入可选的 `.env`。模型未启用时，主链路照常运行并保存“待人工研判”的降级 AI 结果。
 
 ## 3. 核心数据流程
 
@@ -266,6 +306,8 @@ X-Signature: hex(HMAC-SHA256(secret, timestamp + rawBody))
 ```
 
 时间戳允许误差 5 分钟；`eventId` 用于幂等。开发模式可不签名，生产模式拒绝未知平台或无效签名。
+
+摄像头映射支持 HLS（`.m3u8`）、MP4 和 WebM 浏览器预览；RTSP/RTMP 需要先经 MediaMTX、ZLMediaKit 等网关转换。为防止预览请求探测查看者的内网，必须通过 `IOT_VIDEO_PREVIEW_ALLOWED_ORIGINS` 配置精确的流媒体 Origin（协议、主机和端口），例如 `https://video.example.internal,http://mediamtx:8888`。生产前端还要把所有 HLS 主/子播放列表及分片 Origin 以空格分隔写入 `IOT_VIDEO_PREVIEW_CSP_SOURCES`；Nginx 会据此生成 CSP 并阻止跨白名单重定向和分片请求。未配置白名单时仍可保存映射，但后端拒绝创建浏览器预览。
 
 ## 7. MCP
 

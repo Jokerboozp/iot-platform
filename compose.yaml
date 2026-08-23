@@ -27,6 +27,7 @@ services:
       IOT_ADMIN_PASSWORD: ${IOT_ADMIN_PASSWORD:-admin123}
       IOT_VIDEO_PLATFORM_SECRETS: ${IOT_VIDEO_PLATFORM_SECRETS:-video-platform-1:local-video-secret-change-me}
       IOT_VIDEO_MEDIA_ALLOWED_HOSTS: ${IOT_VIDEO_MEDIA_ALLOWED_HOSTS:-}
+      IOT_VIDEO_PREVIEW_ALLOWED_ORIGINS: ${IOT_VIDEO_PREVIEW_ALLOWED_ORIGINS:-}
       IOT_POSTGRES_DSN: postgres://iot:${POSTGRES_PASSWORD:-local-iot-postgres-change-me}@postgres:5432/iot?sslmode=disable
       IOT_REDIS_ADDR: redis:6379
       IOT_REDIS_PASSWORD: ${REDIS_PASSWORD:-local-iot-redis-change-me}
@@ -39,6 +40,18 @@ services:
       IOT_MQTT_WEBSOCKET_PUBLIC_URL: ${IOT_MQTT_WEBSOCKET_PUBLIC_URL:-}
       IOT_OLLAMA_URL: ${IOT_OLLAMA_URL:-}
       IOT_OLLAMA_MODEL: ${IOT_OLLAMA_MODEL:-qwen3:8b}
+      IOT_AI_PROVIDER: ${IOT_AI_PROVIDER:-}
+      IOT_AI_BASE_URL: ${IOT_AI_BASE_URL:-}
+      IOT_AI_MODEL: ${IOT_AI_MODEL:-}
+      IOT_AI_API_KEY: ${IOT_AI_API_KEY:-}
+      IOT_AI_PROVIDER_TEST_ALLOWED_ORIGINS: ${IOT_AI_PROVIDER_TEST_ALLOWED_ORIGINS:-https://api.deepseek.com,http://localhost:11434,http://127.0.0.1:11434,http://[::1]:11434,http://ollama:11434}
+      IOT_AI_OLLAMA_URL: ${IOT_AI_OLLAMA_URL:-http://ollama:11434}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      IOT_AI_HARNESS_URL: ${IOT_AI_HARNESS_URL:-}
+      IOT_AI_HARNESS_TOKEN: ${IOT_AI_HARNESS_TOKEN:-local-harness-gateway-token-change-me-now}
+      IOT_AI_HARNESS_MCP_URL: ${IOT_AI_HARNESS_MCP_URL:-http://platform-api:8080/mcp/harness}
+      IOT_AI_HARNESS_MODEL: ${IOT_AI_HARNESS_MODEL:-deepseek-v4-flash}
+      IOT_AI_HARNESS_TIMEOUT: ${IOT_AI_HARNESS_TIMEOUT:-90s}
       IOT_WEAVIATE_URL: ${IOT_WEAVIATE_URL:-}
       IOT_THINGSPANEL_URL: ${IOT_THINGSPANEL_URL:-}
       IOT_THINGSPANEL_USER: ${IOT_THINGSPANEL_USER:-}
@@ -61,9 +74,43 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+    environment:
+      IOT_VIDEO_PREVIEW_CSP_SOURCES: ${IOT_VIDEO_PREVIEW_CSP_SOURCES:-}
     ports: ["${IOT_WEB_PORT:-8080}:8080"]
     depends_on:
       platform-api: {condition: service_started}
+
+  deepseek-harness:
+    <<: *service-defaults
+    profiles: [harness]
+    image: ${IOT_DEEPSEEK_HARNESS_IMAGE:-iot-deepseek-harness:local}
+    build:
+      context: .
+      dockerfile: deploy/deepseek-harness/Dockerfile
+    environment:
+      IOT_HARNESS_HOST: 0.0.0.0
+      IOT_HARNESS_PORT: "8091"
+      IOT_HARNESS_GATEWAY_TOKEN: ${IOT_AI_HARNESS_TOKEN:-local-harness-gateway-token-change-me-now}
+      IOT_HARNESS_SESSION_ROOT: /data/sessions
+      IOT_HARNESS_WORKSPACE: /data/workspace
+      IOT_HARNESS_MCP_ALLOWED_ORIGINS: http://platform-api:8080
+      IOT_HARNESS_MAX_CONCURRENCY: ${IOT_HARNESS_MAX_CONCURRENCY:-4}
+      IOT_HARNESS_MAX_CACHED_CONVERSATIONS: ${IOT_HARNESS_MAX_CACHED_CONVERSATIONS:-8}
+      IOT_HARNESS_CONVERSATION_TTL_MS: ${IOT_HARNESS_CONVERSATION_TTL_MS:-600000}
+      IOT_HARNESS_RUN_TIMEOUT_MS: ${IOT_HARNESS_RUN_TIMEOUT_MS:-85000}
+      IOT_HARNESS_RPC_TIMEOUT_MS: ${IOT_HARNESS_RPC_TIMEOUT_MS:-80000}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${IOT_AI_BASE_URL:-https://api.deepseek.com}
+    ports: ["127.0.0.1:${IOT_AI_HARNESS_PORT:-8091}:8091"]
+    volumes: ["deepseek-harness-data:/data"]
+    depends_on:
+      platform-api: {condition: service_started}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8091/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
   backend:
     <<: *service-defaults
@@ -510,3 +557,4 @@ volumes:
   ollama-data: {}
   weaviate-data: {}
   thingspanel-postgres-data: {}
+  deepseek-harness-data: {}

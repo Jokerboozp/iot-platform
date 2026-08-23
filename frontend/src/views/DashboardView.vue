@@ -34,7 +34,7 @@ onBeforeUnmount(() => window.removeEventListener('iot:realtime', realtime))
       <div v-for="alarm in alarms" :key="alarm.alarmId" class="alarm-row"><i /><div><strong>{{ alarmType(alarm.alarmType) }}</strong><small>{{ alarm.deviceName || alarm.deviceId }} · {{ formatTime(alarm.lastTriggeredAt) }}</small></div><el-tag :type="tagType(alarm.alarmLevel)" effect="light" round>{{ label(alarmLevels,alarm.alarmLevel,'未设置') }}</el-tag><el-button plain type="primary" @click="showDetail(alarm.alarmId)">详情</el-button></div>
     </el-card>
     <el-card shadow="never" class="surface-card"><template #header><strong>设备在线概况</strong></template>
-      <div class="online-summary"><el-progress type="circle" :percentage="rate" :width="150" :stroke-width="12" color="#0d8a7a" /><div><p><i class="online" />在线 <b>{{ stats.online }}</b></p><p><i />离线/疑似 <b>{{ stats.offline }}</b></p></div></div>
+      <div class="online-summary"><el-progress type="circle" :percentage="rate" :width="150" :stroke-width="12" color="#1677ff" /><div><p><i class="online" />在线 <b>{{ stats.online }}</b></p><p><i />离线/疑似 <b>{{ stats.offline }}</b></p></div></div>
     </el-card>
   </div>
   <el-dialog v-model="detailVisible" title="告警详情" width="min(680px, 94vw)"><el-descriptions v-if="detail" :column="1" border><el-descriptions-item label="告警编号">{{ detail.alarmId }}</el-descriptions-item><el-descriptions-item label="设备">{{ detail.deviceName || detail.deviceId }}</el-descriptions-item><el-descriptions-item label="告警类型">{{ alarmType(detail.alarmType) }}</el-descriptions-item><el-descriptions-item label="发生时间">{{ formatTime(detail.lastTriggeredAt) }}</el-descriptions-item></el-descriptions><pre>{{ JSON.stringify(detail,null,2) }}</pre></el-dialog>

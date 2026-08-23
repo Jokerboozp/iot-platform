@@ -6,7 +6,9 @@ COPY . .
 RUN npm run build
 
 FROM nginx:1.27-alpine
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+ENV IOT_VIDEO_PREVIEW_CSP_SOURCES="" \
+    NGINX_ENVSUBST_FILTER=IOT_VIDEO_PREVIEW_CSP_SOURCES
+COPY nginx.conf /etc/nginx/templates/default.conf.template
 COPY --from=build /app/dist /usr/share/nginx/html
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \

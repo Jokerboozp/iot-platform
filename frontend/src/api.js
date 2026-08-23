@@ -1,34 +1,86 @@
 import { ElMessage } from 'element-plus'
 
+import { consumeSSE } from './sse'
+
 export const session = {
   get token() { return localStorage.getItem('iot_token') || '' },
   get tenant() { return localStorage.getItem('iot_tenant') || '' },
-  save(data) {
+  get user() { return localStorage.getItem('iot_user') || '' },
+  get role() { return localStorage.getItem('iot_role') || '' },
+  save(data, username = '') {
     localStorage.setItem('iot_token', data.accessToken)
     localStorage.setItem('iot_tenant', data.tenantId || '')
+    localStorage.setItem('iot_user', username)
+    localStorage.setItem('iot_role', data.role || '')
   },
-  clear() { localStorage.removeItem('iot_token'); localStorage.removeItem('iot_tenant') }
+  clear() {
+    for (const key of ['iot_token', 'iot_tenant', 'iot_user', 'iot_role']) localStorage.removeItem(key)
+  }
+}
+
+export class ApiError extends Error {
+  constructor(message, details = {}) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = details.status || 0
+    this.code = details.code || ''
+    this.traceId = details.traceId || ''
+    this.runId = details.runId || ''
+    this.stage = details.stage || ''
+    this.retryable = Boolean(details.retryable)
+    this.retryAfterMs = Number(details.retryAfterMs || 0)
+    this.fieldErrors = details.fieldErrors || []
+  }
+}
+
+function headersFor(options, accept = '') {
+  const isForm = typeof FormData !== 'undefined' && options.body instanceof FormData
+  const headers = { ...(!isForm && options.body != null ? { 'Content-Type':'application/json' } : {}), ...(options.headers || {}) }
+  if (accept && !headers.Accept) headers.Accept = accept
+  if (session.token) headers.Authorization = `Bearer ${session.token}`
+  return headers
+}
+
+function dispatchUnauthorized(path, status) {
+  if (status === 401 && path !== '/api/v1/auth/login' && typeof window !== 'undefined') window.dispatchEvent(new Event('iot:unauthorized'))
+}
+
+async function responseError(path, response) {
+  const data = await response.json().catch(() => ({}))
+  dispatchUnauthorized(path, response.status)
+  return new ApiError(data.detail || data.message || `HTTP ${response.status}`, { ...data, status:response.status })
 }
 
 export async function api(path, options = {}) {
-  const headers = { ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }), ...(options.headers || {}) }
-  if (session.token) headers.Authorization = `Bearer ${session.token}`
+  const headers = headersFor(options)
   const response = await fetch(path, { ...options, headers })
-  const data = await response.json().catch(() => ({}))
-  if (!response.ok) {
-    if (response.status === 401 && path !== '/api/v1/auth/login') window.dispatchEvent(new Event('iot:unauthorized'))
-    throw new Error(data.detail || `HTTP ${response.status}`)
+  if (!response.ok) throw await responseError(path, response)
+  return response.json().catch(() => ({}))
+}
+
+export async function apiStream(path, options = {}, onEvent = () => {}) {
+  let response
+  try {
+    response = await fetch(path, { ...options, headers:headersFor(options, 'text/event-stream') })
+  } catch (error) {
+    if (error?.name === 'AbortError') throw error
+    throw new ApiError('无法连接 AI 流服务，请检查网络后重试', { code:'AI_STREAM_NETWORK_ERROR', retryable:true })
   }
-  return data
+  if (!response.ok) throw await responseError(path, response)
+  if (!response.body) throw new ApiError('AI 流响应不可用', { status:response.status, code:'AI_STREAM_UNAVAILABLE', retryable:true })
+  try {
+    await consumeSSE(response.body, onEvent)
+  } catch (error) {
+    if (error?.name === 'AbortError' || error instanceof ApiError) throw error
+    throw new ApiError(error?.message || 'AI 流解析失败', { code:error?.code || 'AI_STREAM_PARSE_ERROR', retryable:true })
+  }
 }
 
 export async function download(path, filename, options = {}) {
-  const headers = { ...(options.headers || {}) }
-  if (session.token) headers.Authorization = `Bearer ${session.token}`
+  const headers = headersFor({ ...options, body:null })
   const response = await fetch(path, { ...options, headers })
   if (!response.ok) {
-    const data = await response.json().catch(() => ({}))
-    throw new Error(data.detail || `HTTP ${response.status}`)
+    throw await responseError(path, response)
   }
   const url = URL.createObjectURL(await response.blob())
   const anchor = document.createElement('a')

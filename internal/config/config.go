@@ -29,9 +29,21 @@ type Config struct {
 	MQTTWebSocketURL    string
 	OllamaURL           string
 	OllamaModel         string
+	AIProvider          string
+	AIBaseURL           string
+	AIModel             string
+	AIAPIKey            string
+	AIHarnessURL        string
+	AIHarnessToken      string
+	AIHarnessMCPURL     string
+	AIHarnessModel      string
+	AIHarnessTimeout    time.Duration
+	AITestOrigins       []string
+	AITestOllamaURL     string
 	WeaviateURL         string
 	VideoSecrets        map[string]string
 	VideoMediaHosts     []string
+	VideoPreviewOrigins []string
 	ThingsPanelURL      string
 	ThingsPanelUser     string
 	ThingsPanelPassword string
@@ -41,6 +53,11 @@ type Config struct {
 }
 
 func Load() Config {
+	aiProvider := strings.ToLower(strings.TrimSpace(os.Getenv("IOT_AI_PROVIDER")))
+	aiAPIKey := strings.TrimSpace(os.Getenv("IOT_AI_API_KEY"))
+	if aiAPIKey == "" && aiProvider == "deepseek" {
+		aiAPIKey = strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY"))
+	}
 	return Config{
 		HTTPAddr:            get("IOT_HTTP_ADDR", ":8080"),
 		CORSAllowedOrigins:  split(os.Getenv("IOT_CORS_ALLOWED_ORIGINS")),
@@ -63,9 +80,21 @@ func Load() Config {
 		MQTTWebSocketURL:    os.Getenv("IOT_MQTT_WEBSOCKET_PUBLIC_URL"),
 		OllamaURL:           get("IOT_OLLAMA_URL", "http://localhost:11434"),
 		OllamaModel:         get("IOT_OLLAMA_MODEL", "qwen3:8b"),
+		AIProvider:          aiProvider,
+		AIBaseURL:           strings.TrimRight(os.Getenv("IOT_AI_BASE_URL"), "/"),
+		AIModel:             strings.TrimSpace(os.Getenv("IOT_AI_MODEL")),
+		AIAPIKey:            aiAPIKey,
+		AIHarnessURL:        strings.TrimRight(strings.TrimSpace(os.Getenv("IOT_AI_HARNESS_URL")), "/"),
+		AIHarnessToken:      strings.TrimSpace(os.Getenv("IOT_AI_HARNESS_TOKEN")),
+		AIHarnessMCPURL:     strings.TrimSpace(os.Getenv("IOT_AI_HARNESS_MCP_URL")),
+		AIHarnessModel:      strings.TrimSpace(os.Getenv("IOT_AI_HARNESS_MODEL")),
+		AIHarnessTimeout:    duration("IOT_AI_HARNESS_TIMEOUT", 90*time.Second),
+		AITestOrigins:       split(get("IOT_AI_PROVIDER_TEST_ALLOWED_ORIGINS", "https://api.deepseek.com,http://localhost:11434,http://127.0.0.1:11434,http://[::1]:11434,http://ollama:11434")),
+		AITestOllamaURL:     get("IOT_AI_OLLAMA_URL", get("IOT_OLLAMA_URL", "http://localhost:11434")),
 		WeaviateURL:         os.Getenv("IOT_WEAVIATE_URL"),
 		VideoSecrets:        parsePairs(os.Getenv("IOT_VIDEO_PLATFORM_SECRETS")),
 		VideoMediaHosts:     split(os.Getenv("IOT_VIDEO_MEDIA_ALLOWED_HOSTS")),
+		VideoPreviewOrigins: split(os.Getenv("IOT_VIDEO_PREVIEW_ALLOWED_ORIGINS")),
 		ThingsPanelURL:      strings.TrimRight(os.Getenv("IOT_THINGSPANEL_URL"), "/"),
 		ThingsPanelUser:     os.Getenv("IOT_THINGSPANEL_USER"),
 		ThingsPanelPassword: os.Getenv("IOT_THINGSPANEL_PASSWORD"),

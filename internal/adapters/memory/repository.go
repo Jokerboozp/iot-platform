@@ -383,7 +383,7 @@ func (r *Repository) SaveVideoEvent(_ context.Context, v model.VideoAlarmEvent) 
 func (r *Repository) UpdateVideoEvent(_ context.Context, v model.VideoAlarmEvent) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.video[v.TenantID+"|"+v.EventID] = cloneVideoEvent(v)
+	r.video[key(v.TenantID, v.EventID)] = cloneVideoEvent(v)
 	return nil
 }
 func (r *Repository) ListPendingVideoEvents(_ context.Context, limit int) ([]model.VideoAlarmEvent, error) {
@@ -431,13 +431,13 @@ func (r *Repository) ListVideoCameraMappings(_ context.Context, tenant string) (
 func (r *Repository) SaveAIAnalysis(_ context.Context, v model.AIAnalysis) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.ai[v.AlarmID] = v
+	r.ai[key(v.TenantID, v.AlarmID)] = v
 	return nil
 }
-func (r *Repository) GetAIAnalysis(_ context.Context, id string) (model.AIAnalysis, error) {
+func (r *Repository) GetAIAnalysis(_ context.Context, tenant, id string) (model.AIAnalysis, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	v, ok := r.ai[id]
+	v, ok := r.ai[key(tenant, id)]
 	if !ok {
 		return v, ErrNotFound
 	}

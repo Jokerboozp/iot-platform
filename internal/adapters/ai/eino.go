@@ -58,3 +58,9 @@ func (e *EinoOrchestrator) RuleDraft(ctx context.Context, tenant, text string) (
 	return e.rule.Invoke(ctx, ruleInput{tenant, text})
 }
 func (e *EinoOrchestrator) Health(ctx context.Context) error { return e.base.Health(ctx) }
+func (e *EinoOrchestrator) ProviderInfo() ports.AIPluginInfo {
+	if provider, ok := e.base.(ports.AIInspectable); ok {
+		return provider.ProviderInfo()
+	}
+	return ports.AIPluginInfo{ID: "unknown", Name: "Unknown AI provider", Enabled: true}
+}

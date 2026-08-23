@@ -292,6 +292,7 @@ type VideoAlarmEvent struct {
 }
 
 type AIAnalysis struct {
+	TenantID        string   `json:"tenantId,omitempty"`
 	AlarmID         string   `json:"alarmId"`
 	Summary         string   `json:"summary"`
 	PossibleReasons []string `json:"possibleReasons"`
@@ -357,6 +358,9 @@ type VideoCameraMapping struct {
 	RelatedDeviceIDs []string `json:"relatedDeviceIds,omitempty"`
 	VideoPlatformID  string   `json:"videoPlatformId,omitempty"`
 	StreamURL        string   `json:"streamUrl,omitempty"`
+	StreamType       string   `json:"streamType,omitempty"`
+	StreamConfigured bool     `json:"streamConfigured,omitempty"`
+	PreviewEligible  bool     `json:"previewEligible,omitempty"`
 	Enabled          bool     `json:"enabled"`
 	UpdatedAt        int64    `json:"updatedAt"`
 }

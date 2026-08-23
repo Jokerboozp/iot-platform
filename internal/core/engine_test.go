@@ -50,7 +50,7 @@ func TestRawToAlarmPipeline(t *testing.T) {
 	if _, created, err := e.IngestRaw(ctx, raw); err != nil || created {
 		t.Fatalf("duplicate created=%v err=%v", created, err)
 	}
-	if _, err = repo.GetAIAnalysis(ctx, alarms[0].ID); err != nil {
+	if _, err = repo.GetAIAnalysis(ctx, alarms[0].TenantID, alarms[0].ID); err != nil {
 		t.Fatalf("ai analysis not saved: %v", err)
 	}
 	if len(realtime.Messages) < 2 {
