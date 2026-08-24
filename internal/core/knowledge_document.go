@@ -56,7 +56,7 @@ func extractOfficeXML(data []byte) (string, error) {
 	var out strings.Builder
 	for _, f := range files {
 		name := strings.ToLower(f.Name)
-		if !strings.HasSuffix(name, ".xml") || !(strings.HasPrefix(name, "word/") || strings.HasPrefix(name, "ppt/slides/") || strings.HasPrefix(name, "xl/sharedstrings") || strings.HasPrefix(name, "content.xml")) {
+		if !strings.HasSuffix(name, ".xml") || !(strings.HasPrefix(name, "word/") || strings.HasPrefix(name, "ppt/slides/") || strings.HasPrefix(name, "xl/sharedstrings") || strings.HasPrefix(name, "xl/worksheets/") || strings.HasPrefix(name, "content.xml")) {
 			continue
 		}
 		r, openErr := f.Open()
@@ -68,7 +68,14 @@ func extractOfficeXML(data []byte) (string, error) {
 		if readErr != nil {
 			return "", readErr
 		}
-		out.WriteString(cleanText(string(b)))
+		content := string(b)
+		if strings.HasPrefix(name, "xl/") {
+			// Keep spreadsheet cells distinguishable after XML tags are removed;
+			// this gives the protocol assistant row/column boundaries to reason
+			// about instead of one concatenated string.
+			content = strings.NewReplacer("</c>", "\n", "</v>", "\t", "</t>", "\t").Replace(content)
+		}
+		out.WriteString(cleanText(content))
 		out.WriteByte('\n')
 	}
 	text := strings.TrimSpace(out.String())

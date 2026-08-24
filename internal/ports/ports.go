@@ -102,6 +102,14 @@ type AIClient interface {
 	Health(context.Context) error
 }
 
+// AIJSONGenerator is an optional structured-output capability. Keeping it
+// separate from AIClient preserves compatibility with provider implementations
+// that only support ordinary chat while allowing protocol and inspection
+// workflows to request machine-readable output.
+type AIJSONGenerator interface {
+	GenerateJSON(context.Context, string, string, string) (string, error)
+}
+
 type AIPluginConfig struct {
 	Provider string `json:"provider"`
 	BaseURL  string `json:"baseUrl,omitempty"`
@@ -204,6 +212,14 @@ type AIWorkflowRuntime interface {
 
 type AIWorkflowManager interface {
 	SaveWorkflow(context.Context, AIWorkflowManifest) (AIWorkflowPlugin, error)
+}
+
+// AIWorkflowAdminManager exposes the full manifest catalog and destructive
+// operations to the platform administration API. The public runtime contract
+// intentionally remains read-only and only returns enabled plugin metadata.
+type AIWorkflowAdminManager interface {
+	ListWorkflowManifests(context.Context) ([]AIWorkflowManifest, error)
+	DeleteWorkflow(context.Context, string) error
 }
 
 type KnowledgeBase interface {

@@ -119,7 +119,7 @@ func (e *Engine) parseReplay(ctx context.Context, raw model.RawMessage, version 
 	if err == nil && product.ProtocolPackageID != "" {
 		pkg, pkgErr := e.Repo.GetProtocolPackage(ctx, raw.TenantID, product.ProtocolPackageID)
 		if pkgErr == nil {
-			return e.Parsers.ParseVersion(pkg.ParserType, version, raw)
+			return e.Parsers.ParseVersionWithConfig(pkg.ParserType, version, pkg.Config, raw)
 		}
 	}
 	if version != "" {

@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
-import { access, mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
+import { access, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { dirname, join, resolve } from 'node:path'
 import { Readable } from 'node:stream'
@@ -22,6 +22,7 @@ export const READ_ONLY_TOOL_CEILING = Object.freeze([
   'mcp__iot__query_property_history',
   'mcp__iot__query_similar_alarms',
   'mcp__iot__query_knowledge_base',
+  'mcp__iot__create_rule_draft',
 ])
 
 const readOnlyToolCeiling = new Set(READ_ONLY_TOOL_CEILING)
@@ -50,7 +51,7 @@ const BODY_KEYS = new Set([
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/
 const CAPABILITY_PATTERN = /^[^\u0000-\u001f\u007f]{1,64}$/u
-const BUILTIN_PLUGIN_IDS = new Set(['alarm-handler', 'ops-assistant', 'system-observer'])
+const BUILTIN_PLUGIN_IDS = new Set(['alarm-handler', 'ops-assistant', 'system-observer', 'device-health-inspector', 'protocol-assistant'])
 
 class HttpError extends Error {
   constructor(status, code, message) {
@@ -239,6 +240,22 @@ function publicPlugin(plugin) {
   }
 }
 
+function adminPlugin(plugin) {
+  return {
+    schemaVersion: plugin.schemaVersion,
+    id: plugin.id,
+    name: plugin.name,
+    description: plugin.description,
+    version: plugin.version,
+    enabled: plugin.enabled,
+    persona: plugin.persona,
+    defaultModel: plugin.defaultModel,
+    maxTokens: plugin.maxTokens,
+    capabilities: [...plugin.capabilities],
+    allowedTools: [...plugin.allowedTools],
+  }
+}
+
 async function readBody(request, maxBytes) {
   const chunks = []
   let size = 0
@@ -332,6 +349,32 @@ function toolResultFailed(data) {
   if (data?.error !== undefined) return true
   const content = data?.message?.content
   return Array.isArray(content) && content.some(item => item !== null && typeof item === 'object' && item.isError === true)
+}
+
+function toolResultText(data) {
+  if (typeof data?.result === 'string') return data.result
+  if (data?.result !== null && typeof data?.result === 'object') return JSON.stringify(data.result)
+  const content = data?.message?.content
+  if (!Array.isArray(content)) return undefined
+  const direct = content.find(item => item !== null && typeof item === 'object' && typeof item.text === 'string')?.text
+  if (typeof direct === 'string') return direct
+  const toolResult = content.find(item => item !== null && typeof item === 'object' && item.type === 'tool-result')
+  const text = Array.isArray(toolResult?.content)
+    ? toolResult.content.find(item => item !== null && typeof item === 'object' && typeof item.text === 'string')?.text
+    : undefined
+  return typeof text === 'string' ? text : undefined
+}
+
+function clientActionForTool(tool, data) {
+  if (tool !== 'mcp__iot__create_rule_draft') return undefined
+  const text = toolResultText(data)
+  if (text === undefined || text.length > 65536) return undefined
+  let result
+  try { result = JSON.parse(text) } catch { return undefined }
+  if (result?.kind !== 'ruleDraft' || result.draft === null || typeof result.draft !== 'object' || Array.isArray(result.draft)) return undefined
+  const allowed = ['id', 'name', 'alarmType', 'level', 'match', 'conditions', 'durationSeconds', 'recovery', 'actions', 'expression', 'enabled', 'version']
+  const draft = Object.fromEntries(allowed.filter(key => result.draft[key] !== undefined).map(key => [key, result.draft[key]]))
+  return { type: 'RULE_DRAFT_READY', draft, persisted: result.persisted === true, requiresHumanApproval: true }
 }
 
 function turnFailure(result) {
@@ -752,6 +795,12 @@ export function createGateway(options = {}) {
     json(response, 200, { items: plugins.filter(plugin => plugin.enabled).map(publicPlugin) })
   }
 
+  const handleAdminPlugins = async (request, response) => {
+    requireGatewayToken(request)
+    const plugins = await loadPluginCatalog(pluginDir)
+    json(response, 200, { items: plugins.map(adminPlugin), count: plugins.length })
+  }
+
   const handleSavePlugin = async (request, response) => {
     requireGatewayToken(request)
     const raw = await readJson(request, maximumBodyBytes)
@@ -776,6 +825,26 @@ export function createGateway(options = {}) {
     await writeFile(temporary, `${JSON.stringify(raw, null, 2)}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
     await rename(temporary, target)
     json(response, updating ? 200 : 201, publicPlugin(candidate))
+  }
+
+  const handleDeletePlugin = async (request, response, workflowID) => {
+    requireGatewayToken(request)
+    if (!ID_PATTERN.test(workflowID)) {
+      throw new HttpError(422, 'WORKFLOW_ID_INVALID', 'workflow id has an invalid format')
+    }
+    if (BUILTIN_PLUGIN_IDS.has(workflowID)) {
+      throw new HttpError(409, 'BUILTIN_PLUGIN_IMMUTABLE', 'built-in workflow plugins cannot be deleted')
+    }
+    const target = join(pluginDir, `${workflowID}.json`)
+    try {
+      await unlink(target)
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        throw new HttpError(404, 'WORKFLOW_NOT_FOUND', 'workflow plugin was not found')
+      }
+      throw error
+    }
+    json(response, 200, { deleted: true, id: workflowID })
   }
 
   const handleChat = async (request, response) => {
@@ -861,10 +930,12 @@ export function createGateway(options = {}) {
             const callId = event.data?.callId ?? event.data?.message?.source?.callId
             if (typeof callId === 'string') {
               const tool = calls.get(callId)
+              const clientAction = clientActionForTool(tool, event.data)
               emit('tool.completed', {
                 callId,
                 ...(tool === undefined ? {} : { tool }),
                 success: !toolResultFailed(event.data),
+                ...(clientAction === undefined ? {} : { data: { clientAction } }),
               })
             }
           }
@@ -900,10 +971,18 @@ export function createGateway(options = {}) {
     const url = new URL(request.url ?? '/', 'http://gateway.invalid')
     if (url.search !== '') throw new HttpError(400, 'QUERY_NOT_ALLOWED', 'query parameters are not supported')
     if (request.method === 'GET' && url.pathname === '/health') return handleHealth(response)
+    if (request.method === 'GET' && url.pathname === '/v1/plugins/admin') return handleAdminPlugins(request, response)
     if (request.method === 'GET' && url.pathname === '/v1/plugins') return handlePlugins(request, response)
     if (request.method === 'POST' && url.pathname === '/v1/plugins') return handleSavePlugin(request, response)
+    if (request.method === 'DELETE' && url.pathname.startsWith('/v1/plugins/')) {
+      const encodedID = url.pathname.slice('/v1/plugins/'.length)
+      if (encodedID === '' || encodedID.includes('/')) throw new HttpError(422, 'WORKFLOW_ID_INVALID', 'workflow id has an invalid format')
+      let workflowID
+      try { workflowID = decodeURIComponent(encodedID) } catch { throw new HttpError(422, 'WORKFLOW_ID_INVALID', 'workflow id has an invalid format') }
+      return handleDeletePlugin(request, response, workflowID)
+    }
     if (request.method === 'POST' && url.pathname === '/v1/chat/stream') return handleChat(request, response)
-    if (['/health', '/v1/plugins', '/v1/chat/stream'].includes(url.pathname)) {
+    if (['/health', '/v1/plugins', '/v1/plugins/admin', '/v1/chat/stream'].includes(url.pathname)) {
       throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'method is not allowed')
     }
     throw new HttpError(404, 'NOT_FOUND', 'route not found')

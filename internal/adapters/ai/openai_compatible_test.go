@@ -131,7 +131,7 @@ func TestOpenAICompatibleLimitsSameOriginRedirects(t *testing.T) {
 }
 
 func TestDecodeRuleDraftNormalizesObjectShapedModelOutput(t *testing.T) {
-	rule, err := decodeRuleDraft(`{"name":"smoke_detector_high_alarm","alarmType":"smoke","level":"high","match":{"deviceType":"smoke_detector"},"conditions":{"smoke":true},"durationSeconds":0,"recovery":{"event":"smoke_clear"}}`)
+	rule, err := decodeRuleDraft(`{"name":"smoke_detector_high_alarm","alarmType":"smoke","level":"high","match":{"deviceType":"smoke_detector"},"conditions":{"smoke":true},"durationSeconds":0,"recovery":{"event":"smoke_clear"},"actions":{"type":"open_camera","cameraId":"camera-001"}}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,12 +144,21 @@ func TestDecodeRuleDraftNormalizesObjectShapedModelOutput(t *testing.T) {
 	if len(rule.Recovery) != 1 || rule.Recovery[0].Field != "event" || rule.Recovery[0].Value != "smoke_clear" {
 		t.Fatalf("unexpected recovery: %#v", rule.Recovery)
 	}
+	if len(rule.Actions) != 1 || rule.Actions[0].Type != "OPEN_CAMERA" || rule.Actions[0].CameraID != "camera-001" {
+		t.Fatalf("unexpected actions: %#v", rule.Actions)
+	}
 }
 
 func TestProviderRegistry(t *testing.T) {
 	registry := NewProviderRegistry()
-	if len(registry.List()) < 4 {
-		t.Fatalf("expected built-in provider plugins, got %#v", registry.List())
+	items := registry.List()
+	if len(items) < 4 {
+		t.Fatalf("expected built-in provider plugins, got %#v", items)
+	}
+	for _, item := range items {
+		if item.ID != "disabled" && !item.Enabled {
+			t.Fatalf("provider %q is not selectable in the test sandbox: %#v", item.ID, item)
+		}
 	}
 	if _, err := registry.Create(ports.AIPluginConfig{Provider: "deepseek"}); err == nil {
 		t.Fatal("DeepSeek plugin accepted a missing API key")

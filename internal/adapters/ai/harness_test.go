@@ -35,6 +35,14 @@ func TestHarnessClientSeparatesCredentialsAndParsesNDJSON(t *testing.T) {
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{"id": "ops-assistant", "name": "Ops", "enabled": true, "defaultModel": "deepseek-v4-flash", "maxTokens": 16384}}})
+		case "/v1/plugins/admin":
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []ports.AIWorkflowManifest{{SchemaVersion: 1, ID: "dynamic", Name: "Dynamic", Description: "Dynamic Agent", Version: "1.0.0", Enabled: false, Persona: "Read-only status agent", DefaultModel: "deepseek-chat", MaxTokens: 2048, Capabilities: []string{"status"}, AllowedTools: []string{"mcp__iot__query_system_overview"}}}})
+		case "/v1/plugins/dynamic":
+			if r.Method != http.MethodDelete {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
 		case "/v1/chat/stream":
 			if r.Header.Get("Authorization") != "Bearer short-mcp-jwt" {
 				t.Errorf("MCP JWT sent in wrong header: %q", r.Header.Get("Authorization"))
@@ -65,6 +73,13 @@ func TestHarnessClientSeparatesCredentialsAndParsesNDJSON(t *testing.T) {
 	created, err := client.SaveWorkflow(context.Background(), ports.AIWorkflowManifest{SchemaVersion: 1, ID: "dynamic", Name: "Dynamic", Description: "Dynamic Agent", Version: "1.0.0", Enabled: true, Persona: "Read-only status agent", DefaultModel: "deepseek-chat", MaxTokens: 2048, Capabilities: []string{"status"}, AllowedTools: []string{"mcp__iot__query_system_overview"}})
 	if err != nil || created.ID != "dynamic" || savedManifest.ID != "dynamic" {
 		t.Fatalf("created=%#v saved=%#v err=%v", created, savedManifest, err)
+	}
+	manifests, err := client.ListWorkflowManifests(context.Background())
+	if err != nil || len(manifests) != 1 || manifests[0].ID != "dynamic" || manifests[0].Persona == "" || manifests[0].Enabled {
+		t.Fatalf("manifests=%#v err=%v", manifests, err)
+	}
+	if err = client.DeleteWorkflow(context.Background(), "dynamic"); err != nil {
+		t.Fatalf("delete workflow: %v", err)
 	}
 	var types []string
 	result, err := client.StreamChat(context.Background(), ports.AIWorkflowRequest{RunID: "run-1", ConversationID: "conv-1", WorkflowID: "ops-assistant", Question: "status?", MCPToken: "short-mcp-jwt"}, func(event ports.AIWorkflowEvent) error {

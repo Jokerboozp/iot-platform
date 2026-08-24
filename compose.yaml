@@ -80,6 +80,22 @@ services:
     depends_on:
       platform-api: {condition: service_started}
 
+  gb26875-gateway:
+    <<: *service-defaults
+    profiles: [gb26875]
+    image: ${IOT_PLATFORM_API_IMAGE:-iot-platform-api:local}
+    entrypoint: ["/app/gb26875-gateway"]
+    environment:
+      GB26875_LISTEN: :26875
+      GB26875_UDP_LISTEN: :26875
+      GB26875_PLATFORM_URL: http://platform-api:8080
+      GB26875_TENANT: ${GB26875_TENANT:-tenant_001}
+      GB26875_USERNAME: ${IOT_ADMIN_USER:-admin}
+      GB26875_PASSWORD: ${IOT_ADMIN_PASSWORD:-admin123}
+    ports: ["${GB26875_PORT:-26875}:26875/tcp", "${GB26875_PORT:-26875}:26875/udp"]
+    depends_on:
+      platform-api: {condition: service_started}
+
   deepseek-harness:
     <<: *service-defaults
     profiles: [harness]
@@ -295,7 +311,7 @@ services:
     entrypoint: ["/bin/bash", "-ec"]
     command:
       - |
-        for topic in iot.raw.message iot.parse.failed iot.property.report iot.event.report iot.device.state iot.video.alarm iot.alarm.raised iot.alarm.recovered iot.alarm.confirmed iot.alarm.ai-analysis iot.replay.request; do
+        for topic in iot.raw.message iot.parse.failed iot.property.report iot.event.report iot.device.state iot.video.alarm iot.alarm.raised iot.alarm.recovered iot.alarm.confirmed iot.alarm.ai-analysis iot.ui-action iot.replay.request; do
           rpk -X brokers=redpanda:9092 topic create "$$topic" --partitions 12 --replicas 1 || true
         done
     networks: [iot]

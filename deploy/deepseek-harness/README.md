@@ -68,6 +68,13 @@ Important settings:
 metadata and human-readable capabilities. It intentionally omits personas and
 tool allowlists.
 
+`GET /v1/plugins/admin` uses the same service token and returns the complete
+manifest catalog, including disabled plugins, personas and tool allowlists.
+`POST /v1/plugins` creates or updates a custom manifest, while
+`DELETE /v1/plugins/{id}` removes a custom manifest. Built-in manifests are
+immutable. The Go platform API exposes these operations only to administrators
+through its Agent management screen.
+
 `POST /v1/chat/stream` requires both credentials:
 
 ```bash
@@ -105,6 +112,10 @@ switch in gateway code. The bundled examples are:
   and knowledge-base search.
 - `alarm-handler`: alarms, property history, similar alarms, and
   knowledge-base search only.
+- `device-health-inspector`: device status, activity alarms and property trend
+  evidence for an operator-facing health inspection.
+- `protocol-assistant`: protocol documentation and point-table interpretation;
+  the platform UI performs the sample preview and human-approved publish.
 
 A manifest supplies `persona`, `defaultModel`, `maxTokens`, `capabilities`, and
 `allowedTools`. To add another read-only business workflow, add a manifest with

@@ -114,6 +114,46 @@ func (o *Ollama) AnalyzeAlarm(ctx context.Context, a model.Alarm, history []map[
 func (o *Ollama) Chat(ctx context.Context, tenant, question string) (string, error) {
 	return o.call(ctx, "你是消防物联网运维助手。回答必须基于提供的受控平台数据；缺少数据时明确说明，不能编造，也不能直接控制设备。租户："+tenant, question)
 }
+func (o *Ollama) GenerateJSON(ctx context.Context, tenant, system, user string) (string, error) {
+	return o.callJSON(ctx, system+"\n租户："+tenant, user)
+}
+func (o *Ollama) callJSON(ctx context.Context, system, user string) (string, error) {
+	body, err := json.Marshal(chatRequest{Model: o.model, Stream: false, Format: "json", Messages: []map[string]string{{"role": "system", "content": system}, {"role": "user", "content": user}}})
+	if err != nil {
+		return "", fmt.Errorf("Ollama request could not be encoded")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/api/chat", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("Ollama request could not be created")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := o.http.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("Ollama request failed")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return "", fmt.Errorf("ollama request failed with HTTP %d", resp.StatusCode)
+	}
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, maxAIProviderResponseBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("Ollama response could not be read")
+	}
+	if len(responseBody) > maxAIProviderResponseBytes {
+		return "", fmt.Errorf("Ollama response exceeded the size limit")
+	}
+	var out chatResponse
+	if err := json.Unmarshal(responseBody, &out); err != nil {
+		return "", fmt.Errorf("Ollama returned an invalid response")
+	}
+	if strings.TrimSpace(out.Message.Content) == "" {
+		return "", fmt.Errorf("Ollama returned an empty response")
+	}
+	return out.Message.Content, nil
+}
 func (o *Ollama) RuleDraft(ctx context.Context, tenant, text string) (model.AlarmRule, error) {
 	content, err := o.call(ctx, ruleDraftSystemPrompt+"租户："+tenant, text)
 	if err != nil {
@@ -167,6 +207,9 @@ func (NoopAI) AnalyzeAlarm(_ context.Context, a model.Alarm, _ []map[string]any,
 }
 func (NoopAI) Chat(context.Context, string, string) (string, error) {
 	return "AI 模型未启用。请配置 IOT_OLLAMA_URL 与模型后重试。", nil
+}
+func (NoopAI) GenerateJSON(context.Context, string, string, string) (string, error) {
+	return "", fmt.Errorf("AI model disabled")
 }
 func (NoopAI) RuleDraft(context.Context, string, string) (model.AlarmRule, error) {
 	return model.AlarmRule{}, fmt.Errorf("AI model disabled")

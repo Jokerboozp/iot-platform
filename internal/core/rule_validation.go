@@ -25,6 +25,43 @@ func (e *Engine) ValidateRuleDraft(ctx context.Context, rule model.AlarmRule) ([
 	if rule.DurationSeconds < 0 {
 		return nil, nil, fmt.Errorf("rule schema: durationSeconds cannot be negative")
 	}
+	if len(rule.Actions) > 4 {
+		return nil, nil, fmt.Errorf("rule actions cannot exceed 4")
+	}
+	allowedPages := map[string]bool{
+		"dashboard":         true,
+		"devices":           true,
+		"products":          true,
+		"protocols":         true,
+		"protocolassistant": true,
+		"integration":       true,
+		"cameras":           true,
+		"alarms":            true,
+		"inspection":        true,
+		"raw":               true,
+		"rules":             true,
+		"knowledge":         true,
+		"ai":                true,
+	}
+	for _, action := range rule.Actions {
+		switch strings.ToUpper(strings.TrimSpace(action.Type)) {
+		case "OPEN_CAMERA":
+			cameraID := strings.TrimSpace(action.CameraID)
+			if cameraID == "" {
+				return nil, nil, fmt.Errorf("OPEN_CAMERA action requires cameraId")
+			}
+			camera, err := e.Repo.GetVideoCameraMapping(ctx, rule.TenantID, cameraID)
+			if err != nil || !camera.Enabled || strings.TrimSpace(camera.StreamURL) == "" {
+				return nil, nil, fmt.Errorf("camera %q is not available for preview", cameraID)
+			}
+		case "OPEN_PAGE":
+			if !allowedPages[strings.ToLower(strings.TrimSpace(action.Page))] {
+				return nil, nil, fmt.Errorf("OPEN_PAGE action page %q is not allowed", action.Page)
+			}
+		default:
+			return nil, nil, fmt.Errorf("rule action type %q is not allowed", action.Type)
+		}
+	}
 	if len(rule.Conditions) == 0 && strings.TrimSpace(rule.Expression) == "" {
 		return nil, nil, fmt.Errorf("rule schema: conditions or expression is required")
 	}

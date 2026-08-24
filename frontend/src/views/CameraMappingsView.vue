@@ -73,7 +73,21 @@ async function openPreview(value) {
 
 function closePreview() { preview.value = null }
 
-onMounted(load)
+async function consumeNavigationAction() {
+  const raw = sessionStorage.getItem('iot:navigation-detail')
+  if (!raw) return
+  try {
+    const detail = JSON.parse(raw)
+    if (!detail.autoPreview || !detail.cameraId) return
+    sessionStorage.removeItem('iot:navigation-detail')
+    const target = cameras.value.find(item => item.cameraId === detail.cameraId)
+    if (!target) return ElMessage.error(`未找到摄像头 ${detail.cameraId}`)
+    if (!target.previewEligible) return ElMessage.error(`摄像头 ${detail.cameraId} 当前不可预览`)
+    await openPreview(target)
+  } catch { /* ignore invalid navigation detail */ }
+}
+
+onMounted(async()=>{await load();await consumeNavigationAction()})
 </script>
 
 <template>

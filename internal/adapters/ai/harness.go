@@ -107,6 +107,46 @@ func (h *HarnessClient) ListWorkflows(ctx context.Context) ([]ports.AIWorkflowPl
 	return items, nil
 }
 
+// ListWorkflowManifests is the administration view of the Harness catalog.
+// Unlike ListWorkflows it includes disabled plugins and the private manifest
+// fields needed to edit an Agent (persona and allowedTools).
+func (h *HarnessClient) ListWorkflowManifests(ctx context.Context) ([]ports.AIWorkflowManifest, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, h.baseURL+"/v1/plugins/admin", nil)
+	if err != nil {
+		return nil, err
+	}
+	h.authorizeService(req)
+	res, err := h.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list harness workflow manifests: %w", err)
+	}
+	defer res.Body.Close()
+	body, readErr := io.ReadAll(io.LimitReader(res.Body, maxHarnessResponseBytes+1))
+	if readErr != nil {
+		return nil, fmt.Errorf("read harness workflow manifests: %w", readErr)
+	}
+	if len(body) > maxHarnessResponseBytes {
+		return nil, errors.New("harness workflow manifest response exceeds 1 MiB")
+	}
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return nil, fmt.Errorf("list harness workflow manifests: status %d", res.StatusCode)
+	}
+	var envelope struct {
+		Items []ports.AIWorkflowManifest `json:"items"`
+	}
+	var items []ports.AIWorkflowManifest
+	if err = json.Unmarshal(body, &items); err != nil {
+		if err = json.Unmarshal(body, &envelope); err != nil {
+			return nil, fmt.Errorf("decode harness workflow manifests: %w", err)
+		}
+		items = envelope.Items
+	}
+	if items == nil {
+		items = []ports.AIWorkflowManifest{}
+	}
+	return items, nil
+}
+
 func (h *HarnessClient) SaveWorkflow(ctx context.Context, manifest ports.AIWorkflowManifest) (ports.AIWorkflowPlugin, error) {
 	var plugin ports.AIWorkflowPlugin
 	payload, err := json.Marshal(manifest)
@@ -138,6 +178,28 @@ func (h *HarnessClient) SaveWorkflow(ctx context.Context, manifest ports.AIWorkf
 		return plugin, fmt.Errorf("decode saved harness workflow: %w", err)
 	}
 	return plugin, nil
+}
+
+func (h *HarnessClient) DeleteWorkflow(ctx context.Context, workflowID string) error {
+	workflowID = strings.TrimSpace(workflowID)
+	if workflowID == "" {
+		return errors.New("workflow id is required")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, h.baseURL+"/v1/plugins/"+url.PathEscape(workflowID), nil)
+	if err != nil {
+		return err
+	}
+	h.authorizeService(req)
+	res, err := h.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("delete harness workflow: %w", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 4096))
+		return fmt.Errorf("delete harness workflow: status %d", res.StatusCode)
+	}
+	return nil
 }
 
 func (h *HarnessClient) StreamChat(ctx context.Context, in ports.AIWorkflowRequest, emit func(ports.AIWorkflowEvent) error) (ports.AIWorkflowResult, error) {
@@ -270,3 +332,5 @@ func AllowedWorkflowEvent(eventType string) bool {
 }
 
 var _ ports.AIWorkflowRuntime = (*HarnessClient)(nil)
+var _ ports.AIWorkflowManager = (*HarnessClient)(nil)
+var _ ports.AIWorkflowAdminManager = (*HarnessClient)(nil)

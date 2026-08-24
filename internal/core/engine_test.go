@@ -32,7 +32,10 @@ func TestRawToAlarmPipeline(t *testing.T) {
 	if err = e.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
-	rule := model.AlarmRule{ID: "r1", TenantID: "t1", Name: "高温烟雾", AlarmType: "FIRE", Level: "HIGH", Enabled: true, Conditions: []model.RuleCondition{{Field: "temperature", Operator: ">", Value: 80}, {Field: "smoke", Operator: "eq", Value: true}}}
+	if err = repo.SaveVideoCameraMapping(ctx, model.VideoCameraMapping{TenantID: "t1", CameraID: "camera-001", CameraName: "一号摄像头", StreamURL: "https://media.example/live.m3u8", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	rule := model.AlarmRule{ID: "r1", TenantID: "t1", Name: "高温烟雾", AlarmType: "FIRE", Level: "HIGH", Enabled: true, Conditions: []model.RuleCondition{{Field: "temperature", Operator: ">", Value: 80}, {Field: "smoke", Operator: "eq", Value: true}}, Actions: []model.RuleAction{{Type: "OPEN_CAMERA", CameraID: "camera-001"}}}
 	if err = repo.SaveRule(ctx, rule); err != nil {
 		t.Fatal(err)
 	}
@@ -55,6 +58,20 @@ func TestRawToAlarmPipeline(t *testing.T) {
 	}
 	if len(realtime.Messages) < 2 {
 		t.Fatalf("expected state and alarm realtime messages, got %d", len(realtime.Messages))
+	}
+	foundAction := false
+	for _, published := range realtime.Messages {
+		if published.Topic != "/iot/ui-action/t1" {
+			continue
+		}
+		var event model.UIActionEvent
+		if err = json.Unmarshal(published.Payload, &event); err != nil {
+			t.Fatal(err)
+		}
+		foundAction = event.RuleID == "r1" && event.Action.Type == "OPEN_CAMERA" && event.Action.CameraID == "camera-001"
+	}
+	if !foundAction {
+		t.Fatalf("expected validated UI action event, messages=%#v", realtime.Messages)
 	}
 }
 
@@ -89,4 +106,34 @@ func TestGatewayAutomaticallyRegistersChildDevice(t *testing.T) {
 	if child.DeviceRole != "CHILD" || child.GatewayID != "gateway_1" || !child.AutoRegistered || child.RegistrationSource != "GATEWAY_AUTO" || child.ProductID != "sensor_product" {
 		t.Fatalf("unexpected child registration %#v", child)
 	}
+}
+
+func TestStateChangeIsStoredAsStandardMessage(t *testing.T) {
+	repo := memory.NewRepository()
+	archive, err := local.NewArchive(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bus := local.NewBus()
+	e := New(repo, archive, bus, local.NewRealtime(), parser.NewRegistry(parser.JSONParser{}), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := e.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	raw := model.RawMessage{MessageID: "raw_state_change", TenantID: "t1", ProductID: "json_sensor", DeviceID: "state_device", Protocol: "json", PayloadFormat: "json", Payload: json.RawMessage(`{"businessStatus":"ONLINE"}`)}
+	if _, _, err := e.IngestRaw(ctx, raw); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if message, getErr := repo.GetStandardMessageByRaw(ctx, "t1", raw.MessageID); getErr == nil {
+			if message.MessageType != model.StateChange {
+				t.Fatalf("unexpected message type: %s", message.MessageType)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("state-change standard message was not stored")
 }

@@ -56,6 +56,25 @@ func TestRuleDraftValidatesThingModelAndConflicts(t *testing.T) {
 	if _, _, err = engine.ValidateRuleDraft(ctx, draft); err == nil {
 		t.Fatal("expected undeclared thing-model field to fail")
 	}
+	draft.ProductID = ""
+	draft.Conditions[0].Field = "temperature"
+	draft.Actions = []model.RuleAction{{Type: "OPEN_CAMERA", CameraID: "missing-camera"}}
+	if _, _, err = engine.ValidateRuleDraft(ctx, draft); err == nil || !strings.Contains(err.Error(), "not available") {
+		t.Fatalf("expected unavailable camera action to fail, got %v", err)
+	}
+	if err = repo.SaveVideoCameraMapping(ctx, model.VideoCameraMapping{TenantID: "t1", CameraID: "camera-1", StreamURL: "https://media.example/live.m3u8", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	draft.Actions = []model.RuleAction{{Type: "OPEN_CAMERA", CameraID: "camera-1"}, {Type: "OPEN_PAGE", Page: "alarms"}}
+	if _, _, err = engine.ValidateRuleDraft(ctx, draft); err != nil {
+		t.Fatalf("expected allowlisted UI actions to pass: %v", err)
+	}
+	for _, page := range []string{"protocolAssistant", "inspection"} {
+		draft.Actions = []model.RuleAction{{Type: "OPEN_PAGE", Page: page}}
+		if _, _, err = engine.ValidateRuleDraft(ctx, draft); err != nil {
+			t.Fatalf("expected %s UI action to pass: %v", page, err)
+		}
+	}
 }
 
 func TestOfficeKnowledgeExtractionAndChunking(t *testing.T) {
@@ -71,6 +90,20 @@ func TestOfficeKnowledgeExtractionAndChunking(t *testing.T) {
 	chunks := ChunkKnowledgeText(strings.Repeat(text, 20), 80, 10)
 	if len(chunks) < 2 {
 		t.Fatalf("expected multiple overlapping chunks, got %d", len(chunks))
+	}
+}
+
+func TestSpreadsheetKnowledgeExtractionKeepsCells(t *testing.T) {
+	var data bytes.Buffer
+	zw := zip.NewWriter(&data)
+	shared, _ := zw.Create("xl/sharedStrings.xml")
+	_, _ = shared.Write([]byte(`<sst><si><t>temperature</t></si><si><t>unit</t></si></sst>`))
+	sheet, _ := zw.Create("xl/worksheets/sheet1.xml")
+	_, _ = sheet.Write([]byte(`<worksheet><sheetData><row><c><v>1</v></c><c t="s"><v>0</v></c><c t="s"><v>1</v></c></row></sheetData></worksheet>`))
+	_ = zw.Close()
+	text, err := ExtractKnowledgeText("point-table.xlsx", data.Bytes())
+	if err != nil || !strings.Contains(text, "temperature") || !strings.Contains(text, "unit") || !strings.Contains(text, "1") {
+		t.Fatalf("spreadsheet text=%q err=%v", text, err)
 	}
 }
 

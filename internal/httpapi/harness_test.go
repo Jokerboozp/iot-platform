@@ -25,10 +25,11 @@ import (
 )
 
 type captureWorkflowRuntime struct {
-	mu       sync.Mutex
-	requests []ports.AIWorkflowRequest
-	plugins  []ports.AIWorkflowPlugin
-	fail     bool
+	mu        sync.Mutex
+	requests  []ports.AIWorkflowRequest
+	plugins   []ports.AIWorkflowPlugin
+	manifests []ports.AIWorkflowManifest
+	fail      bool
 }
 
 func (f *captureWorkflowRuntime) ListWorkflows(context.Context) ([]ports.AIWorkflowPlugin, error) {
@@ -47,8 +48,54 @@ func (f *captureWorkflowRuntime) SaveWorkflow(_ context.Context, manifest ports.
 		}
 	}
 	plugin := ports.AIWorkflowPlugin{SchemaVersion: manifest.SchemaVersion, ID: manifest.ID, Name: manifest.Name, Description: manifest.Description, Version: manifest.Version, DefaultModel: manifest.DefaultModel, MaxTokens: manifest.MaxTokens, Enabled: manifest.Enabled, Capabilities: manifest.Capabilities, KnowledgeEnabled: knowledge}
-	f.plugins = append(f.plugins, plugin)
+	updated := false
+	for index := range f.plugins {
+		if f.plugins[index].ID == plugin.ID {
+			f.plugins[index] = plugin
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		f.plugins = append(f.plugins, plugin)
+	}
+	updated = false
+	for index := range f.manifests {
+		if f.manifests[index].ID == manifest.ID {
+			f.manifests[index] = manifest
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		f.manifests = append(f.manifests, manifest)
+	}
 	return plugin, nil
+}
+
+func (f *captureWorkflowRuntime) ListWorkflowManifests(context.Context) ([]ports.AIWorkflowManifest, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]ports.AIWorkflowManifest(nil), f.manifests...), nil
+}
+
+func (f *captureWorkflowRuntime) DeleteWorkflow(_ context.Context, workflowID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for index, manifest := range f.manifests {
+		if manifest.ID != workflowID {
+			continue
+		}
+		f.manifests = append(f.manifests[:index], f.manifests[index+1:]...)
+		for pluginIndex, plugin := range f.plugins {
+			if plugin.ID == workflowID {
+				f.plugins = append(f.plugins[:pluginIndex], f.plugins[pluginIndex+1:]...)
+				break
+			}
+		}
+		return nil
+	}
+	return errors.New("workflow not found")
 }
 
 func (f *captureWorkflowRuntime) StreamChat(_ context.Context, in ports.AIWorkflowRequest, emit func(ports.AIWorkflowEvent) error) (ports.AIWorkflowResult, error) {
@@ -130,6 +177,22 @@ func TestHarnessHTTPBridgeAndTenantScopedConversation(t *testing.T) {
 	if createdAgent["id"] != "custom-status" || createdAgent["name"] != "Custom Status" {
 		t.Fatalf("unexpected dynamic Agent: %#v", createdAgent)
 	}
+	managed := requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/ai/workflows/admin", adminToken, nil, http.StatusOK)
+	if managed["count"] != float64(1) || managed["items"].([]any)[0].(map[string]any)["persona"] != manifest["persona"] {
+		t.Fatalf("unexpected managed Agent catalog: %#v", managed)
+	}
+	requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/ai/workflows/admin", token, nil, http.StatusForbidden)
+	updatedManifest := map[string]any{}
+	for key, value := range manifest {
+		updatedManifest[key] = value
+	}
+	updatedManifest["enabled"] = false
+	updated := requestJSON(t, server.Client(), http.MethodPut, server.URL+"/api/v1/ai/workflows/custom-status", adminToken, updatedManifest, http.StatusOK)
+	if updated["enabled"] != false {
+		t.Fatalf("workflow update did not persist enabled=false: %#v", updated)
+	}
+	requestJSON(t, server.Client(), http.MethodDelete, server.URL+"/api/v1/ai/workflows/custom-status", adminToken, nil, http.StatusOK)
+	requestJSON(t, server.Client(), http.MethodDelete, server.URL+"/api/v1/ai/workflows/ops-assistant", adminToken, nil, http.StatusConflict)
 	defaultBinding := requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/ai/workflows/ops-assistant/knowledge-binding", token, nil, http.StatusOK)
 	if defaultBinding["retrievalMode"] != "auto" || defaultBinding["topK"] != float64(5) {
 		t.Fatalf("unexpected default knowledge binding: %#v", defaultBinding)

@@ -32,7 +32,7 @@ func TestHTTPWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine := core.New(repo, archive, local.NewBus(), local.NewRealtime(), parser.NewRegistry(parser.JSONParser{}), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := core.New(repo, archive, local.NewBus(), local.NewRealtime(), parser.NewRegistry(parser.JSONParser{}, parser.JavaScriptParser{}), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	engine.AI = aiadapter.NoopAI{}
 	engine.AIPlugins = aiadapter.NewProviderRegistry()
 	engine.KB = knowledge.NewLocal()
@@ -148,6 +148,11 @@ func TestHTTPWorkflow(t *testing.T) {
 	if protocolTest["success"] != true {
 		t.Fatalf("protocol test failed: %#v", protocolTest)
 	}
+	requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/protocol-packages", token, map[string]any{"id": "protocol_javascript", "name": "JavaScript 解析协议", "version": "1.0.0", "protocol": "javascript", "transport": "HTTP", "payloadFormat": "hex", "parserType": parser.JavaScriptParserName, "status": "PUBLISHED", "config": map[string]any{"source": "function parse(raw) { const b = hexToBytes(raw.payload); return {properties: {temperature: b[0] / 10}} }"}}, 201)
+	javascriptTest := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/protocol-packages/protocol_javascript/test", token, map[string]any{"payload": "2A"}, 200)
+	if javascriptTest["success"] != true || javascriptTest["standardMessage"].(map[string]any)["parser"] != parser.JavaScriptParserName || javascriptTest["standardMessage"].(map[string]any)["properties"].(map[string]any)["temperature"] != 4.2 {
+		t.Fatalf("unexpected javascript protocol test %#v", javascriptTest)
+	}
 	requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/products", token, map[string]any{"id": "product_json", "name": "JSON 传感器", "category": "sensor", "protocolPackageId": "protocol_json", "status": "ENABLED"}, 201)
 	managed := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/device-registry", token, map[string]any{"id": "device_managed", "name": "受管测试设备", "productId": "product_json", "status": "ENABLED"}, 201)
 	credential := managed["credential"].(map[string]any)
@@ -180,6 +185,9 @@ func TestHTTPWorkflow(t *testing.T) {
 	rawDetail := requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/raw-messages/raw_http_e2e", token, nil, 200)
 	if rawDetail["message"].(map[string]any)["messageId"] != "raw_http_e2e" {
 		t.Fatalf("unexpected raw detail %#v", rawDetail)
+	}
+	if rawDetail["parseStatus"] != "PARSED" || rawDetail["standardMessage"].(map[string]any)["messageType"] != "PROPERTY_REPORT" {
+		t.Fatalf("raw detail did not expose parsed standard message %#v", rawDetail)
 	}
 	downloadReq, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/raw-messages/raw_http_e2e/download", nil)
 	downloadReq.Header.Set("Authorization", "Bearer "+token)

@@ -26,6 +26,7 @@ import (
 	"iot-platform/internal/mcpserver"
 	"iot-platform/internal/metrics"
 	"iot-platform/internal/model"
+	"iot-platform/internal/parser"
 	"iot-platform/internal/ports"
 
 	"github.com/gin-gonic/gin"
@@ -102,10 +103,18 @@ func (s *Server) routes() {
 	s.router.GET("/api/v1/alarms/:id", s.authorize("viewer"), s.endpoint(s.alarm, "id"))
 	s.router.POST("/api/v1/alarms/:id/actions", s.authorize("operator"), s.endpoint(s.alarmAction, "id"))
 	s.router.GET("/api/v1/ai/alarm-analysis/:alarmId", s.authorize("viewer"), s.endpoint(s.aiAnalysis, "alarmId"))
+	s.router.POST("/api/v1/ai/alarm-analysis/:alarmId/run", s.authorize("operator"), s.endpoint(s.runAIAlarmAnalysis, "alarmId"))
+	s.router.POST("/api/v1/ai/health-inspection", s.authorize("viewer"), s.endpoint(s.healthInspection))
+	s.router.POST("/api/v1/ai/protocol-assistant/generate", s.authorize("operator"), s.endpoint(s.generateProtocolAssistant))
+	s.router.POST("/api/v1/ai/protocol-assistant/preview", s.authorize("operator"), s.endpoint(s.previewProtocolAssistant))
+	s.router.POST("/api/v1/ai/protocol-assistant/publish", s.authorize("operator"), s.endpoint(s.publishProtocolAssistant))
 	s.router.GET("/api/v1/ai/providers", s.authorize("viewer"), s.endpoint(s.aiProviders))
 	s.router.POST("/api/v1/ai/providers/test", s.authorize("admin"), s.endpoint(s.testAIProvider))
 	s.router.GET("/api/v1/ai/workflows", s.authorize("viewer"), s.endpoint(s.aiWorkflows))
+	s.router.GET("/api/v1/ai/workflows/admin", s.authorize("admin"), s.endpoint(s.aiWorkflowManifests))
 	s.router.POST("/api/v1/ai/workflows", s.authorize("admin"), s.endpoint(s.saveAIWorkflow))
+	s.router.PUT("/api/v1/ai/workflows/:id", s.authorize("admin"), s.endpoint(s.updateAIWorkflow, "id"))
+	s.router.DELETE("/api/v1/ai/workflows/:id", s.authorize("admin"), s.endpoint(s.deleteAIWorkflow, "id"))
 	s.router.GET("/api/v1/ai/workflows/:id/knowledge-binding", s.authorize("viewer"), s.endpoint(s.workflowKnowledgeBinding, "id"))
 	s.router.PUT("/api/v1/ai/workflows/:id/knowledge-binding", s.authorize("operator"), s.endpoint(s.workflowKnowledgeBinding, "id"))
 	s.router.POST("/api/v1/ai/chat", s.authorize("viewer"), s.endpoint(s.aiChat))
@@ -231,7 +240,7 @@ func (s *Server) protocolPackages(w http.ResponseWriter, r *http.Request) {
 		problem(w, 500, err.Error())
 		return
 	}
-	write(w, 200, map[string]any{"items": items, "count": len(items), "parserTypes": []string{"custom_json_parser", "fire_smoke_parser", "modbus_parser"}})
+	write(w, 200, map[string]any{"items": items, "count": len(items), "parserTypes": []string{"custom_json_parser", "configurable_json_parser", "configurable_hex_parser", "javascript_sandbox_parser", "gb26875_dahua_parser", "fire_smoke_parser", "modbus_parser"}})
 }
 func (s *Server) saveProtocolPackage(w http.ResponseWriter, r *http.Request) {
 	var v model.ProtocolPackage
@@ -250,10 +259,16 @@ func (s *Server) saveProtocolPackage(w http.ResponseWriter, r *http.Request) {
 		problem(w, 422, "name and parserType are required")
 		return
 	}
-	allowed := map[string]bool{"custom_json_parser": true, "fire_smoke_parser": true, "modbus_parser": true}
+	allowed := map[string]bool{"custom_json_parser": true, "configurable_json_parser": true, "configurable_hex_parser": true, "javascript_sandbox_parser": true, "gb26875_dahua_parser": true, "fire_smoke_parser": true, "modbus_parser": true}
 	if !allowed[v.ParserType] {
 		problem(w, 422, "unsupported parserType")
 		return
+	}
+	if v.ParserType == parser.JavaScriptParserName {
+		if _, err := parser.JavaScriptSource(v.Config); err != nil {
+			problem(w, 422, err.Error())
+			return
+		}
 	}
 	if v.Version == "" {
 		v.Version = "1.0.0"
@@ -314,7 +329,7 @@ func (s *Server) testProtocolPackage(w http.ResponseWriter, r *http.Request) {
 		in.DeviceID = "device_test"
 	}
 	raw := model.RawMessage{MessageID: "raw_test_" + randomHex(6), TenantID: pkg.TenantID, ProductID: in.ProductID, DeviceID: in.DeviceID, Protocol: pkg.Protocol, Transport: pkg.Transport, PayloadFormat: pkg.PayloadFormat, Payload: in.Payload, ReceivedAt: time.Now().UnixMilli()}
-	msg, err := s.engine.Parsers.ParseWith(pkg.ParserType, raw)
+	msg, err := s.engine.Parsers.ParseWithConfig(pkg.ParserType, pkg.Config, raw)
 	if err != nil {
 		write(w, 200, map[string]any{"success": false, "error": err.Error(), "raw": raw})
 		return
@@ -600,6 +615,13 @@ func (s *Server) listRaw(w http.ResponseWriter, r *http.Request) {
 		problem(w, 500, err.Error())
 		return
 	}
+	for i := range items {
+		if message, parseErr := s.engine.Repo.GetStandardMessageByRaw(r.Context(), c.TenantID, items[i].MessageID); parseErr == nil {
+			items[i].Parsed = true
+			items[i].ParsedMessageType = string(message.MessageType)
+			items[i].Parser = message.Parser
+		}
+	}
 	write(w, 200, map[string]any{"items": items, "count": len(items)})
 }
 func (s *Server) rawDetail(w http.ResponseWriter, r *http.Request) {
@@ -613,7 +635,12 @@ func (s *Server) rawDetail(w http.ResponseWriter, r *http.Request) {
 		problem(w, 500, "raw archive could not be read")
 		return
 	}
-	write(w, 200, map[string]any{"archive": idx, "message": raw})
+	result := map[string]any{"archive": idx, "message": raw, "parseStatus": "UNPARSED"}
+	if standard, parseErr := s.engine.Repo.GetStandardMessageByRaw(r.Context(), claims(r).TenantID, idx.MessageID); parseErr == nil {
+		result["parseStatus"] = "PARSED"
+		result["standardMessage"] = standard
+	}
+	write(w, 200, result)
 }
 func (s *Server) downloadRaw(w http.ResponseWriter, r *http.Request) {
 	idx, err := s.engine.Repo.GetRawIndex(r.Context(), claims(r).TenantID, r.PathValue("id"))
@@ -1151,6 +1178,30 @@ func (s *Server) aiWorkflows(w http.ResponseWriter, r *http.Request) {
 	write(w, 200, map[string]any{"items": items, "count": len(items), "configured": true, "mode": "harness", "healthy": true, "healthMessage": "AI workflow harness is reachable"})
 }
 
+func (s *Server) aiWorkflowManifests(w http.ResponseWriter, r *http.Request) {
+	manager, ok := s.engine.AIWorkflows.(ports.AIWorkflowAdminManager)
+	if !ok {
+		problem(w, http.StatusServiceUnavailable, "AI workflow harness does not support plugin management")
+		return
+	}
+	items, err := manager.ListWorkflowManifests(r.Context())
+	if err != nil {
+		if s.log != nil {
+			s.log.Warn("list AI workflow manifests failed", "error", err)
+		}
+		problem(w, http.StatusBadGateway, "AI workflow harness plugin catalog is unavailable")
+		return
+	}
+	write(w, http.StatusOK, map[string]any{
+		"items":         items,
+		"count":         len(items),
+		"configured":    true,
+		"mode":          "harness",
+		"healthy":       true,
+		"healthMessage": "AI workflow harness plugin catalog is reachable",
+	})
+}
+
 func (s *Server) saveAIWorkflow(w http.ResponseWriter, r *http.Request) {
 	manager, ok := s.engine.AIWorkflows.(ports.AIWorkflowManager)
 	if !ok {
@@ -1177,11 +1228,89 @@ func (s *Server) saveAIWorkflow(w http.ResponseWriter, r *http.Request) {
 	write(w, http.StatusCreated, plugin)
 }
 
+func (s *Server) updateAIWorkflow(w http.ResponseWriter, r *http.Request) {
+	manager, ok := s.engine.AIWorkflows.(ports.AIWorkflowManager)
+	if !ok {
+		problem(w, http.StatusServiceUnavailable, "AI workflow harness does not support dynamic agents")
+		return
+	}
+	var manifest ports.AIWorkflowManifest
+	if decode(w, r, &manifest) != nil {
+		return
+	}
+	workflowID := strings.TrimSpace(r.PathValue("id"))
+	if workflowID == "" || workflowID != manifest.ID {
+		problem(w, http.StatusUnprocessableEntity, "workflow path id must match the manifest id")
+		return
+	}
+	if err := validateAIWorkflowManifest(manifest); err != nil {
+		problem(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	if catalog, supportsCatalog := s.engine.AIWorkflows.(ports.AIWorkflowAdminManager); supportsCatalog {
+		items, err := catalog.ListWorkflowManifests(r.Context())
+		if err != nil {
+			if s.log != nil {
+				s.log.Warn("check AI workflow before update failed", "workflow", manifest.ID, "error", err)
+			}
+			problem(w, http.StatusBadGateway, "AI workflow harness plugin catalog is unavailable")
+			return
+		}
+		found := false
+		for _, item := range items {
+			if item.ID == manifest.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			problem(w, http.StatusNotFound, "workflow plugin was not found")
+			return
+		}
+	}
+	plugin, err := manager.SaveWorkflow(r.Context(), manifest)
+	if err != nil {
+		if s.log != nil {
+			s.log.Warn("update dynamic AI workflow failed", "workflow", manifest.ID, "error", err)
+		}
+		problem(w, http.StatusBadGateway, "AI workflow harness rejected the agent manifest")
+		return
+	}
+	s.audit(r, "ai.workflow.agent.update", "ai-workflow", plugin.ID, map[string]any{"name": plugin.Name, "version": plugin.Version, "enabled": plugin.Enabled, "capabilities": len(plugin.Capabilities), "knowledgeEnabled": plugin.KnowledgeEnabled})
+	write(w, http.StatusOK, plugin)
+}
+
+func (s *Server) deleteAIWorkflow(w http.ResponseWriter, r *http.Request) {
+	manager, ok := s.engine.AIWorkflows.(ports.AIWorkflowAdminManager)
+	if !ok {
+		problem(w, http.StatusServiceUnavailable, "AI workflow harness does not support plugin management")
+		return
+	}
+	workflowID := strings.TrimSpace(r.PathValue("id"))
+	if !validWorkflowIdentifier(workflowID) {
+		problem(w, http.StatusUnprocessableEntity, "workflow id has an invalid format")
+		return
+	}
+	if oneOf(workflowID, "alarm-handler", "ops-assistant", "system-observer", "device-health-inspector", "protocol-assistant") {
+		problem(w, http.StatusConflict, "built-in Agent ids cannot be deleted")
+		return
+	}
+	if err := manager.DeleteWorkflow(r.Context(), workflowID); err != nil {
+		if s.log != nil {
+			s.log.Warn("delete dynamic AI workflow failed", "workflow", workflowID, "error", err)
+		}
+		problem(w, http.StatusBadGateway, "AI workflow harness rejected the delete request")
+		return
+	}
+	s.audit(r, "ai.workflow.agent.delete", "ai-workflow", workflowID, nil)
+	write(w, http.StatusOK, map[string]any{"deleted": true, "id": workflowID})
+}
+
 func validateAIWorkflowManifest(manifest ports.AIWorkflowManifest) error {
 	if manifest.SchemaVersion != 1 || !validWorkflowIdentifier(manifest.ID) {
 		return errors.New("schemaVersion must be 1 and id must contain only letters, numbers, dot, underscore, colon or hyphen")
 	}
-	if oneOf(manifest.ID, "alarm-handler", "ops-assistant", "system-observer") {
+	if oneOf(manifest.ID, "alarm-handler", "ops-assistant", "system-observer", "device-health-inspector", "protocol-assistant") {
 		return errors.New("built-in Agent ids cannot be overwritten")
 	}
 	if !boundedText(manifest.Name, 128) || !boundedText(manifest.Description, 1024) || !boundedText(manifest.Version, 64) || !boundedText(manifest.Persona, 16384) || !validWorkflowModel(manifest.DefaultModel) {
@@ -1193,6 +1322,7 @@ func validateAIWorkflowManifest(manifest ports.AIWorkflowManifest) error {
 	allowed := map[string]struct{}{
 		"mcp__iot__query_system_overview": {}, "mcp__iot__query_device_latest": {}, "mcp__iot__query_alarm_list": {},
 		"mcp__iot__query_property_history": {}, "mcp__iot__query_similar_alarms": {}, "mcp__iot__query_knowledge_base": {},
+		"mcp__iot__create_rule_draft": {},
 	}
 	seen := map[string]struct{}{}
 	capabilities := map[string]struct{}{}
@@ -1687,7 +1817,7 @@ func (s *Server) knowledgeUpload(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) mqttToken(w http.ResponseWriter, r *http.Request) {
 	c := claims(r)
-	scope := []string{fmt.Sprintf("/iot/alarm/%s/#", c.TenantID), fmt.Sprintf("/iot/device/state/%s/#", c.TenantID)}
+	scope := []string{fmt.Sprintf("/iot/alarm/%s/#", c.TenantID), fmt.Sprintf("/iot/device/state/%s/#", c.TenantID), fmt.Sprintf("/iot/ui-action/%s", c.TenantID)}
 	acl := make([]auth.ACLRule, 0, len(scope))
 	for _, topic := range scope {
 		acl = append(acl, auth.ACLRule{Permission: "allow", Action: "subscribe", Topic: topic})
@@ -2129,6 +2259,9 @@ func decode(w http.ResponseWriter, r *http.Request, v any) error {
 }
 func write(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	// API responses contain tenant-scoped, mutable state. Prevent browsers and
+	// reverse proxies from serving a stale workflow catalog after a mutation.
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }

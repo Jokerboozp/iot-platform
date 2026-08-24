@@ -1,13 +1,18 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, apiStream, session } from '../api'
+import { AI_HISTORY_STORAGE_PREFIX, loadAIHistory, saveAIHistory } from '../aiHistory'
+import { reconcileRuleDraftMessages } from '../ruleDraftStatus'
 import HarnessTraceDrawer from '../components/HarnessTraceDrawer.vue'
 import ToolCallCard from '../components/ToolCallCard.vue'
+
+const emit = defineEmits(['navigate'])
 
 let sequence = 0
 let abortController = null
 let scrollFrame = 0
+let historyTimer = 0
 const makeId = prefix => `${prefix}_${globalThis.crypto?.randomUUID?.() || `${Date.now()}_${++sequence}`}`
 const welcomeMessage = () => ({ id:'welcome', role:'assistant', status:'succeeded', text:'你好，我是消防物联网 AI 运维助手。选择一个工作流后，可以直接查询设备、告警和趋势；所有工具执行都会显示在运行轨迹中。', tools:[] })
 
@@ -20,9 +25,35 @@ const conversationId = ref('')
 const selectedRunKey = ref('')
 const traceVisible = ref(false)
 
+function persistConversation() {
+  saveAIHistory(localStorage, session, { conversationId:conversationId.value, selectedWorkflowId:selectedWorkflowId.value, messages:messages.value, runs:runs.value })
+}
+function scheduleConversationPersist() {
+  if (historyTimer) clearTimeout(historyTimer)
+  historyTimer = setTimeout(() => { historyTimer = 0; persistConversation() }, 150)
+}
+function restoreConversation() {
+  const saved = loadAIHistory(localStorage, session)
+  if (!saved) return
+  messages.value = saved.messages.length ? saved.messages : [welcomeMessage()]
+  runs.value = saved.runs
+  conversationId.value = saved.conversationId
+  selectedWorkflowId.value = saved.selectedWorkflowId
+}
+
+async function refreshRuleDraftStatuses() {
+  if (!messages.value.some(message => message?.ruleDraftPersisted === true && message?.ruleDraft?.id)) return
+  try {
+    const response = await api('/api/v1/rules')
+    reconcileRuleDraftMessages(messages.value, response?.items || [])
+    persistConversation()
+  } catch { /* keep the last known card state when rule status cannot be loaded */ }
+}
+
 const runtimeLoading = ref(false)
 const runtimeError = ref('')
 const workflowError = ref('')
+let runtimeRequestSequence = 0
 const runtime = ref({ items:[], active:{ id:'disabled', name:'未启用', enabled:false }, healthy:false, healthMessage:'正在读取 Provider 状态' })
 const workflows = ref({ items:[], healthy:false, healthMessage:'正在读取工作流状态' })
 const selectedWorkflowId = ref('')
@@ -35,6 +66,11 @@ const agentTemplate = {
   allowedTools:['mcp__iot__query_system_overview','mcp__iot__query_device_latest']
 }
 const agentJson = ref(JSON.stringify(agentTemplate, null, 2))
+const editingAgentId = ref('')
+const workflowManageLoading = ref(false)
+const workflowManageError = ref('')
+const workflowManageItems = ref([])
+let workflowManageRequestSequence = 0
 const agentFieldDocs = [
   { name:'schemaVersion', type:'整数', note:'清单格式版本，当前固定填写 1。' },
   { name:'id', type:'字符串', note:'Agent 唯一标识，最长 128 字符；可使用字母、数字、点、下划线、冒号和连字符，不能覆盖内置 Agent。' },
@@ -46,7 +82,7 @@ const agentFieldDocs = [
   { name:'defaultModel', type:'字符串', note:'默认模型标识，必填，例如 deepseek-v4-flash。' },
   { name:'maxTokens', type:'整数', note:'单次最大输出 Token 数，平台允许 1–8192。' },
   { name:'capabilities', type:'字符串数组', note:'展示给用户的能力名称，填写 1–32 项，每项 1–64 字符且不可重复。' },
-  { name:'allowedTools', type:'字符串数组', note:'Agent 可以调用的只读工具，至少 1 项、最多 6 项，只能从下方白名单选择且不可重复。' }
+  { name:'allowedTools', type:'字符串数组', note:'Agent 可以调用的受控工具，至少 1 项、最多 6 项，只能从下方白名单选择且不可重复；规则工具只能保存禁用草稿。' }
 ]
 const agentToolDocs = [
   { name:'mcp__iot__query_system_overview', label:'系统状态与数量统计' },
@@ -54,7 +90,8 @@ const agentToolDocs = [
   { name:'mcp__iot__query_alarm_list', label:'告警列表' },
   { name:'mcp__iot__query_property_history', label:'设备属性历史' },
   { name:'mcp__iot__query_similar_alarms', label:'相似告警查询' },
-  { name:'mcp__iot__query_knowledge_base', label:'知识库检索' }
+  { name:'mcp__iot__query_knowledge_base', label:'知识库检索' },
+  { name:'mcp__iot__create_rule_draft', label:'生成待确认的自动化规则草稿' }
 ]
 const knowledgeLoading = ref(false)
 const knowledgeSaving = ref(false)
@@ -67,12 +104,23 @@ const testResult = ref(null)
 const managementVisible = ref(false)
 const managementTab = ref('knowledge')
 const sandbox = reactive({ provider:'deepseek', baseUrl:'https://api.deepseek.com', model:'deepseek-v4-flash', apiKey:'', question:'请用一句话说明你已经连接到消防物联网 AI 测试台。' })
+const customProviderOptionId = '__custom-openai-compatible__'
+const customProviderProfiles = ref([])
+const providerProfileEditorVisible = ref(false)
+const providerProfileEditingId = ref('')
+const providerProfileDraft = reactive({ id:'', name:'', requiresApiKey:true })
 const runConfig = reactive({ model:'', maxTokens:1200 })
 const quickQuestions = ['当前有哪些高等级活动告警？', 'device_001 最近温度趋势如何？', '给出今日消防巡检重点']
 
-const providerItems = computed(() => (runtime.value.items || []).filter(item => item.id !== 'disabled' && item.enabled !== false))
+const providerItems = computed(() => [
+  ...(runtime.value.items || []).filter(item => item.id !== 'disabled' && item.enabled !== false),
+  ...customProviderProfiles.value,
+  { id:customProviderOptionId, name:'＋添加自定义 Provider', description:'使用 OpenAI Chat Completions 兼容接口连接私有或第三方模型服务。', enabled:true, requiresApiKey:true, capabilities:['chat'], customOption:true }
+])
 const workflowItems = computed(() => (workflows.value.items || []).filter(item => item.enabled !== false))
-const selectedPlugin = computed(() => (runtime.value.items || []).find(item => item.id === sandbox.provider))
+const selectedPlugin = computed(() => providerItems.value.find(item => item.id === sandbox.provider))
+const selectedCustomProvider = computed(() => customProviderProfiles.value.find(item => item.id === sandbox.provider) || null)
+const customProviderSelected = computed(() => sandbox.provider === customProviderOptionId || Boolean(selectedCustomProvider.value))
 const selectedWorkflow = computed(() => workflowItems.value.find(item => workflowKey(item) === selectedWorkflowId.value))
 const selectedRun = computed(() => runs.value.find(run => run.id === selectedRunKey.value) || null)
 const activeHealthy = computed(() => Boolean(workflows.value.healthy))
@@ -92,6 +140,100 @@ const selectedCapabilities = computed(() => {
 function workflowKey(item) { return item?.id || item?.workflowId || '' }
 function workflowName(item) { return item?.name || item?.label || workflowKey(item) || '未命名工作流' }
 function capabilityLabel(item) { return typeof item === 'string' ? item : item?.name || item?.id || '工具' }
+function providerProfileStorageKey() { return `iot:ai-provider-profiles:${session.tenant || 'default'}` }
+function loadProviderProfiles() {
+  try {
+    const value = JSON.parse(globalThis.localStorage?.getItem(providerProfileStorageKey()) || '[]')
+    customProviderProfiles.value = Array.isArray(value) ? value.filter(item => item?.custom === true && typeof item.id === 'string' && typeof item.name === 'string' && typeof item.defaultBaseUrl === 'string' && typeof item.defaultModel === 'string') : []
+  } catch {
+    customProviderProfiles.value = []
+  }
+}
+function persistProviderProfiles() {
+  const safeProfiles = customProviderProfiles.value.map(({ apiKey, ...profile }) => profile)
+  globalThis.localStorage?.setItem(providerProfileStorageKey(), JSON.stringify(safeProfiles))
+}
+function startCustomProvider() {
+  providerProfileEditingId.value = ''
+  Object.assign(providerProfileDraft, { id:'custom-provider', name:'', requiresApiKey:true })
+  providerProfileEditorVisible.value = true
+  sandbox.provider = customProviderOptionId
+  sandbox.baseUrl = ''
+  sandbox.model = ''
+  sandbox.apiKey = ''
+  testResult.value = null
+}
+function editCustomProvider(profile) {
+  if (!isAdmin.value || !profile?.custom) return
+  providerProfileEditingId.value = profile.id
+  Object.assign(providerProfileDraft, { id:profile.id, name:profile.name, requiresApiKey:profile.requiresApiKey !== false })
+  providerProfileEditorVisible.value = true
+  sandbox.provider = profile.id
+  sandbox.baseUrl = profile.defaultBaseUrl || ''
+  sandbox.model = profile.defaultModel || ''
+  sandbox.apiKey = ''
+  testResult.value = null
+}
+async function deleteCustomProvider(profile) {
+  if (!isAdmin.value || !profile?.custom) return
+  try {
+    await ElMessageBox.confirm(`删除后将从当前租户的 Provider 测试列表移除“${profile.name}”，确定继续吗？`, '删除自定义 Provider', { type:'warning', confirmButtonText:'确定删除', cancelButtonText:'取消' })
+  } catch { return }
+  customProviderProfiles.value = customProviderProfiles.value.filter(item => item.id !== profile.id)
+  persistProviderProfiles()
+  if (sandbox.provider === profile.id) {
+    sandbox.provider = 'openai-compatible'
+    providerProfileEditorVisible.value = false
+  }
+  ElMessage.success(`已删除自定义 Provider：${profile.name}`)
+}
+function cancelProviderProfileEdit() {
+  providerProfileEditorVisible.value = false
+  providerProfileEditingId.value = ''
+  if (sandbox.provider === customProviderOptionId) sandbox.provider = 'openai-compatible'
+}
+function saveProviderProfile() {
+  if (!isAdmin.value) return
+  const id = String(providerProfileDraft.id || '').trim().toLowerCase()
+  const name = String(providerProfileDraft.name || '').trim()
+  const baseURL = String(sandbox.baseUrl || '').trim().replace(/\/+$/, '')
+  const model = String(sandbox.model || '').trim()
+  if (!/^custom-[a-z0-9][a-z0-9._-]{1,63}$/.test(id)) {
+    ElMessage.error('Provider ID 必须以 custom- 开头，只能包含小写字母、数字、点、下划线或连字符')
+    return
+  }
+  if (!name || name.length > 128 || !model || model.length > 256) {
+    ElMessage.error('Provider 名称和模型不能为空，且长度不能超限')
+    return
+  }
+  try {
+    const parsed = new URL(baseURL)
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error()
+  } catch {
+    ElMessage.error('Base URL 必须是没有账号、查询参数和片段的 HTTP(S) 地址')
+    return
+  }
+  const duplicate = customProviderProfiles.value.some(item => item.id === id && item.id !== providerProfileEditingId.value)
+  if (duplicate || ['deepseek', 'ollama', 'openai-compatible', 'disabled'].includes(id)) {
+    ElMessage.error('Provider ID 已存在，请换一个唯一 ID')
+    return
+  }
+  const profile = {
+    id, name, description:'自定义 OpenAI-compatible Provider', version:'1.0.0', enabled:true, custom:true,
+    defaultBaseUrl:baseURL, defaultModel:model, requiresApiKey:Boolean(providerProfileDraft.requiresApiKey),
+    capabilities:['chat','alarm-analysis','rule-draft','json-output']
+  }
+  const next = customProviderProfiles.value.filter(item => item.id !== providerProfileEditingId.value && item.id !== id)
+  customProviderProfiles.value = [...next, profile]
+  persistProviderProfiles()
+  providerProfileEditingId.value = ''
+  providerProfileEditorVisible.value = false
+  sandbox.provider = id
+  sandbox.baseUrl = baseURL
+  sandbox.model = model
+  sandbox.apiKey = ''
+  ElMessage.success(`已保存自定义 Provider：${name}`)
+}
 
 function timestamp(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value
@@ -133,31 +275,40 @@ function scheduleScroll() {
 }
 
 async function loadRuntime() {
+  const requestSequence = ++runtimeRequestSequence
   runtimeLoading.value = true
   runtimeError.value = ''
   workflowError.value = ''
-  const [providerResult, workflowResult] = await Promise.allSettled([
-    api('/api/v1/ai/providers'),
-    api('/api/v1/ai/workflows')
-  ])
-  if (providerResult.status === 'fulfilled') {
-    runtime.value = providerResult.value
-    if (!providerItems.value.some(item => item.id === sandbox.provider) && providerItems.value[0]) sandbox.provider = providerItems.value[0].id
-  } else {
-    runtimeError.value = providerResult.reason?.message || 'Provider 状态读取失败'
-  }
-  if (workflowResult.status === 'fulfilled') {
-    workflows.value = {
-      items:Array.isArray(workflowResult.value?.items) ? workflowResult.value.items : [],
-      healthy:Boolean(workflowResult.value?.healthy),
-      healthMessage:workflowResult.value?.healthMessage || ''
+  try {
+    const [providerResult, workflowResult] = await Promise.allSettled([
+      api('/api/v1/ai/providers'),
+      api('/api/v1/ai/workflows')
+    ])
+    // A delete/create/update can start a newer refresh while this request is
+    // still in flight. Never let the older response put a removed Agent back
+    // into the workbench dropdown.
+    if (requestSequence !== runtimeRequestSequence) return
+    if (providerResult.status === 'fulfilled') {
+      runtime.value = providerResult.value
+      const selectableProviders = providerItems.value.filter(item => !item.customOption)
+      if (!selectableProviders.some(item => item.id === sandbox.provider) && selectableProviders[0]) sandbox.provider = selectableProviders[0].id
+    } else {
+      runtimeError.value = providerResult.reason?.message || 'Provider 状态读取失败'
     }
-    if (!workflowItems.value.some(item => workflowKey(item) === selectedWorkflowId.value)) selectedWorkflowId.value = workflowKey(workflowItems.value[0])
-    applyWorkflowDefaults()
-  } else {
-    workflowError.value = workflowResult.reason?.message || '工作流列表读取失败'
+    if (workflowResult.status === 'fulfilled') {
+      workflows.value = {
+        items:Array.isArray(workflowResult.value?.items) ? workflowResult.value.items : [],
+        healthy:Boolean(workflowResult.value?.healthy),
+        healthMessage:workflowResult.value?.healthMessage || ''
+      }
+      if (!workflowItems.value.some(item => workflowKey(item) === selectedWorkflowId.value)) selectedWorkflowId.value = workflowKey(workflowItems.value[0])
+      applyWorkflowDefaults()
+    } else {
+      workflowError.value = workflowResult.reason?.message || '工作流列表读取失败'
+    }
+  } finally {
+    if (requestSequence === runtimeRequestSequence) runtimeLoading.value = false
   }
-  runtimeLoading.value = false
 }
 
 async function loadKnowledgeCatalog() {
@@ -191,26 +342,113 @@ async function saveKnowledgeBinding() {
   finally { knowledgeSaving.value = false }
 }
 
-function resetAgentJson() { agentJson.value = JSON.stringify(agentTemplate, null, 2) }
-function openManagement(tab = 'knowledge') { managementTab.value = tab; managementVisible.value = true }
+const builtinWorkflowIds = new Set(['alarm-handler', 'ops-assistant', 'system-observer', 'device-health-inspector', 'protocol-assistant'])
+function isBuiltinWorkflow(item) { return builtinWorkflowIds.has(workflowKey(item)) }
 
-async function createAgent() {
+function resetAgentJson() { editingAgentId.value = ''; agentJson.value = JSON.stringify(agentTemplate, null, 2) }
+
+async function loadWorkflowManagement(force = false) {
+  if (!isAdmin.value || workflowManageLoading.value && !force) return
+  const requestSequence = ++workflowManageRequestSequence
+  workflowManageLoading.value = true
+  workflowManageError.value = ''
+  try {
+    const value = await api('/api/v1/ai/workflows/admin')
+    if (requestSequence !== workflowManageRequestSequence) return
+    workflowManageItems.value = Array.isArray(value?.items) ? value.items : []
+  } catch (error) {
+    if (requestSequence === workflowManageRequestSequence) workflowManageError.value = error.message || '工作流插件清单读取失败'
+  } finally {
+    if (requestSequence === workflowManageRequestSequence) workflowManageLoading.value = false
+  }
+}
+
+function selectManagementTab(tab) {
+  managementTab.value = tab
+  if (tab === 'agent') void loadWorkflowManagement()
+}
+
+function openManagement(tab = 'agent') {
+  managementTab.value = tab
+  managementVisible.value = true
+  if (tab === 'agent') void loadWorkflowManagement()
+}
+
+function editAgent(item) {
+  if (!isAdmin.value || isBuiltinWorkflow(item)) return
+  editingAgentId.value = workflowKey(item)
+  agentJson.value = JSON.stringify(item, null, 2)
+  managementTab.value = 'agent'
+}
+
+async function saveAgent() {
   if (!isAdmin.value || creatingAgent.value) return
   let manifest
   try { manifest = JSON.parse(agentJson.value) }
   catch { ElMessage.error('Agent JSON 格式不正确'); return }
+  if (editingAgentId.value && manifest?.id !== editingAgentId.value) {
+    ElMessage.error('编辑时不能修改 Agent 的唯一标识；如需新插件请先新建')
+    return
+  }
   creatingAgent.value = true
   try {
-    const created = await api('/api/v1/ai/workflows', { method:'POST', body:JSON.stringify(manifest) })
+    const editing = Boolean(editingAgentId.value)
+    const saved = editing
+      ? await api(`/api/v1/ai/workflows/${encodeURIComponent(editingAgentId.value)}`, { method:'PUT', body:JSON.stringify(manifest) })
+      : await api('/api/v1/ai/workflows', { method:'POST', body:JSON.stringify(manifest) })
     await loadRuntime()
-    selectedWorkflowId.value = workflowKey(created)
-    managementVisible.value = false
-    ElMessage.success(`Agent 已创建并可用：${workflowName(created)}`)
-  } catch (error) { workflowError.value = error.message || 'Agent 创建失败' }
+    await loadWorkflowManagement()
+    selectedWorkflowId.value = workflowKey(saved)
+    editingAgentId.value = ''
+    agentJson.value = JSON.stringify(agentTemplate, null, 2)
+    ElMessage.success(`${editing ? 'Agent 已更新' : 'Agent 已创建'}：${workflowName(saved)}`)
+  } catch (error) { workflowManageError.value = error.message || (editingAgentId.value ? 'Agent 更新失败' : 'Agent 创建失败') }
+  finally { creatingAgent.value = false }
+}
+
+async function toggleWorkflow(item) {
+  if (!isAdmin.value || isBuiltinWorkflow(item) || creatingAgent.value) return
+  const manifest = { ...item, enabled: item.enabled === false }
+  creatingAgent.value = true
+  try {
+    await api(`/api/v1/ai/workflows/${encodeURIComponent(workflowKey(item))}`, { method:'PUT', body:JSON.stringify(manifest) })
+    await Promise.all([loadRuntime(), loadWorkflowManagement()])
+    ElMessage.success(`${workflowName(item)}已${manifest.enabled ? '启用' : '禁用'}`)
+  } catch (error) { workflowManageError.value = error.message || '工作流状态更新失败' }
+  finally { creatingAgent.value = false }
+}
+
+async function deleteWorkflow(item) {
+  if (!isAdmin.value || isBuiltinWorkflow(item) || creatingAgent.value) return
+  const deletedWorkflowId = workflowKey(item)
+  try {
+    await ElMessageBox.confirm(`删除后将无法运行“${workflowName(item)}”，确定继续吗？`, '删除工作流插件', { type:'warning', confirmButtonText:'确定删除', cancelButtonText:'取消' })
+  } catch { return }
+  creatingAgent.value = true
+  try {
+    await api(`/api/v1/ai/workflows/${encodeURIComponent(deletedWorkflowId)}`, { method:'DELETE' })
+    // Remove it immediately so the current dropdown cannot keep a deleted
+    // option while the authoritative catalog refresh is in flight.
+    const remaining = (workflows.value.items || []).filter(candidate => workflowKey(candidate) !== deletedWorkflowId)
+    workflows.value = { ...workflows.value, items:remaining, count:remaining.length }
+    workflowManageItems.value = workflowManageItems.value.filter(candidate => workflowKey(candidate) !== deletedWorkflowId)
+    if (selectedWorkflowId.value === deletedWorkflowId) selectedWorkflowId.value = workflowKey(remaining.find(candidate => candidate.enabled !== false))
+    if (editingAgentId.value === deletedWorkflowId) resetAgentJson()
+    await Promise.all([loadRuntime(), loadWorkflowManagement(true)])
+    ElMessage.success(`已删除工作流插件：${workflowName(item)}`)
+  } catch (error) { workflowManageError.value = error.message || '工作流插件删除失败' }
   finally { creatingAgent.value = false }
 }
 
 watch(() => sandbox.provider, () => {
+  if (sandbox.provider === customProviderOptionId) {
+    providerProfileEditorVisible.value = true
+    sandbox.baseUrl = ''
+    sandbox.model = ''
+    sandbox.apiKey = ''
+    testResult.value = null
+    return
+  }
   const plugin = selectedPlugin.value
   if (!plugin) return
   sandbox.baseUrl = plugin.defaultBaseUrl || ''
@@ -232,7 +470,10 @@ async function testPlugin() {
   testing.value = true
   testResult.value = null
   try {
-    testResult.value = await api('/api/v1/ai/providers/test', { method:'POST', body:JSON.stringify(sandbox) })
+    const custom = selectedCustomProvider.value || sandbox.provider === customProviderOptionId
+    const payload = { ...sandbox, provider:custom ? 'openai-compatible' : sandbox.provider }
+    const result = await api('/api/v1/ai/providers/test', { method:'POST', body:JSON.stringify(payload) })
+    testResult.value = { ...result, providerName:custom && selectedCustomProvider.value ? selectedCustomProvider.value.name : result.providerName }
   } catch (error) {
     testResult.value = { success:false, error:error.message, traceId:error.traceId }
   } finally {
@@ -295,6 +536,11 @@ function applyStreamEvent(raw, assistant, run) {
       tool.error = toolError?.message || ''
       tool.durationMs = event.durationMs ?? (event.completedAt ? Math.max(0, timestamp(event.completedAt) - tool.startedAt) : null)
       addRunEvent(run, event, `工具${tool.status === 'failed' ? '失败' : '完成'} · ${tool.name}`, tool.status === 'failed' ? 'danger' : 'success', tool.error || tool.outputSummary)
+      if (event.clientAction?.type === 'RULE_DRAFT_READY' && event.clientAction.draft && typeof event.clientAction.draft === 'object') {
+        assistant.ruleDraft = event.clientAction.draft
+        assistant.ruleDraftPersisted = event.clientAction.persisted === true
+        assistant.ruleDraftState = assistant.ruleDraftPersisted ? 'draft' : 'unsaved'
+      }
       break
     }
     case 'run.completed':
@@ -372,17 +618,24 @@ async function send(textValue) {
 
 function stop() { abortController?.abort() }
 function retry(message) { if (!sending.value) send(message.prompt) }
-function clearConversation() { abortController?.abort(); messages.value = [welcomeMessage()]; runs.value = []; conversationId.value = ''; selectedRunKey.value = ''; traceVisible.value = false }
+function clearConversation() { abortController?.abort(); messages.value = [welcomeMessage()]; runs.value = []; conversationId.value = ''; selectedRunKey.value = ''; traceVisible.value = false; persistConversation() }
 function openTrace(value) { selectedRunKey.value = value?.runKey || value?.id || ''; traceVisible.value = true }
+function actionSummary(action) { return action?.type === 'OPEN_CAMERA' ? `打开摄像头 ${action.cameraId}` : action?.type === 'OPEN_PAGE' ? `打开页面 ${action.page}` : action?.type || '未知动作' }
+function ruleDraftStatusLabel(message) { return message.ruleDraftState === 'enabled' ? '已启用' : message.ruleDraftState === 'missing' ? '已删除' : message.ruleDraftPersisted ? '已保存草稿' : '待人工确认' }
+function ruleDraftStatusType(message) { return message.ruleDraftState === 'enabled' ? 'success' : message.ruleDraftState === 'missing' ? 'info' : 'warning' }
+function ruleDraftActionLabel(message) { return message.ruleDraftState === 'enabled' ? '规则已启用' : message.ruleDraftState === 'missing' ? '规则已删除' : message.ruleDraftPersisted ? '查看并启用规则' : '检查并保存规则' }
+function ruleDraftActionDisabled(message) { return message.ruleDraftState === 'enabled' || message.ruleDraftState === 'missing' }
+function editRuleDraft(draft, persisted, state) { if (state === 'enabled' || state === 'missing') return; emit('navigate', 'rules', { ruleDraft:draft, persisted:Boolean(persisted) }) }
 
-onMounted(() => Promise.all([loadRuntime(), loadKnowledgeCatalog()]))
-onBeforeUnmount(() => { abortController?.abort(); if (scrollFrame) cancelAnimationFrame(scrollFrame) })
+watch([messages, runs, conversationId, selectedWorkflowId], scheduleConversationPersist, { deep:true })
+onMounted(() => { restoreConversation(); loadProviderProfiles(); return Promise.all([loadRuntime(), loadKnowledgeCatalog(), refreshRuleDraftStatuses()]) })
+onBeforeUnmount(() => { abortController?.abort(); if (scrollFrame) cancelAnimationFrame(scrollFrame); if (historyTimer) clearTimeout(historyTimer); persistConversation() })
 </script>
 
 <template>
   <div class="ai-runtime" v-loading="runtimeLoading">
     <div><span class="section-kicker">DEEPSEEK HARNESS</span><strong>AI 工作流</strong><small>业务插件、Provider 与工具解耦；每次运行都有可审计的 Harness 轨迹。</small></div>
-    <div class="runtime-actions"><div class="runtime-status"><el-tag :type="activeTone" effect="light">{{ selectedWorkflow ? 'Harness 工作流' : '未配置' }}</el-tag><span>{{ runConfig.model || '无活动模型' }}</span><i :class="{ online:activeHealthy }" />{{ healthMessage }}</div><el-button size="small" @click="openManagement('knowledge')">管理中心</el-button><el-button size="small" :loading="runtimeLoading" @click="loadRuntime">刷新状态</el-button></div>
+    <div class="runtime-actions"><div class="runtime-status"><el-tag :type="activeTone" effect="light">{{ selectedWorkflow ? 'Harness 工作流' : '未配置' }}</el-tag><span>{{ runConfig.model || '无活动模型' }}</span><i :class="{ online:activeHealthy }" />{{ healthMessage }}</div><el-button size="small" @click="openManagement('agent')">管理中心</el-button><el-button size="small" :loading="runtimeLoading" @click="loadRuntime">刷新状态</el-button></div>
   </div>
 
   <div class="ai-workbench">
@@ -402,7 +655,7 @@ onBeforeUnmount(() => { abortController?.abort(); if (scrollFrame) cancelAnimati
           <button type="button" class="overview-item" @click="openManagement('knowledge')"><span>知识库</span><strong>{{ workflowKnowledgeAvailable ? knowledgeModeLabel : '未授权' }}</strong><small>{{ knowledgeBinding.productIds.length ? `${knowledgeBinding.productIds.length} 个产品` : '全部产品' }} · Top {{ knowledgeBinding.topK }}</small></button>
         </div>
         <el-alert v-if="runtimeError" class="runtime-warning" :title="runtimeError" type="warning" :closable="false" show-icon />
-        <button type="button" class="manager-entry" @click="openManagement('knowledge')"><span><strong>工作流管理</strong><small>Agent、知识库与 Provider 测试</small></span><b>进入 →</b></button>
+        <button type="button" class="manager-entry" @click="openManagement('agent')"><span><strong>工作流管理</strong><small>Agent 插件清单、启停、编辑与删除</small></span><b>进入 →</b></button>
       </div>
     </el-card>
 
@@ -411,7 +664,7 @@ onBeforeUnmount(() => { abortController?.abort(); if (scrollFrame) cancelAnimati
       <div class="quick-prompts"><button v-for="item in quickQuestions" :key="item" :disabled="sending || !workflowItems.length" @click="send(item)">{{ item }}</button></div>
       <div ref="log" class="chat-log" aria-live="polite">
         <div v-for="message in messages" :key="message.id" class="message-row" :class="message.role">
-          <span class="message-avatar">{{ message.role === 'assistant' ? 'AI' : '我' }}</span><div class="message-content"><div class="chat-message" :class="[message.role,`is-${message.status}`]"><p v-if="message.text">{{ message.text }}</p><div v-else-if="message.status === 'streaming'" class="typing"><i/><i/><i/><span>正在运行工作流</span></div><ToolCallCard v-for="tool in message.tools" :key="tool.id || tool.toolCallId" :tool="tool" /><div v-if="message.error" class="message-error"><strong>{{ message.error.message }}</strong><small v-if="message.error.code || message.error.stage">{{ [message.error.code,message.error.stage].filter(Boolean).join(' · ') }}</small><small v-if="message.traceId || message.error.traceId">Trace · {{ message.traceId || message.error.traceId }}</small><el-button v-if="message.prompt" text size="small" :disabled="sending" @click="retry(message)">重新运行</el-button></div></div><div v-if="message.role === 'assistant' && message.runKey" class="message-meta"><span v-if="message.status === 'streaming'">运行中</span><span v-else>{{ message.status === 'succeeded' ? '已完成' : message.status === 'canceled' ? '已停止' : '运行失败' }}</span><span v-if="message.durationMs != null">{{ message.durationMs }} ms</span><span v-if="message.usage?.totalTokens != null">{{ message.usage.totalTokens }} tokens</span><button @click="openTrace(message)">查看轨迹</button></div></div>
+          <span class="message-avatar">{{ message.role === 'assistant' ? 'AI' : '我' }}</span><div class="message-content"><div class="chat-message" :class="[message.role,`is-${message.status}`]"><p v-if="message.text">{{ message.text }}</p><div v-else-if="message.status === 'streaming'" class="typing"><i/><i/><i/><span>正在运行工作流</span></div><ToolCallCard v-for="tool in message.tools" :key="tool.id || tool.toolCallId" :tool="tool" /><div v-if="message.ruleDraft" class="rule-draft-card"><div><strong>{{ message.ruleDraft.name || '自动化规则草稿' }}</strong><el-tag :type="ruleDraftStatusType(message)" size="small">{{ ruleDraftStatusLabel(message) }}</el-tag></div><small>{{ message.ruleDraft.conditions?.length || 0 }} 个条件 · {{ message.ruleDraft.actions?.map(actionSummary).join('、') || '仅告警' }}</small><el-button type="primary" size="small" :disabled="ruleDraftActionDisabled(message)" @click="editRuleDraft(message.ruleDraft, message.ruleDraftPersisted, message.ruleDraftState)">{{ ruleDraftActionLabel(message) }}</el-button></div><div v-if="message.error" class="message-error"><strong>{{ message.error.message }}</strong><small v-if="message.error.code || message.error.stage">{{ [message.error.code,message.error.stage].filter(Boolean).join(' · ') }}</small><small v-if="message.traceId || message.error.traceId">Trace · {{ message.traceId || message.error.traceId }}</small><el-button v-if="message.prompt" text size="small" :disabled="sending" @click="retry(message)">重新运行</el-button></div></div><div v-if="message.role === 'assistant' && message.runKey" class="message-meta"><span v-if="message.status === 'streaming'">运行中</span><span v-else>{{ message.status === 'succeeded' ? '已完成' : message.status === 'canceled' ? '已停止' : '运行失败' }}</span><span v-if="message.durationMs != null">{{ message.durationMs }} ms</span><span v-if="message.usage?.totalTokens != null">{{ message.usage.totalTokens }} tokens</span><button @click="openTrace(message)">查看轨迹</button></div></div>
         </div>
       </div>
       <div class="chat-compose"><el-input v-model="question" type="textarea" :autosize="{ minRows:1,maxRows:4 }" maxlength="4000" resize="none" placeholder="询问设备、告警、趋势或处置知识；Shift + Enter 换行" :disabled="sending || !workflowItems.length" @keydown.enter.exact.prevent="send()" /><el-button v-if="sending" type="danger" plain @click="stop">停止</el-button><el-button v-else type="primary" :disabled="!question.trim() || !workflowItems.length" @click="send()">发送</el-button></div><small class="chat-notice">AI 输出仅供辅助判断，不会自动执行设备控制或启用规则。</small>
@@ -420,16 +673,28 @@ onBeforeUnmount(() => { abortController?.abort(); if (scrollFrame) cancelAnimati
 
   <el-drawer v-model="managementVisible" title="AI 工作流管理" size="min(680px, 94vw)" class="workflow-manager" append-to-body>
     <div class="manager-shell">
-      <el-menu :default-active="managementTab" class="manager-menu" @select="managementTab = $event">
-        <el-menu-item index="agent" class="menu-agent"><span class="manager-menu-icon">AG</span><span class="manager-menu-copy"><strong>Agent 管理</strong><small>创建工作流插件</small></span></el-menu-item>
+      <el-menu :default-active="managementTab" class="manager-menu" @select="selectManagementTab">
+        <el-menu-item index="agent" class="menu-agent"><span class="manager-menu-icon">AG</span><span class="manager-menu-copy"><strong>Agent 管理</strong><small>插件清单与生命周期</small></span></el-menu-item>
         <el-menu-item index="knowledge" class="menu-knowledge"><span class="manager-menu-icon">KB</span><span class="manager-menu-copy"><strong>知识库</strong><small>配置检索策略</small></span></el-menu-item>
         <el-menu-item index="provider" class="menu-provider"><span class="manager-menu-icon">PV</span><span class="manager-menu-copy"><strong>Provider 测试</strong><small>验证模型连接</small></span></el-menu-item>
       </el-menu>
       <div class="manager-content">
       <section v-show="managementTab === 'agent'" class="manager-panel panel-agent">
-        <div class="manager-intro"><span>AGENT MANIFEST</span><div><h3>通过 JSON 创建 Agent</h3><el-tag size="small" type="primary" effect="plain">ADMIN</el-tag></div><p>提交经过校验的 Agent 定义，保存后立即进入工作流列表并可直接运行。</p></div>
-        <el-alert v-if="!isAdmin" title="创建 Agent 仅限管理员。" type="warning" :closable="false" show-icon />
-        <el-form class="drawer-form" label-position="top" :disabled="!isAdmin">
+        <div class="manager-intro"><span>AGENT MANIFEST</span><div><h3>通过 JSON 创建 Agent</h3><el-tag size="small" type="primary" effect="plain">{{ editingAgentId ? 'EDIT' : 'ADMIN' }}</el-tag></div><p>先在下方清单选择插件进行编辑、启用/禁用或删除；也可以提交新的 Agent Manifest，保存后立即进入工作流列表。</p></div>
+        <el-alert v-if="!isAdmin" title="工作流插件管理仅限管理员。" type="warning" :closable="false" show-icon />
+        <div v-else class="workflow-admin-panel">
+          <div class="workflow-admin-toolbar"><div><strong>已配置的工作流插件</strong><small>{{ workflowManageItems.length }} 个插件 · 内置插件只读，动态插件可管理</small></div><div><el-button size="small" :loading="workflowManageLoading" @click="loadWorkflowManagement">刷新清单</el-button><el-button size="small" type="primary" plain @click="resetAgentJson">新建 Agent</el-button></div></div>
+          <el-alert v-if="workflowManageError" :title="workflowManageError" type="error" :closable="false" show-icon />
+          <el-skeleton v-if="workflowManageLoading && !workflowManageItems.length" :rows="4" animated />
+          <el-empty v-else-if="!workflowManageItems.length" description="暂无工作流插件" :image-size="56" />
+          <div v-else class="workflow-admin-list">
+            <div v-for="item in workflowManageItems" :key="workflowKey(item)" class="workflow-admin-item">
+              <div class="workflow-admin-main"><div><strong>{{ workflowName(item) }}</strong><el-tag size="small" :type="item.enabled === false ? 'info' : 'success'" effect="plain">{{ item.enabled === false ? '已禁用' : '已启用' }}</el-tag><el-tag v-if="isBuiltinWorkflow(item)" size="small" effect="plain">内置只读</el-tag></div><small>{{ workflowKey(item) }} · {{ item.version ? `v${item.version}` : '无版本' }}</small><p>{{ item.description || '未填写插件说明' }}</p></div>
+              <div class="workflow-admin-actions"><el-button size="small" :disabled="isBuiltinWorkflow(item)" @click="editAgent(item)">编辑</el-button><el-button size="small" :disabled="isBuiltinWorkflow(item)" @click="toggleWorkflow(item)">{{ item.enabled === false ? '启用' : '禁用' }}</el-button><el-button size="small" type="danger" plain :disabled="isBuiltinWorkflow(item)" @click="deleteWorkflow(item)">删除</el-button></div>
+            </div>
+          </div>
+        </div>
+        <el-form class="drawer-form" label-position="top" :disabled="!isAdmin || creatingAgent">
           <el-form-item label="Agent Manifest JSON"><el-input v-model="agentJson" class="agent-json-editor" type="textarea" :rows="18" resize="vertical" spellcheck="false" /></el-form-item>
           <div class="manifest-guide">
             <div class="manifest-guide-title"><div><strong>字段说明</strong><small>所有字段均为必填；JSON 标准不支持注释，请参考下方说明填写。</small></div><el-tag size="small" effect="plain">11 个字段</el-tag></div>
@@ -438,8 +703,8 @@ onBeforeUnmount(() => { abortController?.abort(); if (scrollFrame) cancelAnimati
             </div>
             <div class="tool-whitelist"><strong>allowedTools 可用工具</strong><div><span v-for="tool in agentToolDocs" :key="tool.name"><code>{{ tool.name }}</code><small>{{ tool.label }}</small></span></div></div>
           </div>
-          <el-alert title="只允许系统概览、设备、告警、属性历史、相似告警和知识库六类只读工具；内置 Agent 不能覆盖。" type="info" :closable="false" show-icon />
-          <div class="agent-actions"><el-button @click="resetAgentJson">恢复模板</el-button><el-button type="primary" :loading="creatingAgent" @click="createAgent">校验并创建 Agent</el-button></div>
+          <el-alert title="只允许受控查询工具与“仅生成、不保存”的规则草稿工具；内置 Agent 不能覆盖，Agent 不能直接启用规则。" type="info" :closable="false" show-icon />
+          <div class="agent-actions"><el-button @click="resetAgentJson">{{ editingAgentId ? '取消编辑' : '恢复模板' }}</el-button><el-button type="primary" :loading="creatingAgent" @click="saveAgent">{{ editingAgentId ? '校验并保存修改' : '校验并创建 Agent' }}</el-button></div>
         </el-form>
       </section>
       <section v-show="managementTab === 'knowledge'" class="manager-panel panel-knowledge">
@@ -458,16 +723,18 @@ onBeforeUnmount(() => { abortController?.abort(); if (scrollFrame) cancelAnimati
         </el-form>
       </section>
       <section v-show="managementTab === 'provider'" class="manager-panel panel-provider">
-        <div class="manager-intro"><span>CONNECTION SANDBOX</span><div><h3>Provider 临时测试</h3><el-tag size="small" effect="plain">ADMIN</el-tag></div><p>验证模型插件连接和响应；临时配置与 API Key 均不会保存。</p></div>
+        <div class="manager-intro"><span>CONNECTION SANDBOX</span><div><h3>Provider 测试与配置</h3><el-tag size="small" effect="plain">ADMIN</el-tag></div><p>内置 Provider 可直接测试；自定义 Provider 保存名称、地址和模型配置，API Key 只用于本次测试。</p></div>
         <el-alert v-if="!isAdmin" class="admin-notice" title="Provider 连接测试仅限管理员；你仍可使用已配置的运维 AI。" type="warning" :closable="false" show-icon />
         <el-form class="drawer-form" label-position="top" :model="sandbox" :disabled="!isAdmin">
-          <el-form-item label="模型插件"><el-select v-model="sandbox.provider"><el-option v-for="item in providerItems" :key="item.id" :label="item.name" :value="item.id" /></el-select></el-form-item>
+          <el-form-item label="模型插件"><div class="provider-select-row"><el-select v-model="sandbox.provider"><el-option v-for="item in providerItems" :key="item.id" :label="item.name" :value="item.id" /></el-select><el-button type="primary" plain @click="startCustomProvider">添加</el-button></div></el-form-item>
+          <div class="provider-profile-toolbar"><small>可选：DeepSeek、Ollama、OpenAI Compatible，或添加自定义 OpenAI-compatible 配置。</small><div v-if="selectedCustomProvider"><el-button size="small" @click="editCustomProvider(selectedCustomProvider)">编辑</el-button><el-button size="small" type="danger" plain @click="deleteCustomProvider(selectedCustomProvider)">删除</el-button></div></div>
+          <div v-if="providerProfileEditorVisible" class="provider-profile-editor"><el-form-item label="Provider 显示名称"><el-input v-model="providerProfileDraft.name" placeholder="例如：公司私有大模型" maxlength="128" /></el-form-item><el-form-item label="Provider ID"><el-input v-model="providerProfileDraft.id" placeholder="custom-company-model" maxlength="64" :disabled="Boolean(providerProfileEditingId)" /></el-form-item><el-checkbox v-model="providerProfileDraft.requiresApiKey">测试时需要 API Key</el-checkbox><div class="provider-profile-actions"><el-button size="small" @click="cancelProviderProfileEdit">取消</el-button><el-button size="small" type="primary" @click="saveProviderProfile">保存到当前租户</el-button></div></div>
           <div v-if="selectedPlugin" class="plugin-description"><strong>{{ selectedPlugin.name }}</strong><span>{{ selectedPlugin.description }}</span></div>
           <el-form-item label="API Base URL"><el-input v-model="sandbox.baseUrl" placeholder="https://api.deepseek.com" /></el-form-item><el-form-item label="模型"><el-input v-model="sandbox.model" placeholder="deepseek-chat" /></el-form-item>
-          <el-form-item v-if="selectedPlugin?.requiresApiKey || sandbox.provider === 'openai-compatible'" label="API Key"><el-input v-model="sandbox.apiKey" type="password" show-password autocomplete="off" placeholder="仅用于本次连接测试" /></el-form-item>
-          <el-form-item label="测试问题"><el-input v-model="sandbox.question" type="textarea" :rows="3" maxlength="2000" show-word-limit /></el-form-item><el-alert title="API Key 不会保存，也不会写入 trace 或审计日志。" type="info" :closable="false" show-icon /><el-button class="test-button" type="primary" :loading="testing" @click="testPlugin">连接并测试插件</el-button>
+          <el-form-item v-if="selectedPlugin?.requiresApiKey || sandbox.provider === 'openai-compatible' || customProviderSelected" label="API Key"><el-input v-model="sandbox.apiKey" type="password" show-password autocomplete="off" placeholder="仅用于本次连接测试" /></el-form-item>
+          <el-form-item label="测试问题"><el-input v-model="sandbox.question" type="textarea" :rows="3" maxlength="2000" show-word-limit /></el-form-item><el-alert title="API Key 不会保存，也不会写入 trace 或审计日志；自定义 Provider 的来源必须在 IOT_AI_PROVIDER_TEST_ALLOWED_ORIGINS 白名单中。" type="info" :closable="false" show-icon /><el-button class="test-button" type="primary" :loading="testing" @click="testPlugin">连接并测试插件</el-button>
         </el-form>
-        <div v-if="testResult" class="test-result" :class="{ success:testResult.success, failed:!testResult.success }"><div><strong>{{ testResult.success ? '连接成功' : '连接失败' }}</strong><el-tag :type="testResult.success ? 'success' : 'danger'" effect="dark">{{ testResult.success ? `${testResult.latencyMs} ms` : 'ERROR' }}</el-tag></div><p>{{ testResult.answer || testResult.error }}</p><small v-if="testResult.traceId">Trace · {{ testResult.traceId }}</small></div>
+        <div v-if="testResult" class="test-result" :class="{ success:testResult.success, failed:!testResult.success }"><div><strong>{{ testResult.success ? '连接成功' : '连接失败' }}</strong><el-tag :type="testResult.success ? 'success' : 'danger'" effect="dark">{{ testResult.success ? `${testResult.latencyMs} ms` : 'ERROR' }}</el-tag></div><small v-if="testResult.providerName">{{ testResult.providerName }} · {{ testResult.model }}</small><p>{{ testResult.answer || testResult.error }}</p><small v-if="testResult.traceId">Trace · {{ testResult.traceId }}</small></div>
       </section>
       </div>
     </div>
@@ -476,12 +743,15 @@ onBeforeUnmount(() => { abortController?.abort(); if (scrollFrame) cancelAnimati
 </template>
 
 <style scoped>
+.provider-select-row { width:100%; min-width:0; }
 .ai-runtime { min-height:74px; margin-bottom:16px; padding:15px 18px; display:flex; align-items:center; justify-content:space-between; gap:20px; background:#fff; border:1px solid #e8e8e8; border-left:3px solid #1677ff; border-radius:4px; }.ai-runtime>div:first-child { display:grid; gap:3px; }.section-kicker { color:#1677ff; font-size:9px; font-weight:700; letter-spacing:.14em; }.ai-runtime strong { font-size:16px; }.ai-runtime small { color:var(--muted); }.runtime-actions { display:flex; align-items:center; gap:12px; }.runtime-status { display:flex; align-items:center; gap:8px; color:#646c73; font-size:12px; white-space:nowrap; }.runtime-status i { width:7px; height:7px; background:#ff4d4f; border-radius:50%; }.runtime-status i.online { background:#52c41a; }
-.ai-workbench { display:grid; grid-template-columns:minmax(280px,320px) minmax(0,1fr); gap:16px; align-items:stretch; }.control-card,.ai-chat-card { height:clamp(580px,calc(100vh - 190px),780px); min-height:0; }.card-header>div { display:grid; gap:3px; }.card-header small { display:block; }.control-card :deep(.el-card__body) { height:calc(100% - 57px); padding:0; }.control-scroll { height:100%; padding:16px; overflow:auto; }.control-scroll>.el-alert { margin-bottom:14px; }.workflow-description { margin:-3px 0 14px; padding:12px; background:#f5f9ff; border:1px solid #d6e8ff; border-radius:4px; }.workflow-description>div:first-child { display:flex; align-items:center; gap:9px; }.workflow-description>div:first-child>div { display:grid; gap:2px; }.workflow-description strong { color:#1554ad; font-size:12px; }.workflow-description small { color:#8c8c8c; font-size:10px; }.workflow-description p { margin:9px 0; color:#646c73; font-size:11px; line-height:1.6; }.workflow-icon { width:30px; height:30px; display:grid; place-items:center; color:#fff; background:#1677ff; border-radius:4px; font-size:9px; font-weight:800; }.capability-list { display:flex; flex-wrap:wrap; gap:5px; }.run-config { margin-bottom:2px; }.run-config>div { display:grid; grid-template-columns:minmax(0,1fr) 112px; gap:9px; }.run-config :deep(.el-input-number) { width:100%; }.provider-summary { margin:0 0 14px; padding:11px; display:grid; gap:4px; background:#fafafa; border:1px solid #ededed; border-radius:4px; }.provider-summary>span { color:#8c8c8c; font-size:10px; }.provider-summary strong { font-size:12px; }.provider-summary small { color:#646c73; }.provider-summary .el-alert { margin-top:7px; }.sandbox-collapse { border-top:1px solid #ededed; }.collapse-title { width:100%; padding-right:8px; display:flex; align-items:center; justify-content:space-between; }.collapse-title>div { display:grid; gap:2px; }.collapse-title strong { font-size:12px; }.collapse-title small { color:#8c8c8c; font-size:10px; }.plugin-description { margin:-4px 0 15px; display:grid; gap:4px; }.plugin-description strong { color:#1554ad; font-size:11px; }.plugin-description span { color:#646c73; font-size:10px; line-height:1.5; }.admin-notice { margin-bottom:14px; }.test-button { width:100%; margin-top:12px; }.test-result { margin-top:14px; padding:11px; border:1px solid; border-radius:4px; }.test-result.success { background:#f6ffed; border-color:#b7eb8f; }.test-result.failed { background:#fff2f0; border-color:#ffccc7; }.test-result>div { display:flex; justify-content:space-between; align-items:center; }.test-result p { margin:8px 0; color:#3d3d3d; font-size:11px; line-height:1.6; white-space:pre-wrap; }.test-result small { color:#8c8c8c; word-break:break-all; }
+.ai-workbench { display:grid; grid-template-columns:minmax(280px,320px) minmax(0,1fr); gap:16px; align-items:stretch; }.control-card,.ai-chat-card { height:clamp(580px,calc(100vh - 190px),780px); min-height:0; }.card-header>div { display:grid; gap:3px; }.card-header small { display:block; }.control-card :deep(.el-card__body) { height:calc(100% - 57px); padding:0; }.control-scroll { height:100%; padding:16px; overflow:auto; }.control-scroll>.el-alert { margin-bottom:14px; }.workflow-description { margin:-3px 0 14px; padding:12px; background:#f5f9ff; border:1px solid #d6e8ff; border-radius:4px; }.workflow-description>div:first-child { display:flex; align-items:center; gap:9px; }.workflow-description>div:first-child>div { display:grid; gap:2px; }.workflow-description strong { color:#1554ad; font-size:12px; }.workflow-description small { color:#8c8c8c; font-size:10px; }.workflow-description p { margin:9px 0; color:#646c73; font-size:11px; line-height:1.6; }.workflow-icon { width:30px; height:30px; display:grid; place-items:center; color:#fff; background:#1677ff; border-radius:4px; font-size:9px; font-weight:800; }.capability-list { display:flex; flex-wrap:wrap; gap:5px; }.run-config { margin-bottom:2px; }.run-config>div { display:grid; grid-template-columns:minmax(0,1fr) 112px; gap:9px; }.run-config :deep(.el-input-number) { width:100%; }.provider-summary { margin:0 0 14px; padding:11px; display:grid; gap:4px; background:#fafafa; border:1px solid #ededed; border-radius:4px; }.provider-summary>span { color:#8c8c8c; font-size:10px; }.provider-summary strong { font-size:12px; }.provider-summary small { color:#646c73; }.provider-summary .el-alert { margin-top:7px; }.sandbox-collapse { border-top:1px solid #ededed; }.collapse-title { width:100%; padding-right:8px; display:flex; align-items:center; justify-content:space-between; }.collapse-title>div { display:grid; gap:2px; }.collapse-title strong { font-size:12px; }.collapse-title small { color:#8c8c8c; font-size:10px; }.plugin-description { margin:-4px 0 15px; display:grid; gap:4px; }.plugin-description strong { color:#1554ad; font-size:11px; }.plugin-description span { color:#646c73; font-size:10px; line-height:1.5; }.provider-select-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:7px; }.provider-select-row :deep(.el-select) { width:100%; }.provider-profile-toolbar { margin:-5px 0 12px; display:flex; align-items:center; justify-content:space-between; gap:8px; }.provider-profile-toolbar small { color:#86909c; font-size:10px; line-height:1.5; }.provider-profile-toolbar>div { display:flex; gap:5px; flex:none; }.provider-profile-editor { margin:0 0 13px; padding:11px; background:#f9f0ff; border:1px solid #d3adf7; border-radius:5px; }.provider-profile-editor :deep(.el-form-item) { margin-bottom:10px; }.provider-profile-actions { display:flex; justify-content:flex-end; gap:7px; margin-top:10px; }.admin-notice { margin-bottom:14px; }.test-button { width:100%; margin-top:12px; }.test-result { margin-top:14px; padding:11px; border:1px solid; border-radius:4px; }.test-result.success { background:#f6ffed; border-color:#b7eb8f; }.test-result.failed { background:#fff2f0; border-color:#ffccc7; }.test-result>div { display:flex; justify-content:space-between; align-items:center; }.test-result p { margin:8px 0; color:#3d3d3d; font-size:11px; line-height:1.6; white-space:pre-wrap; }.test-result small { color:#8c8c8c; word-break:break-all; }
 .knowledge-summary { margin:0 0 14px; padding:11px; display:grid; gap:5px; background:#f6ffed; border:1px solid #d9f7be; border-radius:4px; }.knowledge-summary>div { display:flex; align-items:center; justify-content:space-between; }.knowledge-summary span,.knowledge-summary small { color:#5b6b59; font-size:10px; }.knowledge-summary strong { color:#237804; font-size:11px; }.binding-numbers { display:grid; grid-template-columns:1fr 1fr; gap:9px; }.binding-numbers :deep(.el-input-number),.sandbox-collapse :deep(.el-select),.sandbox-collapse :deep(.el-radio-group) { width:100%; }.sandbox-collapse :deep(.el-radio-button) { flex:1; }.sandbox-collapse :deep(.el-radio-button__inner) { width:100%; padding-left:7px; padding-right:7px; }
 .agent-json-editor :deep(textarea) { font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-size:10px; line-height:1.55; }.agent-actions { margin-top:12px; display:flex; justify-content:flex-end; gap:8px; }
+.workflow-admin-panel { margin-bottom:18px; padding:12px; background:#fafcff; border:1px solid #d6e4ff; border-radius:6px; }.workflow-admin-toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:10px; }.workflow-admin-toolbar>div:first-child { min-width:0; display:grid; gap:3px; }.workflow-admin-toolbar strong { color:#1f2329; font-size:12px; }.workflow-admin-toolbar small { color:#86909c; font-size:10px; }.workflow-admin-toolbar>div:last-child { display:flex; gap:6px; flex:none; }.workflow-admin-list { display:grid; gap:7px; }.workflow-admin-item { padding:10px; display:flex; align-items:flex-start; justify-content:space-between; gap:12px; background:#fff; border:1px solid #edf0f5; border-radius:5px; }.workflow-admin-main { min-width:0; display:grid; gap:4px; }.workflow-admin-main>div { min-width:0; display:flex; align-items:center; flex-wrap:wrap; gap:5px; }.workflow-admin-main strong { max-width:260px; overflow:hidden; color:#303133; font-size:11px; text-overflow:ellipsis; white-space:nowrap; }.workflow-admin-main small { overflow:hidden; color:#86909c; font-size:9px; text-overflow:ellipsis; white-space:nowrap; }.workflow-admin-main p { margin:2px 0 0; overflow:hidden; color:#646c73; font-size:10px; line-height:1.5; text-overflow:ellipsis; white-space:nowrap; }.workflow-admin-actions { display:flex; flex:none; align-items:center; gap:5px; }.workflow-admin-actions .el-button { margin-left:0; }
 .manifest-guide { margin:-2px 0 16px; overflow:hidden; background:#fbfcfe; border:1px solid #d6e4ff; border-radius:6px; }.manifest-guide-title { padding:12px 14px; display:flex; align-items:center; justify-content:space-between; gap:12px; background:#f0f5ff; border-bottom:1px solid #d6e4ff; }.manifest-guide-title>div { display:grid; gap:3px; }.manifest-guide-title strong { color:#10239e; font-size:12px; }.manifest-guide-title small { color:#697386; font-size:10px; }.manifest-field-list { display:grid; }.manifest-field { padding:10px 14px; display:grid; grid-template-columns:124px 74px minmax(0,1fr); align-items:start; gap:10px; border-bottom:1px solid #edf0f5; }.manifest-field:last-child { border-bottom:0; }.manifest-field code,.tool-whitelist code { color:#0958d9; font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-size:10px; font-weight:700; word-break:break-all; }.manifest-field>span { width:max-content; padding:2px 6px; color:#595959; background:#f0f0f0; border-radius:3px; font-size:9px; }.manifest-field p { margin:0; color:#4e5969; font-size:10px; line-height:1.55; }.tool-whitelist { padding:13px 14px; display:grid; gap:10px; background:#fff; border-top:1px solid #d6e4ff; }.tool-whitelist>strong { color:#303133; font-size:11px; }.tool-whitelist>div { display:grid; grid-template-columns:1fr 1fr; gap:7px; }.tool-whitelist span { min-width:0; padding:8px 9px; display:grid; gap:3px; background:#f7f9fc; border-radius:4px; }.tool-whitelist small { color:#697386; font-size:9px; }
 .ai-chat-card :deep(.el-card__body) { height:calc(100% - 57px); display:flex; flex-direction:column; }.chat-header>div:last-child { display:flex; align-items:center; }.quick-prompts { flex:none; display:flex; flex-wrap:wrap; gap:7px; padding-bottom:12px; border-bottom:1px solid #f0f0f0; }.quick-prompts button { padding:6px 9px; color:#1554ad; background:#f5f9ff; border:1px solid #d6e8ff; border-radius:3px; font-size:11px; cursor:pointer; }.quick-prompts button:hover:not(:disabled) { color:#fff; background:#1677ff; border-color:#1677ff; }.quick-prompts button:disabled { opacity:.5; cursor:not-allowed; }.chat-log { min-height:0; flex:1; padding:15px 3px 6px; overflow:auto; }.message-row { display:flex; align-items:flex-start; gap:9px; }.message-row.user { flex-direction:row-reverse; }.message-avatar { width:28px; height:28px; flex:0 0 28px; display:grid; place-items:center; color:#fff; background:#3f4960; border-radius:4px; font-size:10px; font-weight:700; }.message-row.user .message-avatar { background:#1677ff; }.message-content { min-width:0; max-width:min(82%,760px); margin-bottom:14px; }.message-row.user .message-content { display:flex; flex-direction:column; align-items:flex-end; }.chat-message { margin:0; padding:10px 12px; color:#3d3d3d; background:#f5f5f5; border-radius:4px; font-size:12px; line-height:1.75; word-break:break-word; }.chat-message.user { color:#fff; background:#1677ff; }.chat-message.is-failed { background:#fff7f6; border:1px solid #ffccc7; }.chat-message.is-canceled { color:#646c73; background:#fafafa; border:1px dashed #d9d9d9; }.chat-message p { margin:0; white-space:pre-wrap; }.typing { min-width:150px; display:flex; align-items:center; gap:5px; color:#8c8c8c; }.typing i { width:5px; height:5px; background:#8c8c8c; border-radius:50%; animation:pulse 1s infinite; }.typing i:nth-child(2){animation-delay:.16s}.typing i:nth-child(3){animation-delay:.32s}.typing span { margin-left:4px; font-size:10px; }.message-error { margin-top:9px; padding-top:9px; display:grid; gap:3px; border-top:1px solid #ffccc7; }.message-error strong { color:#cf1322; font-size:11px; }.message-error small { color:#8c8c8c; font-size:9px; word-break:break-all; }.message-error .el-button { width:max-content; height:auto; margin-top:3px; padding:0; }.message-meta { margin-top:5px; display:flex; align-items:center; gap:8px; color:#8c8c8c; font-size:9px; }.message-meta button { padding:0; color:#1677ff; background:none; border:0; font-size:9px; cursor:pointer; }.chat-compose { flex:none; display:flex; align-items:flex-end; gap:9px; padding-top:11px; border-top:1px solid #f0f0f0; }.chat-compose .el-button { min-width:72px; }.chat-notice { margin-top:8px; color:#8c8c8c; text-align:center; }
+.rule-draft-card { margin-top:10px; padding:10px; display:grid; gap:7px; background:#fffbe6; border:1px solid #ffe58f; border-radius:4px; }.rule-draft-card>div { display:flex; align-items:center; justify-content:space-between; gap:8px; }.rule-draft-card small { color:#646c73; }.rule-draft-card .el-button { width:max-content; }
 .ai-workbench { grid-template-columns:minmax(250px,286px) minmax(0,1fr); }
 .control-section-label { margin:2px 0 10px; display:flex; align-items:center; gap:7px; color:#303133; font-size:11px; font-weight:700; letter-spacing:.02em; }.control-section-label span { width:22px; height:18px; display:grid; place-items:center; color:#1677ff; background:#eaf3ff; border-radius:3px; font-size:9px; }
 .runtime-overview { display:grid; grid-template-columns:1fr 1fr; gap:8px; }.overview-item { min-width:0; padding:10px; display:grid; gap:3px; color:inherit; text-align:left; background:#fafafa; border:1px solid #ededed; border-radius:4px; cursor:pointer; transition:border-color .15s,background .15s; }.overview-item:hover { background:#f5f9ff; border-color:#91caff; }.overview-item span { color:#8c8c8c; font-size:9px; }.overview-item strong { overflow:hidden; color:#303133; font-size:11px; text-overflow:ellipsis; white-space:nowrap; }.overview-item small { overflow:hidden; color:#646c73; font-size:9px; text-overflow:ellipsis; white-space:nowrap; }.runtime-warning { margin-top:10px; }.manager-entry { width:100%; margin-top:12px; padding:11px 12px; display:flex; align-items:center; justify-content:space-between; color:inherit; text-align:left; background:#fff; border:1px solid #d9d9d9; border-radius:4px; cursor:pointer; }.manager-entry:hover { background:#f5f9ff; border-color:#1677ff; }.manager-entry>span { display:grid; gap:2px; }.manager-entry strong { font-size:11px; }.manager-entry small { color:#8c8c8c; font-size:9px; }.manager-entry b { color:#1677ff; font-size:10px; }
@@ -490,6 +760,6 @@ onBeforeUnmount(() => { abortController?.abort(); if (scrollFrame) cancelAnimati
 @keyframes manager-in { from { opacity:0; transform:translateX(6px); } }
 @keyframes pulse { 50% { opacity:.28; transform:translateY(-2px); } }
 @media (max-width:1120px) { .ai-workbench { grid-template-columns:1fr; }.control-card { height:auto; min-height:0; }.control-card :deep(.el-card__body) { height:auto; }.control-scroll { max-height:560px; }.ai-chat-card { height:650px; } }
-@media (max-width:640px) { .ai-runtime { align-items:flex-start; flex-direction:column; }.runtime-actions,.runtime-status { width:100%; white-space:normal; flex-wrap:wrap; }.runtime-actions { align-items:flex-start; }.runtime-actions .el-button:first-of-type { margin-left:auto; }.runtime-overview { grid-template-columns:1fr; }.ai-chat-card { height:580px; }.chat-header { align-items:flex-start; gap:8px; }.chat-header>div:last-child { flex-wrap:wrap; justify-content:flex-end; }.message-content { max-width:88%; }.chat-compose .el-button { min-width:58px; }.binding-numbers { grid-template-columns:1fr; }.manager-shell { grid-template-columns:1fr; gap:16px; }.manager-menu { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); }.manager-menu :deep(.el-menu-item) { height:54px; margin:0 3px 0 0; padding:0 7px !important; justify-content:center; }.manager-menu-copy small { display:none; }.manager-menu-icon { display:none; } }
+@media (max-width:640px) { .ai-runtime { align-items:flex-start; flex-direction:column; }.runtime-actions,.runtime-status { width:100%; white-space:normal; flex-wrap:wrap; }.runtime-actions { align-items:flex-start; }.runtime-actions .el-button:first-of-type { margin-left:auto; }.runtime-overview { grid-template-columns:1fr; }.ai-chat-card { height:580px; }.chat-header { align-items:flex-start; gap:8px; }.chat-header>div:last-child { flex-wrap:wrap; justify-content:flex-end; }.message-content { max-width:88%; }.chat-compose .el-button { min-width:58px; }.binding-numbers { grid-template-columns:1fr; }.manager-shell { grid-template-columns:1fr; gap:16px; }.manager-menu { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); }.manager-menu :deep(.el-menu-item) { height:54px; margin:0 3px 0 0; padding:0 7px !important; justify-content:center; }.manager-menu-copy small { display:none; }.manager-menu-icon { display:none; }.workflow-admin-toolbar { align-items:flex-start; flex-direction:column; }.workflow-admin-toolbar>div:last-child { width:100%; }.workflow-admin-toolbar>div:last-child .el-button { flex:1; }.workflow-admin-item { flex-direction:column; }.workflow-admin-actions { width:100%; }.workflow-admin-actions .el-button { flex:1; } }
 @media (max-width:520px) { .manifest-field { grid-template-columns:1fr auto; }.manifest-field p { grid-column:1 / -1; }.tool-whitelist>div { grid-template-columns:1fr; } }
 </style>

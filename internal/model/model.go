@@ -21,6 +21,7 @@ const (
 	TopicAlarmRecovered  = "iot.alarm.recovered"
 	TopicAlarmConfirmed  = "iot.alarm.confirmed"
 	TopicAlarmAIAnalysis = "iot.alarm.ai-analysis"
+	TopicUIAction        = "iot.ui-action"
 	TopicReplayRequest   = "iot.replay.request"
 )
 
@@ -97,6 +98,11 @@ type RawArchiveIndex struct {
 	PublishedAt      int64  `json:"publishedAt,omitempty"`
 	PublishAttempts  int    `json:"publishAttempts,omitempty"`
 	LastPublishError string `json:"lastPublishError,omitempty"`
+	// Parsed and parsedMessageType are response metadata populated by the API;
+	// they are not persisted in the archive index table.
+	Parsed            bool   `json:"parsed,omitempty"`
+	ParsedMessageType string `json:"parsedMessageType,omitempty"`
+	Parser            string `json:"parser,omitempty"`
 }
 
 type MessageType string
@@ -163,8 +169,9 @@ type Product struct {
 }
 
 // ProtocolPackage is a declarative protocol-package release. ParserType points
-// at a reviewed parser registered in the Go process; executable code is never
-// uploaded through the management API.
+// at a reviewed parser registered in the Go process. The sandbox JavaScript
+// parser is the exception: its pure transformation source is stored in Config
+// and executed without host capabilities.
 type ProtocolPackage struct {
 	ID            string         `json:"id"`
 	TenantID      string         `json:"tenantId"`
@@ -179,6 +186,56 @@ type ProtocolPackage struct {
 	Config        map[string]any `json:"config,omitempty"`
 	CreatedAt     int64          `json:"createdAt"`
 	UpdatedAt     int64          `json:"updatedAt"`
+}
+
+// ProtocolAssistantField is the editable contract between the AI protocol
+// assistant and the form-based protocol designer. Expression is evaluated by
+// the JavaScript parser sandbox with raw (and, for hex payloads, bytes) in
+// scope.
+type ProtocolAssistantField struct {
+	Name        string `json:"name"`
+	Label       string `json:"label,omitempty"`
+	Type        string `json:"type,omitempty"`
+	Expression  string `json:"expression"`
+	Description string `json:"description,omitempty"`
+}
+
+type ProtocolAssistantDraft struct {
+	Name           string                   `json:"name"`
+	Description    string                   `json:"description,omitempty"`
+	Protocol       string                   `json:"protocol"`
+	Transport      string                   `json:"transport"`
+	PayloadFormat  string                   `json:"payloadFormat"`
+	MessageType    MessageType              `json:"messageType"`
+	Setup          string                   `json:"setup,omitempty"`
+	Source         string                   `json:"source"`
+	Fields         []ProtocolAssistantField `json:"fields"`
+	TagExpressions map[string]string        `json:"tagExpressions,omitempty"`
+	SamplePayload  any                      `json:"samplePayload,omitempty"`
+	Warnings       []string                 `json:"warnings,omitempty"`
+	Preview        *StandardMessage         `json:"preview,omitempty"`
+}
+
+type DeviceHealthItem struct {
+	DeviceID         string   `json:"deviceId"`
+	DeviceName       string   `json:"deviceName,omitempty"`
+	ProductID        string   `json:"productId"`
+	BusinessStatus   string   `json:"businessStatus"`
+	DataStatus       string   `json:"dataStatus"`
+	LastSeenAt       int64    `json:"lastSeenAt,omitempty"`
+	ActiveAlarmCount int      `json:"activeAlarmCount"`
+	Severity         string   `json:"severity"`
+	Findings         []string `json:"findings"`
+}
+
+type DeviceHealthReport struct {
+	TenantID    string             `json:"tenantId,omitempty"`
+	GeneratedAt int64              `json:"generatedAt"`
+	Summary     string             `json:"summary"`
+	AIAdvice    string             `json:"aiAdvice,omitempty"`
+	Counts      map[string]int     `json:"counts"`
+	Items       []DeviceHealthItem `json:"items"`
+	Warnings    []string           `json:"warnings,omitempty"`
 }
 
 // ManagedDevice is the inventory/control-plane record. Runtime connectivity is
@@ -213,6 +270,12 @@ type RuleCondition struct {
 	Value    any    `json:"value"`
 }
 
+type RuleAction struct {
+	Type     string `json:"type"`
+	CameraID string `json:"cameraId,omitempty"`
+	Page     string `json:"page,omitempty"`
+}
+
 type AlarmRule struct {
 	ID              string          `json:"id"`
 	TenantID        string          `json:"tenantId"`
@@ -224,11 +287,22 @@ type AlarmRule struct {
 	Match           string          `json:"match"`
 	DurationSeconds int64           `json:"durationSeconds"`
 	Recovery        []RuleCondition `json:"recovery,omitempty"`
+	Actions         []RuleAction    `json:"actions,omitempty"`
 	Expression      string          `json:"expression,omitempty"`
 	Enabled         bool            `json:"enabled"`
 	Version         int             `json:"version"`
 	CreatedAt       int64           `json:"createdAt"`
 	UpdatedAt       int64           `json:"updatedAt"`
+}
+
+type UIActionEvent struct {
+	ID          string     `json:"id"`
+	TenantID    string     `json:"tenantId"`
+	RuleID      string     `json:"ruleId"`
+	AlarmID     string     `json:"alarmId"`
+	DeviceID    string     `json:"deviceId"`
+	Action      RuleAction `json:"action"`
+	TriggeredAt int64      `json:"triggeredAt"`
 }
 
 type Alarm struct {

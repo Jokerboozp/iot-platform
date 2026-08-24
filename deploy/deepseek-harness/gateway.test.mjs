@@ -79,7 +79,7 @@ async function ndjson(response) {
 
 test('catalog is manifest-driven and exposes capabilities without policy internals', async () => {
   const plugins = await loadPluginCatalog(join(deploymentDir, 'plugins'))
-  assert.deepEqual(plugins.map(plugin => plugin.id), ['alarm-handler', 'ops-assistant', 'system-observer'])
+  assert.deepEqual(plugins.map(plugin => plugin.id), ['alarm-handler', 'device-health-inspector', 'ops-assistant', 'protocol-assistant', 'system-observer'])
   assert.ok(plugins.every(plugin => plugin.capabilities.length > 0))
 
   const { baseUrl } = await startGateway(async () => ({ run: async () => result(), close: async () => {} }))
@@ -90,7 +90,7 @@ test('catalog is manifest-driven and exposes capabilities without policy interna
   })
   assert.equal(response.status, 200)
   const body = await response.json()
-  assert.equal(body.items.length, 3)
+  assert.equal(body.items.length, 5)
   assert.ok(body.items.every(plugin => Array.isArray(plugin.capabilities)))
   assert.ok(body.items.every(plugin => plugin.persona === undefined && plugin.allowedTools === undefined))
 })
@@ -121,11 +121,33 @@ test('admin API atomically creates a persistent Agent manifest that is immediate
   assert.equal(persisted.name, manifest.name)
   const listed = await fetch(`${baseUrl}/v1/plugins`, { headers: { 'x-iot-harness-token': gatewayToken } })
   assert.deepEqual((await listed.json()).items.map(plugin => plugin.id), ['dynamic-status-agent', 'seed-agent'])
+  const adminListed = await fetch(`${baseUrl}/v1/plugins/admin`, { headers: { 'x-iot-harness-token': gatewayToken } })
+  assert.equal(adminListed.status, 200)
+  const adminBody = await adminListed.json()
+  assert.equal(adminBody.count, 2)
+  assert.equal(adminBody.items.find(plugin => plugin.id === manifest.id).persona, manifest.persona)
+  assert.deepEqual(adminBody.items.find(plugin => plugin.id === manifest.id).allowedTools, manifest.allowedTools)
+  const disabled = await fetch(`${baseUrl}/v1/plugins`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-iot-harness-token': gatewayToken },
+    body: JSON.stringify({ ...manifest, enabled: false }),
+  })
+  assert.equal(disabled.status, 200)
+  const publicAfterDisable = await fetch(`${baseUrl}/v1/plugins`, { headers: { 'x-iot-harness-token': gatewayToken } })
+  assert.deepEqual((await publicAfterDisable.json()).items.map(plugin => plugin.id), ['seed-agent'])
+  const adminAfterDisable = await fetch(`${baseUrl}/v1/plugins/admin`, { headers: { 'x-iot-harness-token': gatewayToken } })
+  assert.equal((await adminAfterDisable.json()).items.find(plugin => plugin.id === manifest.id).enabled, false)
+  const deleted = await fetch(`${baseUrl}/v1/plugins/${manifest.id}`, { method: 'DELETE', headers: { 'x-iot-harness-token': gatewayToken } })
+  assert.equal(deleted.status, 200)
+  const missing = await fetch(`${baseUrl}/v1/plugins/${manifest.id}`, { method: 'DELETE', headers: { 'x-iot-harness-token': gatewayToken } })
+  assert.equal(missing.status, 404)
   const immutable = await fetch(`${baseUrl}/v1/plugins`, {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-iot-harness-token': gatewayToken },
     body: JSON.stringify({ ...manifest, id: 'ops-assistant' }),
   })
   assert.equal(immutable.status, 409)
+  const immutableDelete = await fetch(`${baseUrl}/v1/plugins/ops-assistant`, { method: 'DELETE', headers: { 'x-iot-harness-token': gatewayToken } })
+  assert.equal(immutableDelete.status, 409)
 })
 
 test('gateway refuses internal tokens shorter than 32 characters', () => {
@@ -163,11 +185,12 @@ test('Cordis policy installs a monotonic global guard and prompt restriction', (
       created = callback
     },
   }
-  applyPolicy(ctx, { allowedTools: ['mcp__iot__query_alarm_list'] })
+  applyPolicy(ctx, { allowedTools: ['mcp__iot__query_alarm_list', 'mcp__iot__create_rule_draft'] })
   assert.equal(guard({ name: 'mcp__iot__query_alarm_list' }), undefined)
+  assert.equal(guard({ name: 'mcp__iot__create_rule_draft' }), undefined)
   assert.equal(guard({ name: 'mcp__iot__control_device' }), 'tool not allowed')
   created({ agent: { ctx: { tools: { restrict: config => { restricted = config } } } } })
-  assert.deepEqual(restricted, { allow: ['mcp__iot__query_alarm_list'] })
+  assert.deepEqual(restricted, { allow: ['mcp__iot__query_alarm_list', 'mcp__iot__create_rule_draft'] })
 })
 
 test('stream emits only the public NDJSON event vocabulary and suppresses reasoning/results', async () => {
@@ -186,6 +209,8 @@ test('stream emits only the public NDJSON event vocabulary and suppresses reason
         notify({ type: 'tool/result', data: { callId: 'call-direct', result: 'SECRET_TOOL_RESULT' } })
         notify({ type: 'tool/call', data: { callId: 'call-legacy', name: 'mcp__iot__query_knowledge_base' } })
         notify({ type: 'tool/result', data: { message: { source: { callId: 'call-legacy' }, content: [{ text: 'SECRET_LEGACY_RESULT' }] } } })
+        notify({ type: 'tool/call', data: { callId: 'call-draft', name: 'mcp__iot__create_rule_draft' } })
+        notify({ type: 'tool/result', data: { message: { source: { callId: 'call-draft' }, content: [{ type:'tool-result', isError:false, content:[{ type:'text', text:JSON.stringify({ kind:'ruleDraft', persisted:true, draft:{ id:'draft-1', name:'高温联动', conditions:[{ field:'temperature', operator:'>', value:80 }], actions:[{ type:'OPEN_CAMERA', cameraId:'camera-001' }], internalSecret:'MUST_NOT_LEAK' } }) }] }] } } })
         return result('fallback must not duplicate streamed text')
       },
       async close() {},
@@ -201,11 +226,17 @@ test('stream emits only the public NDJSON event vocabulary and suppresses reason
     'tool.completed',
     'tool.started',
     'tool.completed',
+    'tool.started',
+    'tool.completed',
     'run.completed',
   ])
   assert.equal(events[3].success, true)
   assert.equal(events[5].success, true)
+  assert.equal(events[7].data.clientAction.type, 'RULE_DRAFT_READY')
+  assert.equal(events[7].data.clientAction.draft.actions[0].cameraId, 'camera-001')
+  assert.equal(events[7].data.clientAction.persisted, true)
   assert.doesNotMatch(payload, /SECRET_REASONING|SECRET_TOOL_RESULT|SECRET_LEGACY_RESULT|arguments/)
+  assert.doesNotMatch(payload, /MUST_NOT_LEAK/)
   assert.equal(factorySpec.mcpToken, undefined)
   assert.match(factorySpec.proxyMcpUrl, /^http:\/\/127\.0\.0\.1:\d+\/mcp$/)
   assert.equal(factorySpec.runtimeAccessKey.length, 43)

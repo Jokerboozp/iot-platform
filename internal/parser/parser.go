@@ -19,19 +19,38 @@ type Parser interface {
 	Parse(model.RawMessage) (*model.StandardMessage, error)
 }
 
+// ConfigurableParser is implemented by parsers whose field layout is safe to
+// describe in a protocol package's JSON config. The executable parser remains
+// built into the service; only the mapping/layout is tenant-managed data.
+type ConfigurableParser interface {
+	ParseWithConfig(model.RawMessage, map[string]any) (*model.StandardMessage, error)
+}
+
 type Registry struct{ parsers []Parser }
 
 func NewRegistry(parsers ...Parser) *Registry { return &Registry{parsers: parsers} }
 func (r *Registry) Register(p Parser)         { r.parsers = append(r.parsers, p) }
 func (r *Registry) ParseWith(name string, raw model.RawMessage) (*model.StandardMessage, error) {
-	return r.ParseVersion(name, "", raw)
+	return r.ParseVersionWithConfig(name, "", nil, raw)
 }
 func (r *Registry) ParseVersion(name, version string, raw model.RawMessage) (*model.StandardMessage, error) {
+	return r.ParseVersionWithConfig(name, version, nil, raw)
+}
+func (r *Registry) ParseWithConfig(name string, config map[string]any, raw model.RawMessage) (*model.StandardMessage, error) {
+	return r.ParseVersionWithConfig(name, "", config, raw)
+}
+func (r *Registry) ParseVersionWithConfig(name, version string, config map[string]any, raw model.RawMessage) (*model.StandardMessage, error) {
 	for _, p := range r.parsers {
 		if p.Name() != name || version != "" && p.Version() != version {
 			continue
 		}
-		m, err := p.Parse(raw)
+		var m *model.StandardMessage
+		var err error
+		if configurable, ok := p.(ConfigurableParser); ok {
+			m, err = configurable.ParseWithConfig(raw, config)
+		} else {
+			m, err = p.Parse(raw)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("%s@%s: %w", p.Name(), p.Version(), err)
 		}

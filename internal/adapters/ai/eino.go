@@ -54,6 +54,12 @@ func (e *EinoOrchestrator) AnalyzeAlarm(ctx context.Context, a model.Alarm, h []
 func (e *EinoOrchestrator) Chat(ctx context.Context, tenant, q string) (string, error) {
 	return e.chat.Invoke(ctx, chatInput{tenant, q})
 }
+func (e *EinoOrchestrator) GenerateJSON(ctx context.Context, tenant, system, user string) (string, error) {
+	if generator, ok := e.base.(ports.AIJSONGenerator); ok {
+		return generator.GenerateJSON(ctx, tenant, system, user)
+	}
+	return e.base.Chat(ctx, tenant, system+"\n\n请只返回合法 JSON。\n"+user)
+}
 func (e *EinoOrchestrator) RuleDraft(ctx context.Context, tenant, text string) (model.AlarmRule, error) {
 	return e.rule.Invoke(ctx, ruleInput{tenant, text})
 }

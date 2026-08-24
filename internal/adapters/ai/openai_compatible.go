@@ -18,7 +18,7 @@ import (
 
 const maxAIProviderResponseBytes = 4 << 20
 
-const ruleDraftSystemPrompt = `将自然语言告警要求转换成一个 JSON 规则草稿。只能返回 JSON，不要输出 Markdown。必须严格使用以下结构：{"name":"简短中文名称","alarmType":"SMOKE_DETECTED","level":"HIGH","match":"all","conditions":[{"field":"smoke","operator":"eq","value":true}],"durationSeconds":0,"recovery":[]}。match 只能是字符串 all 或 any；conditions 和 recovery 必须是数组；每个条件只能包含 field、operator、value。alarmType 只能使用 FIRE_RISK、FIRE、SMOKE_DETECTED、FLAME_DETECTED、HIGH_TEMPERATURE、DEVICE_OFFLINE、WATER_PRESSURE_LOW、WATER_LEVEL_ABNORMAL、ELECTRICAL_FIRE、GAS_LEAK、MANUAL_ALARM；level 只能使用 CRITICAL、HIGH、MEDIUM、LOW、INFO。`
+const ruleDraftSystemPrompt = `将自然语言告警要求转换成一个 JSON 规则草稿。只能返回 JSON，不要输出 Markdown。必须严格使用以下结构：{"name":"简短中文名称","alarmType":"SMOKE_DETECTED","level":"HIGH","match":"all","conditions":[{"field":"smoke","operator":"eq","value":true}],"durationSeconds":0,"recovery":[],"actions":[{"type":"OPEN_CAMERA","cameraId":"camera-001"}]}。match 只能是字符串 all 或 any；conditions 和 recovery 必须是数组；每个条件只能包含 field、operator、value。actions 必须是数组，打开摄像头使用 {"type":"OPEN_CAMERA","cameraId":"用户指定的摄像头 ID"}，打开业务页面使用 {"type":"OPEN_PAGE","page":"alarms"}；没有动作要求时返回空数组，不得生成 URL、脚本或设备控制动作。alarmType 只能使用 FIRE_RISK、FIRE、SMOKE_DETECTED、FLAME_DETECTED、HIGH_TEMPERATURE、DEVICE_OFFLINE、WATER_PRESSURE_LOW、WATER_LEVEL_ABNORMAL、ELECTRICAL_FIRE、GAS_LEAK、MANUAL_ALARM；level 只能使用 CRITICAL、HIGH、MEDIUM、LOW、INFO。`
 
 type OpenAICompatible struct {
 	providerID, providerName, baseURL, model, apiKey string
@@ -128,6 +128,13 @@ func (o *OpenAICompatible) Chat(ctx context.Context, tenant, question string) (s
 	return o.call(ctx, "你是消防物联网运维助手。仅依据受控平台数据回答，缺少数据时明确说明，不能直接控制设备。租户："+tenant, question, false)
 }
 
+func (o *OpenAICompatible) GenerateJSON(ctx context.Context, tenant, system, user string) (string, error) {
+	if strings.TrimSpace(system) == "" {
+		system = "你是消防物联网平台的结构化数据助手，只返回合法 JSON。"
+	}
+	return o.call(ctx, system+"\n租户："+tenant, user, true)
+}
+
 func (o *OpenAICompatible) RuleDraft(ctx context.Context, tenant, text string) (model.AlarmRule, error) {
 	content, err := o.call(ctx, ruleDraftSystemPrompt, text, true)
 	if err != nil {
@@ -156,6 +163,7 @@ func decodeRuleDraft(content string) (model.AlarmRule, error) {
 	raw["match"] = match
 	raw["conditions"] = normalizeRuleConditions(raw["conditions"])
 	raw["recovery"] = normalizeRuleConditions(raw["recovery"])
+	raw["actions"] = normalizeRuleActions(raw["actions"])
 	normalized, err := json.Marshal(raw)
 	if err != nil {
 		return model.AlarmRule{}, err
@@ -165,6 +173,36 @@ func decodeRuleDraft(content string) (model.AlarmRule, error) {
 		return rule, err
 	}
 	return rule, nil
+}
+
+func normalizeRuleActions(value any) []map[string]any {
+	actions := []map[string]any{}
+	items, ok := value.([]any)
+	if !ok {
+		if single, singleOK := value.(map[string]any); singleOK {
+			items = []any{single}
+		}
+	}
+	for _, item := range items {
+		object, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		actionType := strings.ToUpper(strings.TrimSpace(stringValue(object["type"])))
+		switch actionType {
+		case "OPEN_CAMERA":
+			cameraID := strings.TrimSpace(stringValue(object["cameraId"]))
+			if cameraID != "" {
+				actions = append(actions, map[string]any{"type": actionType, "cameraId": cameraID})
+			}
+		case "OPEN_PAGE":
+			page := strings.ToLower(strings.TrimSpace(stringValue(object["page"])))
+			if page != "" {
+				actions = append(actions, map[string]any{"type": actionType, "page": page})
+			}
+		}
+	}
+	return actions
 }
 
 func normalizeRuleConditions(value any) []map[string]any {

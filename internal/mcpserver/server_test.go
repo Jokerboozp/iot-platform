@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,6 +16,19 @@ import (
 	"iot-platform/internal/core"
 	"iot-platform/internal/model"
 )
+
+type draftAI struct{}
+
+func (draftAI) AnalyzeAlarm(context.Context, model.Alarm, []map[string]any, []string) (model.AIAnalysis, error) {
+	return model.AIAnalysis{}, errors.New("not used")
+}
+func (draftAI) Chat(context.Context, string, string) (string, error) {
+	return "", errors.New("not used")
+}
+func (draftAI) RuleDraft(context.Context, string, string) (model.AlarmRule, error) {
+	return model.AlarmRule{Name: "高温打开告警中心", AlarmType: "HIGH_TEMPERATURE", Level: "HIGH", Conditions: []model.RuleCondition{{Field: "temperature", Operator: "gt", Value: float64(80)}}, Actions: []model.RuleAction{{Type: "OPEN_PAGE", Page: "alarms"}}}, nil
+}
+func (draftAI) Health(context.Context) error { return nil }
 
 func TestHarnessToolSurfaceIsReadOnlyAndScopeChecked(t *testing.T) {
 	handler := NewHarness(&core.Engine{})
@@ -39,13 +53,10 @@ func TestHarnessToolSurfaceIsReadOnlyAndScopeChecked(t *testing.T) {
 		t.Fatalf("tools/list status=%d body=%s", listResponse.Code, listResponse.Body.String())
 	}
 	body := listResponse.Body.String()
-	for _, tool := range []string{"query_system_overview", "query_device_latest", "query_alarm_list", "query_property_history", "query_similar_alarms", "query_knowledge_base"} {
+	for _, tool := range []string{"query_system_overview", "query_device_latest", "query_alarm_list", "query_property_history", "query_similar_alarms", "query_knowledge_base", "create_rule_draft"} {
 		if !strings.Contains(body, `"name":"`+tool+`"`) {
 			t.Fatalf("missing read tool %q: %s", tool, body)
 		}
-	}
-	if strings.Contains(body, "create_rule_draft") {
-		t.Fatalf("write-capable tool leaked into harness surface: %s", body)
 	}
 
 	callBody := `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query_alarm_list","arguments":{}}}`
@@ -56,6 +67,26 @@ func TestHarnessToolSurfaceIsReadOnlyAndScopeChecked(t *testing.T) {
 	handler.ServeHTTP(callResponse, call)
 	if callResponse.Code != http.StatusOK || !strings.Contains(callResponse.Body.String(), "not authorized") {
 		t.Fatalf("out-of-scope tool call was not rejected: status=%d body=%s", callResponse.Code, callResponse.Body.String())
+	}
+}
+
+func TestHarnessCreateRuleDraftPersistsDisabledRule(t *testing.T) {
+	repo := memory.NewRepository()
+	engine := &core.Engine{Repo: repo, AI: draftAI{}}
+	handler := NewHarness(engine)
+	claims := auth.Claims{Username: "alice", TenantID: "tenant-a", TokenUse: "harness", RunID: "run-draft", Scopes: []string{auth.ScopeCreateRuleDraft}, RegisteredClaims: jwt.RegisteredClaims{Audience: jwt.ClaimStrings{auth.HarnessAudience}}}
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_rule_draft","arguments":{"inputText":"如果 temperature 超过 80，打开告警中心"}}}`
+	req := httptest.NewRequest(http.MethodPost, "http://localhost/mcp/harness", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(auth.ContextWithClaims(context.Background(), claims))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `\"persisted\":true`) {
+		t.Fatalf("draft was not returned as persisted: status=%d body=%s", response.Code, response.Body.String())
+	}
+	rules, err := repo.ListRules(context.Background(), "tenant-a")
+	if err != nil || len(rules) != 1 || rules[0].Enabled || rules[0].Actions[0].Page != "alarms" {
+		t.Fatalf("disabled draft was not saved to tenant rules: rules=%#v err=%v", rules, err)
 	}
 }
 

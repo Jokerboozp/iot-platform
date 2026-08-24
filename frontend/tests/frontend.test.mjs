@@ -23,11 +23,12 @@ test('management controls and Chinese labels remain available', async () => {
 
 test('video preview and AI provider playground remain available', async () => {
   const source = await sourceText()
-  for (const label of ['视频流预览', '浏览器可直接预览 HLS', 'Provider 临时测试', '连接并测试插件', 'DEEPSEEK HARNESS', 'AI 工作流', '运行轨迹', '工具调用']) {
+  for (const label of ['视频流预览', '浏览器可直接预览 HLS', 'Provider 测试与配置', '添加自定义 Provider', '保存到当前租户', '连接并测试插件', 'DEEPSEEK HARNESS', 'AI 工作流', '运行轨迹', '工具调用']) {
     assert.match(source, new RegExp(label), `missing feature label: ${label}`)
   }
   const packageJson = JSON.parse(await readFile(new URL('package.json', root), 'utf8'))
   assert.ok(packageJson.dependencies?.['hls.js'], 'hls.js is required for browser HLS playback')
+  assert.match(source, /\.provider-select-row\s*\{[^}]*width:100%;[^}]*min-width:0;/, 'provider selector row must fill the Element Plus form content width')
 })
 
 test('knowledge management uploads files and lists tenant documents', async () => {
@@ -51,6 +52,10 @@ test('AI workbench uses cancellable SSE workflows and stable message keys', asyn
   const sseSource = await readFile(new URL('src/sse.js', root), 'utf8')
 
   assert.match(aiView, /api\('\/api\/v1\/ai\/workflows'\)/)
+  assert.match(aiView, /runtimeRequestSequence/)
+  assert.match(aiView, /requestSequence !== runtimeRequestSequence/)
+  assert.match(aiView, /workflowManageRequestSequence/)
+  assert.match(aiView, /loadWorkflowManagement\(true\)/)
   assert.match(aiView, /apiStream\('\/api\/v1\/ai\/chat\/stream'/)
   assert.match(aiView, /new AbortController\(\)/)
   assert.match(aiView, /:key="message\.id"/)
@@ -73,9 +78,59 @@ test('AI workbench uses cancellable SSE workflows and stable message keys', asyn
   assert.match(aiView, /knowledge-binding/)
   assert.match(aiView, /method:'PUT'/)
   assert.match(aiView, /api\('\/api\/v1\/ai\/workflows', \{ method:'POST'/)
+  for (const marker of ['/api/v1/ai/workflows/admin', "method:'DELETE'", '工作流插件管理', '已配置的工作流插件', '内置只读', '启用', '禁用', '删除']) {
+    assert.match(aiView, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), `missing workflow management marker: ${marker}`)
+  }
+  assert.match(aiView, /method:'PUT'/)
   assert.match(apiSource, /export async function apiStream/)
+  assert.match(apiSource, /request\.cache = 'no-store'/)
+  assert.match(aiView, /providerProfileStorageKey/)
+  assert.match(aiView, /provider:custom \? 'openai-compatible' : sandbox\.provider/)
   assert.match(apiSource, /text\/event-stream/)
   assert.match(sseSource, /getReader\(\)/)
+})
+
+test('protocol mappings, parsed raw results and device connection state are visible', async () => {
+  const protocols = await readFile(new URL('src/views/ProtocolsView.vue', root), 'utf8')
+  const raw = await readFile(new URL('src/views/RawView.vue', root), 'utf8')
+  const devices = await readFile(new URL('src/views/DevicesView.vue', root), 'utf8')
+  const app = await readFile(new URL('src/App.vue', root), 'utf8')
+  const integration = await readFile(new URL('src/views/IntegrationView.vue', root), 'utf8')
+  const labels = await readFile(new URL('src/labels.js', root), 'utf8')
+  for (const label of ['可配置解析', '配置 JSON', '解析调试', '标准解析结果', '解析脚本']) assert.match(`${protocols}\n${raw}`, new RegExp(label), `missing label: ${label}`)
+  assert.match(protocols, /configurable_json_parser/)
+  assert.match(protocols, /configurable_hex_parser/)
+  assert.match(protocols, /javascript_sandbox_parser/)
+  assert.match(labels, /受限 JavaScript 解析器/)
+  assert.match(app, /label:'设备与数据'/)
+  assert.match(app, /title:'接入指南'/)
+  assert.match(integration, /设备连接指南/)
+  assert.match(raw, /standardMessage/)
+    assert.match(devices, /hasReported\(row\)/)
+  assert.match(devices, /查看数据/)
+  assert.match(devices, /配置接入/)
+})
+
+test('protocol assistant and health inspection pages expose the review workflow', async () => {
+  const assistant = await readFile(new URL('src/views/ProtocolAssistantView.vue', root), 'utf8')
+  const inspection = await readFile(new URL('src/views/HealthInspectionView.vue', root), 'utf8')
+  const app = await readFile(new URL('src/App.vue', root), 'utf8')
+  for (const label of ['AI 协议接入助手', '协议文件', '点表 / 协议片段', 'AI 生成解析草稿', '字段映射与代码', '解析表达式（可修改）', '运行解析预览', '确认并发布协议']) {
+    assert.match(assistant, new RegExp(label), `missing protocol assistant label: ${label}`)
+  }
+  for (const route of ['/api/v1/ai/protocol-assistant/generate', '/api/v1/ai/protocol-assistant/preview', '/api/v1/ai/protocol-assistant/publish']) {
+    assert.match(assistant, new RegExp(route.replaceAll('/', '\\/')))
+  }
+  for (const label of ['设备健康巡检', '立即巡检', '状态正常', '活动告警', 'AI 巡检建议']) {
+    assert.match(inspection, new RegExp(label), `missing inspection label: ${label}`)
+  }
+  assert.match(inspection, /api\('\/api\/v1\/ai\/health-inspection'/)
+  assert.doesNotMatch(inspection, /onMounted\(run\)/)
+  assert.match(inspection, /点击“立即巡检”开始检查/)
+  assert.match(app, /title:'协议接入助手'/)
+  assert.match(app, /title:'智能巡检'/)
+  assert.match(app, /protocolAssistant/)
+  assert.match(app, /inspection/)
 })
 
 test('AI rule drafts keep failures visible in the page', async () => {
@@ -83,6 +138,54 @@ test('AI rule drafts keep failures visible in the page', async () => {
   assert.match(rulesView, /draftError\.value=e\?\.message/)
   assert.match(rulesView, /v-if="draftError"/)
   assert.match(rulesView, /规则草稿生成失败/)
+})
+
+test('Agent automation drafts and allowlisted UI actions remain wired end to end', async () => {
+  const aiView = await readFile(new URL('src/views/AiView.vue', root), 'utf8')
+  const rulesView = await readFile(new URL('src/views/RulesView.vue', root), 'utf8')
+  const app = await readFile(new URL('src/App.vue', root), 'utf8')
+  const cameras = await readFile(new URL('src/views/CameraMappingsView.vue', root), 'utf8')
+  assert.match(aiView, /RULE_DRAFT_READY/)
+  assert.match(aiView, /clientAction\.persisted/)
+  assert.match(aiView, /AI_HISTORY_STORAGE_PREFIX/)
+  assert.match(aiView, /restoreConversation\(\)/)
+  assert.match(aiView, /persistConversation\(\)/)
+  assert.match(aiView, /mcp__iot__create_rule_draft/)
+  assert.match(rulesView, /联动动作 JSON/)
+  assert.match(rulesView, /detail\.ruleDraft/)
+  assert.match(rulesView, /detail\.persisted/)
+  assert.match(app, /\/ui-action\//)
+  assert.match(app, /action\.type === 'OPEN_CAMERA'/)
+  assert.match(app, /allowedPages/)
+  assert.match(cameras, /detail\.autoPreview/)
+  assert.match(cameras, /await openPreview\(target\)/)
+})
+
+test('AI conversation history survives view recreation and stays tenant scoped', async () => {
+  const { AI_HISTORY_STORAGE_PREFIX, loadAIHistory, saveAIHistory } = await import('../src/aiHistory.js')
+  const values = new Map()
+  const storage = { getItem:key => values.get(key) ?? null, setItem:(key,value) => values.set(key,value), removeItem:key => values.delete(key) }
+  const session = { tenant:'tenant-a', user:'alice' }
+  assert.equal(saveAIHistory(storage, session, { conversationId:'conversation-1', selectedWorkflowId:'ops-assistant', messages:[{ id:'m1', role:'user', status:'succeeded', text:'温度超过 80' }, { id:'m2', role:'assistant', status:'streaming', text:'' }], runs:[{ id:'r1', status:'running' }] }), true)
+  assert.ok([...values.keys()][0].startsWith(AI_HISTORY_STORAGE_PREFIX))
+  const restored = loadAIHistory(storage, session, 123456)
+  assert.equal(restored.conversationId, 'conversation-1')
+  assert.equal(restored.messages[0].text, '温度超过 80')
+  assert.equal(restored.messages[1].status, 'canceled')
+  assert.equal(restored.runs[0].status, 'canceled')
+  assert.equal(restored.runs[0].finishedAt, 123456)
+  assert.equal(loadAIHistory(storage, { tenant:'tenant-b', user:'alice' }), null)
+})
+
+test('AI rule draft cards reconcile persisted snapshots with current rule state', async () => {
+  const { reconcileRuleDraftMessages } = await import('../src/ruleDraftStatus.js')
+  const messages = [{ id:'assistant-1', ruleDraftPersisted:true, ruleDraftState:'draft', ruleDraft:{ id:'rule-1', name:'旧名称', enabled:false } }]
+  assert.equal(reconcileRuleDraftMessages(messages, [{ id:'rule-1', name:'已启用规则', enabled:true, version:2 }]), 1)
+  assert.equal(messages[0].ruleDraftState, 'enabled')
+  assert.equal(messages[0].ruleDraft.enabled, true)
+  assert.equal(messages[0].ruleDraft.name, '已启用规则')
+  reconcileRuleDraftMessages(messages, [])
+  assert.equal(messages[0].ruleDraftState, 'missing')
 })
 
 test('frontend builds independently and proxies backend routes', async () => {
@@ -95,6 +198,12 @@ test('frontend builds independently and proxies backend routes', async () => {
   assert.match(nginx, /location = \/api\/v1\/ai\/chat\/stream\s*\{[\s\S]*?proxy_buffering off;[\s\S]*?proxy_cache off;[\s\S]*?gzip off;[\s\S]*?proxy_read_timeout 3600s;[\s\S]*?proxy_set_header Connection "";/)
   assert.match(nginx, /IOT_VIDEO_PREVIEW_CSP_SOURCES/)
   assert.doesNotMatch(nginx, /connect-src[^;]*\bhttp:\s+https:/)
+})
+
+test('programmatic Element Plus services include their global styles', async () => {
+  const main = await readFile(new URL('src/main.js', root), 'utf8')
+  assert.match(main, /element-plus\/theme-chalk\/el-message-box\.css/)
+  assert.match(main, /element-plus\/theme-chalk\/el-message\.css/)
 })
 
 test('frontend rejects Node versions unsupported by the build toolchain', async () => {

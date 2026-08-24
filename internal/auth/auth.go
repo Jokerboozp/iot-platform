@@ -22,10 +22,11 @@ const (
 	ScopeQueryPropertyHistory = "mcp:tool:query_property_history"
 	ScopeQuerySimilarAlarms   = "mcp:tool:query_similar_alarms"
 	ScopeQueryKnowledgeBase   = "mcp:tool:query_knowledge_base"
+	ScopeCreateRuleDraft      = "mcp:tool:create_rule_draft"
 )
 
 func HarnessReadScopes() []string {
-	return []string{ScopeQuerySystemOverview, ScopeQueryDeviceLatest, ScopeQueryAlarmList, ScopeQueryPropertyHistory, ScopeQuerySimilarAlarms, ScopeQueryKnowledgeBase}
+	return []string{ScopeQuerySystemOverview, ScopeQueryDeviceLatest, ScopeQueryAlarmList, ScopeQueryPropertyHistory, ScopeQuerySimilarAlarms, ScopeQueryKnowledgeBase, ScopeCreateRuleDraft}
 }
 
 func ContextWithClaims(ctx context.Context, claims Claims) context.Context {

@@ -210,7 +210,7 @@ func (e *Engine) handleRaw(ctx context.Context, b []byte) error {
 	if productErr == nil && product.ProtocolPackageID != "" {
 		pkg, pkgErr := e.Repo.GetProtocolPackage(ctx, raw.TenantID, product.ProtocolPackageID)
 		if pkgErr == nil && pkg.Status == "PUBLISHED" {
-			msg, err = e.Parsers.ParseVersion(pkg.ParserType, raw.ParserVersion, raw)
+			msg, err = e.Parsers.ParseVersionWithConfig(pkg.ParserType, raw.ParserVersion, pkg.Config, raw)
 		}
 	}
 	if msg == nil && err == nil {
@@ -229,8 +229,6 @@ func (e *Engine) handleRaw(ctx context.Context, b []byte) error {
 	switch msg.MessageType {
 	case model.EventReport, model.AlarmReport:
 		topic = model.TopicEventReport
-	case model.StateChange:
-		topic = model.TopicDeviceState
 	}
 	return e.Bus.Publish(ctx, topic, msg.DeviceID, out)
 }
@@ -319,6 +317,12 @@ func (e *Engine) raiseRuleAlarm(ctx context.Context, rule model.AlarmRule, msg m
 		payload, _ := json.Marshal(saved)
 		_ = e.Bus.Publish(ctx, model.TopicAlarmRaised, saved.ID, payload)
 		_ = e.Realtime.Publish(ctx, saved.MQTTTopic("raised"), payload, 1, false)
+		for _, action := range rule.Actions {
+			event := model.UIActionEvent{ID: id("ui_action"), TenantID: msg.TenantID, RuleID: rule.ID, AlarmID: saved.ID, DeviceID: msg.DeviceID, Action: action, TriggeredAt: now}
+			actionPayload, _ := json.Marshal(event)
+			_ = e.Bus.Publish(ctx, model.TopicUIAction, event.ID, actionPayload)
+			_ = e.Realtime.Publish(ctx, fmt.Sprintf("/iot/ui-action/%s", msg.TenantID), actionPayload, 1, false)
+		}
 	}
 	return saved, created, nil
 }
@@ -525,6 +529,20 @@ func (e *Engine) handleAI(ctx context.Context, b []byte) error {
 	if err := json.Unmarshal(b, &alarm); err != nil {
 		return err
 	}
+	_, err := e.AnalyzeAlarm(ctx, alarm.TenantID, alarm.ID)
+	return err
+}
+
+// AnalyzeAlarm runs the same automatic analysis path used by alarm events and
+// is also exposed to the operator UI for a manual re-run.
+func (e *Engine) AnalyzeAlarm(ctx context.Context, tenantID, alarmID string) (model.AIAnalysis, error) {
+	if e.AI == nil {
+		return model.AIAnalysis{}, errors.New("AI model is not configured")
+	}
+	alarm, err := e.Repo.GetAlarm(ctx, tenantID, alarmID)
+	if err != nil {
+		return model.AIAnalysis{}, err
+	}
 	history := []map[string]any{}
 	if device, deviceErr := e.Repo.GetManagedDevice(ctx, alarm.TenantID, alarm.DeviceID); deviceErr == nil {
 		history = append(history, map[string]any{"contextType": "deviceMetadata", "device": device})
@@ -568,12 +586,12 @@ func (e *Engine) handleAI(ctx context.Context, b []byte) error {
 	analysis.TenantID = alarm.TenantID
 	analysis.AlarmID = alarm.ID
 	if saveErr := e.Repo.SaveAIAnalysis(ctx, analysis); saveErr != nil {
-		return saveErr
+		return analysis, saveErr
 	}
 	payload := mustJSON(analysis)
 	_ = e.Bus.Publish(ctx, model.TopicAlarmAIAnalysis, alarm.ID, payload)
 	_ = e.Realtime.Publish(ctx, alarm.MQTTTopic("ai-analysis"), payload, 1, false)
-	return nil
+	return analysis, nil
 }
 func (e *Engine) SetAlarmStatus(ctx context.Context, tenant, alarmID, status, actor string) (model.Alarm, error) {
 	a, err := e.Repo.GetAlarm(ctx, tenant, alarmID)

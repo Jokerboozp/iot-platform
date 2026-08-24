@@ -53,7 +53,12 @@ async function responseError(path, response) {
 
 export async function api(path, options = {}) {
   const headers = headersFor(options)
-  const response = await fetch(path, { ...options, headers })
+  const request = { ...options, headers }
+  // API responses are tenant-scoped and frequently change while an operator
+  // is managing devices, rules, or workflow plugins. Do not let the browser
+  // reuse an older GET response after a mutation followed by a refresh.
+  if (request.cache == null && String(request.method || 'GET').toUpperCase() === 'GET') request.cache = 'no-store'
+  const response = await fetch(path, request)
   if (!response.ok) throw await responseError(path, response)
   return response.json().catch(() => ({}))
 }

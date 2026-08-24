@@ -24,7 +24,7 @@ func NewProviderRegistry() *ProviderRegistry {
 		build: func(ports.AIPluginConfig) (ports.AIClient, error) { return NoopAI{}, nil },
 	})
 	r.register(providerFactory{
-		info: ports.AIPluginInfo{ID: "deepseek", Name: "DeepSeek", Description: "DeepSeek 官方 OpenAI-compatible API。", DefaultBaseURL: "https://api.deepseek.com", DefaultModel: "deepseek-v4-flash", RequiresAPIKey: true, Capabilities: []string{"chat", "alarm-analysis", "rule-draft", "json-output"}},
+		info: ports.AIPluginInfo{ID: "deepseek", Name: "DeepSeek", Description: "DeepSeek 官方 OpenAI-compatible API。", DefaultBaseURL: "https://api.deepseek.com", DefaultModel: "deepseek-v4-flash", RequiresAPIKey: true, Enabled: true, Capabilities: []string{"chat", "alarm-analysis", "rule-draft", "json-output"}},
 		build: func(cfg ports.AIPluginConfig) (ports.AIClient, error) {
 			if strings.TrimSpace(cfg.APIKey) == "" {
 				return nil, fmt.Errorf("DeepSeek API Key is required")
@@ -33,13 +33,13 @@ func NewProviderRegistry() *ProviderRegistry {
 		},
 	})
 	r.register(providerFactory{
-		info: ports.AIPluginInfo{ID: "ollama", Name: "Ollama", Description: "连接本地或私有网络中的 Ollama 模型服务。", DefaultBaseURL: "http://localhost:11434", DefaultModel: "qwen3:8b", Capabilities: []string{"chat", "alarm-analysis", "rule-draft", "local-model"}},
+		info: ports.AIPluginInfo{ID: "ollama", Name: "Ollama", Description: "连接本地或私有网络中的 Ollama 模型服务。", DefaultBaseURL: "http://localhost:11434", DefaultModel: "qwen3:8b", Enabled: true, Capabilities: []string{"chat", "alarm-analysis", "rule-draft", "json-output", "local-model"}},
 		build: func(cfg ports.AIPluginConfig) (ports.AIClient, error) {
 			return NewOllama(valueOr(cfg.BaseURL, "http://localhost:11434"), valueOr(cfg.Model, "qwen3:8b"))
 		},
 	})
 	r.register(providerFactory{
-		info: ports.AIPluginInfo{ID: "openai-compatible", Name: "OpenAI Compatible", Description: "连接实现 Chat Completions 接口的私有或第三方模型服务。", RequiresAPIKey: false, Capabilities: []string{"chat", "alarm-analysis", "rule-draft", "json-output"}},
+		info: ports.AIPluginInfo{ID: "openai-compatible", Name: "OpenAI Compatible", Description: "连接实现 Chat Completions 接口的私有或第三方模型服务。", RequiresAPIKey: false, Enabled: true, Capabilities: []string{"chat", "alarm-analysis", "rule-draft", "json-output"}},
 		build: func(cfg ports.AIPluginConfig) (ports.AIClient, error) {
 			if strings.TrimSpace(cfg.BaseURL) == "" || strings.TrimSpace(cfg.Model) == "" {
 				return nil, fmt.Errorf("baseUrl and model are required for OpenAI-compatible providers")

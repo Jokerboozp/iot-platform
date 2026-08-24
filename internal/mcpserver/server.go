@@ -21,7 +21,7 @@ func New(engine *core.Engine) http.Handler {
 	return newServer(engine, false, "/mcp")
 }
 
-// NewHarness exposes a deliberately smaller, read-only MCP surface for the AI
+// NewHarness exposes a deliberately smaller, safe MCP surface for the AI
 // sidecar. Authentication, audience and token-use checks live at the HTTP
 // boundary; each tool additionally enforces its exact scope here.
 func NewHarness(engine *core.Engine) http.Handler {
@@ -29,7 +29,7 @@ func NewHarness(engine *core.Engine) http.Handler {
 }
 
 func newServer(engine *core.Engine, harness bool, endpoint string) http.Handler {
-	s := server.NewMCPServer("iot-platform-tools", "1.0.0", server.WithToolCapabilities(false), server.WithInstructions("只读查询消防物联网数据；不能执行 SQL、控制设备或自动启用规则。"), server.WithRecovery())
+	s := server.NewMCPServer("iot-platform-tools", "1.0.0", server.WithToolCapabilities(false), server.WithInstructions("查询消防物联网数据，或生成并保存待人工确认的禁用规则草稿；不能执行 SQL、控制设备或自动启用规则。"), server.WithRecovery())
 	s.AddTool(mcp.NewTool("query_system_overview", mcp.WithDescription("统计当前租户的系统状态、产品、设备、在线状态、告警、规则、摄像头和知识库数量")), func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		tenant, err := tenantForTool(ctx, auth.ScopeQuerySystemOverview, harness)
 		if err != nil {
@@ -117,16 +117,40 @@ func newServer(engine *core.Engine, harness bool, endpoint string) http.Handler 
 		v, err := engine.KB.Search(ctx, tenant, req.GetString("question", ""), limit)
 		return auditedResult(ctx, engine, "query_knowledge_base", input, v, err)
 	})
-	if !harness {
-		s.AddTool(mcp.NewTool("create_rule_draft", mcp.WithDescription("把自然语言告警要求转换为禁用状态的规则草稿；必须人工审核后才能启用"), mcp.WithString("inputText", mcp.Required())), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			tenant, err := tenantFrom(ctx)
-			if err != nil {
-				return mcp.NewToolResultError(err.Error()), nil
+	s.AddTool(mcp.NewTool("create_rule_draft", mcp.WithDescription("把自然语言条件与页面动作转换为规则，并自动保存为禁用草稿；不会启用或执行，必须由用户人工确认"), mcp.WithString("inputText", mcp.Required())), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		tenant, err := tenantForTool(ctx, auth.ScopeCreateRuleDraft, harness)
+		if !harness {
+			tenant, err = tenantFrom(ctx)
+		}
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		inputText := strings.TrimSpace(req.GetString("inputText", ""))
+		if inputText == "" {
+			return mcp.NewToolResultError("inputText is required"), nil
+		}
+		v, draftErr := engine.AI.RuleDraft(ctx, tenant, inputText)
+		if draftErr == nil {
+			v.TenantID, v.Enabled = tenant, false
+			if v.ID == "" {
+				v.ID = fmt.Sprintf("rule_draft_%d", time.Now().UnixNano())
 			}
-			v, err := engine.AI.RuleDraft(ctx, tenant, req.GetString("inputText", ""))
-			return auditedResult(ctx, engine, "create_rule_draft", map[string]any{"inputText": req.GetString("inputText", "")}, v, err)
-		})
-	}
+			if v.Match == "" {
+				v.Match = "all"
+			}
+			if v.Version == 0 {
+				v.Version = 1
+			}
+			_, _, draftErr = engine.ValidateRuleDraft(ctx, v)
+			if draftErr == nil {
+				now := time.Now().UnixMilli()
+				v.CreatedAt, v.UpdatedAt = now, now
+				draftErr = engine.Repo.SaveRule(ctx, v)
+			}
+		}
+		output := map[string]any{"kind": "ruleDraft", "draft": v, "persisted": draftErr == nil, "requiresHumanApproval": true}
+		return auditedResult(ctx, engine, "create_rule_draft", map[string]any{"inputText": inputText}, output, draftErr)
+	})
 	return server.NewStreamableHTTPServer(s, server.WithStateLess(true), server.WithEndpointPath(endpoint))
 }
 

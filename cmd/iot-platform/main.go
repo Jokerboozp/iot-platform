@@ -101,7 +101,7 @@ func main() {
 		registry.Set("mqtt_subscription_count", 4)
 		log.Info("realtime enabled", "adapter", "mqtt")
 	}
-	parsers := parser.NewRegistry(parser.FireSmokeHexParser{}, parser.ModbusParser{}, parser.JSONParser{})
+	parsers := parser.NewRegistry(parser.GB26875Parser{}, parser.ConfigurableJSONParser{}, parser.ConfigurableHexParser{}, parser.JavaScriptParser{}, parser.FireSmokeHexParser{}, parser.ModbusParser{}, parser.JSONParser{})
 	engine := core.New(repo, archivePort, bus, realtime, parsers, log)
 	engine.VideoMediaAllowedHosts = cfg.VideoMediaHosts
 	engine.Metrics = registry

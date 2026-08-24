@@ -2,7 +2,7 @@
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
-import { Monitor, Cpu, Box, Connection, Upload, VideoCamera, Bell, Document, Operation, Collection, ChatDotRound, Fold, Expand, SwitchButton } from '@element-plus/icons-vue'
+import { Monitor, Cpu, Box, Connection, Upload, VideoCamera, Bell, Document, Operation, Collection, ChatDotRound, DataAnalysis, Fold, Expand, SwitchButton } from '@element-plus/icons-vue'
 import { api, notifyError, session } from './api'
 import { alarmType } from './labels'
 import { startRealtime, stopRealtime } from './realtime'
@@ -10,9 +10,11 @@ const DashboardView = defineAsyncComponent(() => import('./views/DashboardView.v
 const DevicesView = defineAsyncComponent(() => import('./views/DevicesView.vue'))
 const ProductsView = defineAsyncComponent(() => import('./views/ProductsView.vue'))
 const ProtocolsView = defineAsyncComponent(() => import('./views/ProtocolsView.vue'))
+const ProtocolAssistantView = defineAsyncComponent(() => import('./views/ProtocolAssistantView.vue'))
 const IntegrationView = defineAsyncComponent(() => import('./views/IntegrationView.vue'))
 const CameraMappingsView = defineAsyncComponent(() => import('./views/CameraMappingsView.vue'))
 const AlarmsView = defineAsyncComponent(() => import('./views/AlarmsView.vue'))
+const HealthInspectionView = defineAsyncComponent(() => import('./views/HealthInspectionView.vue'))
 const RawView = defineAsyncComponent(() => import('./views/RawView.vue'))
 const RulesView = defineAsyncComponent(() => import('./views/RulesView.vue'))
 const KnowledgeView = defineAsyncComponent(() => import('./views/KnowledgeView.vue'))
@@ -34,9 +36,11 @@ const pages = {
   devices: { title:'设备管理', sub:'注册、启停、凭证和实时状态统一管理', icon:Cpu, component:DevicesView },
   products: { title:'产品管理', sub:'产品模型与协议包绑定', icon:Box, component:ProductsView },
   protocols: { title:'协议开发', sub:'协议包版本、解析器配置与样本调试', icon:Connection, component:ProtocolsView },
-  integration: { title:'数据接入', sub:'HTTP / MQTT 接入参数和在线联调', icon:Upload, component:IntegrationView },
+  protocolAssistant: { title:'协议接入助手', sub:'上传协议文件，生成并确认解析代码', icon:Connection, component:ProtocolAssistantView },
+  integration: { title:'接入指南', sub:'真实设备 HTTP / MQTT 参数与数据联调', icon:Upload, component:IntegrationView },
   cameras: { title:'摄像头映射', sub:'视频平台摄像头、空间位置与物联设备关联', icon:VideoCamera, component:CameraMappingsView },
   alarms: { title:'告警中心', sub:'告警确认、恢复与闭环处置', icon:Bell, component:AlarmsView },
+  inspection: { title:'智能巡检', sub:'设备健康、数据新鲜度与活动告警分析', icon:DataAnalysis, component:HealthInspectionView },
   raw: { title:'原始报文', sub:'证据链检索、审计与回放', icon:Document, component:RawView },
   rules: { title:'告警规则', sub:'可审计的动态规则与 AI 草稿', icon:Operation, component:RulesView },
   knowledge: { title:'知识库管理', sub:'消防规范、设备手册与处置 SOP 索引', icon:Collection, component:KnowledgeView },
@@ -45,8 +49,8 @@ const pages = {
 const current = computed(() => pages[active.value])
 const menuGroups = [
   { label:'控制中心', items:['dashboard'] },
-  { label:'设备接入', items:['devices','products','protocols','integration','cameras'] },
-  { label:'运行中心', items:['alarms','raw','rules','knowledge','ai'] }
+  { label:'设备与数据', items:['devices','products','protocols','protocolAssistant','integration','cameras'] },
+  { label:'运行中心', items:['alarms','inspection','raw','rules','knowledge','ai'] }
 ]
 
 async function login() {
@@ -60,11 +64,28 @@ async function login() {
 }
 function logout() { stopRealtime(); session.clear(); identity.value = { tenant:'', user:'', role:'' }; authenticated.value = false }
 function openPage(name, detail) { active.value = name; pageKey.value++; if (detail) sessionStorage.setItem('iot:navigation-detail', JSON.stringify(detail)) }
+function handleUIAction(payload) {
+  try {
+    const event = JSON.parse(payload)
+    const action = event?.action || {}
+    if (action.type === 'OPEN_CAMERA' && typeof action.cameraId === 'string' && action.cameraId) {
+      openPage('cameras', { cameraId:action.cameraId, autoPreview:true, actionId:event.id })
+      ElMessage.warning(`规则联动：打开摄像头 ${action.cameraId}`)
+      return
+    }
+    const allowedPages = new Set(['dashboard','devices','products','protocols','protocolAssistant','integration','cameras','alarms','inspection','raw','rules','knowledge','ai'])
+    if (action.type === 'OPEN_PAGE' && allowedPages.has(action.page)) {
+      openPage(action.page)
+      ElMessage.warning('规则联动：已打开相关业务页面')
+    }
+  } catch { /* ignore malformed or unsupported UI actions */ }
+}
 function connect() {
   startRealtime((topic, payload) => {
     if (topic.includes('/alarm/')) {
       try { const alarm = JSON.parse(payload); ElMessage.warning(`新告警：${alarmType(alarm.alarmType)} · ${alarm.deviceName || alarm.deviceId || ''}`) } catch { /* ignore malformed notification */ }
     }
+    if (topic.includes('/ui-action/')) handleUIAction(payload)
     window.dispatchEvent(new CustomEvent('iot:realtime', { detail:{ topic, payload } }))
   })
 }

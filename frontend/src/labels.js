@@ -8,7 +8,7 @@ export const businessStatuses = { ONLINE:'在线', OFFLINE:'离线', SUSPECTED_O
 export const connectionStatuses = { CONNECTED:'已连接', DISCONNECTED:'未连接', UNKNOWN:'未知' }
 export const dataStatuses = { ACTIVE:'数据活跃', SILENT:'数据静默', UNKNOWN:'未知' }
 export const categories = { smoke:'烟雾探测器', fire:'火灾探测器', water_pressure:'水压传感器', camera:'摄像机', gateway:'边缘网关', sensor:'通用传感器', video_ai:'视频智能分析设备', other:'其他设备' }
-export const parsers = { custom_json_parser:'通用结构化数据', fire_smoke_parser:'烟感十六进制', modbus_parser:'工业总线寄存器' }
+export const parsers = { custom_json_parser:'通用结构化数据', configurable_json_parser:'配置驱动 JSON 映射', configurable_hex_parser:'配置驱动十六进制字段', javascript_sandbox_parser:'受限 JavaScript 解析器', gb26875_dahua_parser:'国标消防终端（大华 v1.03）', fire_smoke_parser:'烟感十六进制', modbus_parser:'工业总线寄存器' }
 export const label = (map, value, fallback = '未知') => map[String(value ?? '')] || fallback
 export const alarmType = value => label(alarmTypes, value, '其他告警类型')
 export function tagType(value) {

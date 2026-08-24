@@ -27,7 +27,7 @@ Docker 构建会按上游 `python/sdk-runtime` 的依赖清单生成独立 Node 
 
 ## 业务插件
 
-插件清单位于 `deploy/deepseek-harness/plugins/*.json`。网关启动时校验全部清单，并通过 `GET /v1/plugins` 提供给前端。当前包含：
+插件清单位于 `deploy/deepseek-harness/plugins/*.json`。网关启动时校验全部清单，并通过 `GET /v1/plugins` 提供启用插件的公开元数据。管理员管理使用 `GET /v1/plugins/admin` 读取完整清单（含禁用插件、persona 和工具白名单），通过 `POST /v1/plugins` 保存新建或修改，通过 `DELETE /v1/plugins/{id}` 删除自定义插件。内置插件始终只读。
 
 - `ops-assistant`：设备、告警、属性趋势、相似告警和知识库辅助排障。
 - `alarm-handler`：聚焦告警事实核验、影响判断和人工处置建议。
@@ -55,7 +55,11 @@ Docker 构建会按上游 `python/sdk-runtime` 的依赖清单生成独立 Node 
 
 Go API 暴露：
 
-- `GET /api/v1/ai/workflows`：列出已安装的业务插件。
+- `GET /api/v1/ai/workflows`：列出已启用的业务插件。
+- `GET /api/v1/ai/workflows/admin`：管理员读取完整插件清单。
+- `POST /api/v1/ai/workflows`：管理员创建动态 Agent。
+- `PUT /api/v1/ai/workflows/{id}`：管理员编辑或启用/禁用动态 Agent。
+- `DELETE /api/v1/ai/workflows/{id}`：管理员删除动态 Agent。
 - `POST /api/v1/ai/chat`：兼容的非流式调用；未配置 Harness 时回退到原有本地助手。
 - `POST /api/v1/ai/chat/stream`：SSE 流式运行插件。
 

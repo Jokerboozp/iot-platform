@@ -1,8 +1,10 @@
 # 消防 IoT 平台
 
-面向消防物联网场景的一体化管理平台。项目由 Go API、Vue 3 Web、EMQX、PostgreSQL、Redis、ClickHouse、Redpanda、MinIO 以及可选 AI 运行时组成，覆盖设备接入、协议解析、状态管理、告警、视频流预览、原始报文证据链、回放、AI 研判、MCP 和备份恢复。
+面向消防物联网场景的一体化管理平台。项目由 Go API、Vue 3 Web、EMQX、PostgreSQL、Redis、ClickHouse、Redpanda、MinIO 以及可选 AI 运行时组成，覆盖设备与数据接入、协议解析、状态管理、告警、视频流预览、原始报文证据链、回放、AI 研判、MCP 和备份恢复。
 
-项目既可以使用内存适配器快速开发，也可以通过 Docker Compose 启动完整基础设施。
+当前代码库支持两种运行方式：使用内存适配器快速开发/测试，或使用 Docker Compose 启动前后端与完整基础设施。文档按当前源码、Compose 配置和可重复验证的测试结果编写；生产容量、灾备、TLS/ACL 和第三方平台验收仍需在目标环境单独完成。
+
+> 说明：JetLinks 上游协议包不属于本项目交付范围；本项目提供独立的协议注册、配置化 JSON/Hex 解析、受限 JavaScript 解析和 GB/T 26875 接入示例。
 
 ## 快速开始
 
@@ -18,6 +20,13 @@
 ```bash
 docker compose up -d --build
 docker compose ps
+```
+
+需要 AI 工作流时，使用 Harness profile 一起启动（需要配置 `DEEPSEEK_API_KEY`）：
+
+```bash
+docker compose --profile harness up -d --build
+docker compose --profile harness ps
 ```
 
 浏览器打开：
@@ -40,10 +49,23 @@ http://localhost:8080
 docker compose logs -f platform-api platform-web
 ```
 
+查看 AI Harness 日志和健康状态：
+
+```bash
+docker compose --profile harness logs -f deepseek-harness platform-api
+curl http://127.0.0.1:8091/health
+```
+
 停止服务但保留数据：
 
 ```bash
 docker compose down
+```
+
+只启动国标消防终端网关：
+
+```bash
+docker compose --profile gb26875 up -d --build
 ```
 
 > `docker compose down -v` 会删除数据库、对象存储等持久化卷。除非确认数据可以丢弃，否则不要执行。
@@ -92,10 +114,12 @@ npm.cmd run dev
 | 运行总览 | 设备、在线率、告警趋势和重点态势 |
 | 设备管理 | 注册、启停、凭证轮换、连接指南和实时状态 |
 | 产品管理 | 产品模型、物模型属性和协议包绑定 |
-| 协议开发 | 协议包版本、解析器配置和样本调试 |
-| 数据接入 | HTTP/MQTT 接入参数和在线联调 |
+| 协议开发 | 协议包版本、JSON/Hex/JavaScript 解析器配置和样本调试 |
+| 协议接入助手 | 上传协议/点表，AI 生成受限 JavaScript，表单修改字段，样本预览并发布 |
+| 接入指南 | HTTP/MQTT 上报参数、设备凭证、Topic 和数据联调；不是重复的设备注册入口 |
 | 摄像头映射 | 摄像机与设备/空间关联、视频流预览 |
 | 告警中心 | 告警查询、确认、抑制、恢复和关闭 |
+| 智能巡检 | 点击“立即巡检”后检查设备业务状态、数据新鲜度、活动告警和 AI 处置建议 |
 | 原始报文 | 证据链检索、下载、审计和回放 |
 | 告警规则 | JSON/Gengine 规则、冲突检测和 AI 草稿 |
 | 知识库管理 | 上传消防规范、设备手册和处置 SOP，查看索引状态 |
@@ -105,22 +129,46 @@ npm.cmd run dev
 
 - AI 告警研判
 - AI 运维助手
+- AI 系统状态助手
+- AI 设备健康巡检
+- AI 协议接入助手
+
+“协议接入助手”支持 PDF、Word、Excel/CSV 点表和直接粘贴文本。AI 只负责提出字段映射草稿；发布前必须由操作员在字段表单中确认字段名、解析表达式、消息类型和样本结果。发布内容是 `javascript_sandbox_parser` 协议包，代码在 Goja 受限沙箱中运行（无网络、文件、环境变量和平台 API），因此新增协议不需要重新编译或部署 API 镜像。发布后到“产品管理”把协议包绑定到产品，设备原始报文即可走同一解析链路。
+
+对于不属于常见 JSON 或固定字段十六进制格式的新设备，不需要重新部署平台：
+
+1. 在“协议开发”中使用配置化 JSON/Hex 映射，适合字段偏移、类型、缩放和枚举规则稳定的设备。
+2. 在“协议接入助手”上传协议文件或点表，让 AI 生成解析 JavaScript 草稿。
+3. 在字段表单中修改字段名、类型、表达式和消息类型，使用样本报文预览标准消息。
+4. 确认发布后，解析代码以协议包配置保存并由受限 JavaScript 沙箱执行；再到产品管理绑定协议包。
+
+如需在其他地方编写代码，也可以直接提交符合沙箱约束的 `javascript_sandbox_parser` 协议包。解析脚本不能访问网络、文件、环境变量、平台 API 或设备控制能力。
+
+### 智能巡检操作约定
+
+进入“智能巡检”页面只展示说明和空状态，不会自动触发请求；只有点击“立即巡检”才开始。本次巡检先由平台计算设备数量、状态、最近上报时间和活动告警，再让 AI 生成文字建议；即使 AI 不可用，确定性巡检结果仍然可查看。巡检按钮带有加载状态，重复点击不会并发发起同一页面的巡检。
+
+“告警规则”支持人工新建、编辑、启停和删除，也支持 AI 生成默认禁用的规则草稿。规则可以在条件满足时产生告警、打开摄像头或通过实时 Topic 打开允许的前端页面；AI 不会直接启用规则，必须由用户在规则页检查后确认。
+
+“原始报文”同时展示原始内容、解析状态、解析器和标准消息结果。协议包发布并绑定到产品后，新报文会沿同一 Parser Registry 链路解析；解析失败会保留原始证据并进入失败处理链路。
+
+“接入指南”用于查看真实设备上报所需的 HTTP/MQTT 地址、认证和 Topic，并提供数据联调入口；设备是否已经注册、启用和绑定协议，以“设备管理”和“产品管理”中的状态为准。
 
 ## 核心能力
 
 | 领域 | 实现 |
 |---|---|
 | 设备与产品 | 产品、协议包、设备注册、设备/网关凭证、发现设备转注册 |
-| 数据接入 | 管理端 REST、设备凭证 HTTP、MQTT 原始 Topic、设备在线调试 |
+| 接入指南 | 管理端 REST、设备凭证 HTTP、MQTT 原始 Topic、设备数据联调 |
 | 原始证据链 | gzip JSONL 微批归档、SHA-256、幂等索引、单条精确恢复 |
-| 协议解析 | JSON、消防烟感 Hex、Modbus 示例解析器，失败 Topic 与 DLQ |
+| 协议解析 | JSON/Hex 配置映射、受限 JavaScript 脚本、AI 协议接入助手、消防烟感/GB26875/Modbus 示例解析器，失败 Topic 与 DLQ |
 | 分层存储 | MinIO、Redpanda、ClickHouse、Redis、PostgreSQL、可选 Weaviate |
 | 状态管理 | ONLINE、OFFLINE、SUSPECTED_OFFLINE 与多维离线判定 |
 | 规则与告警 | JSON/Gengine、物模型校验、冲突检测、告警生命周期和审计 |
 | 实时推送 | EMQX JWT、租户 Topic ACL、WebSocket 状态和告警推送 |
 | 视频 | HMAC Webhook、摄像头映射、融合告警、HLS/MP4/WebM 预览 |
 | AI Provider | Eino 编排、Ollama、DeepSeek、OpenAI-compatible 适配器 |
-| AI 工作流 | DeepSeek Harness 源码运行时、SSE、工具卡片、轨迹和取消 |
+| AI 工作流 | DeepSeek Harness 源码运行时、SSE、工具卡片、轨迹、告警研判、知识库绑定、Agent 管理、设备巡检和取消 |
 | MCP | Streamable HTTP、租户隔离、只读查询工具和调用审计 |
 | 回放 | DRY_RUN、REINGEST、DIFF、指定解析器版本和限速 |
 | 备份 | PostgreSQL/WAL、ClickHouse、Redis、MinIO-DR、校验与恢复演练 |
@@ -159,6 +207,8 @@ EMQX/REST
 
 ```text
 cmd/iot-platform              平台 API 主服务
+cmd/gb26875-gateway           GB/T 26875 TCP/UDP 设备网关
+cmd/gb26875-virtual-device    GB/T 26875 虚拟设备和联调工具
 cmd/backup-service            备份与恢复演练服务
 cmd/loadgen                   HTTP/MQTT 压测器
 internal/core                 状态、规则、告警、视频、AI、回放
@@ -180,6 +230,7 @@ docs                          AI Harness、ThingsPanel 和覆盖说明
 | 平台 Web | `http://localhost:8080` |
 | 平台 API | `http://localhost:8081` |
 | DeepSeek Harness | `http://127.0.0.1:8091` |
+| GB/T 26875 网关（可选） | `tcp://localhost:26875` / `udp://localhost:26875` |
 | 备份服务 | `http://127.0.0.1:8090` |
 | EMQX MQTT | `tcp://localhost:1883` |
 | EMQX WebSocket | `ws://localhost:8083/mqtt` |
@@ -201,9 +252,23 @@ Compose profiles：
 | Profile | 用途 | 启动方式 |
 |---|---|---|
 | 无 | 完整平台基础服务 | `docker compose up -d --build` |
+| `gb26875` | 国标消防终端 TCP 接入 | `docker compose --profile gb26875 up -d --build` |
 | `harness` | DeepSeek Harness 插件工作流 | `docker compose --profile harness up -d --build` |
 | `ai` | Ollama 与 Weaviate | `docker compose --profile ai up -d --build` |
 | `thingspanel` | ThingsPanel 上游前后端 | `docker compose --profile thingspanel up -d --build` |
+
+### GB/T 26875 设备接入示例
+
+项目提供独立的国标消防终端 TCP/UDP 网关和虚拟设备，用于验证设备注册、凭证、原始报文、解析和标准消息链路：
+
+```bash
+docker compose --profile gb26875 up -d --build
+
+# 本地运行虚拟设备（端口和参数以命令帮助为准）
+go run ./cmd/gb26875-virtual-device --help
+```
+
+网关接收设备报文后调用平台设备接入接口；平台侧仍按“设备管理 → 产品协议绑定 → 原始报文 → 标准消息”的链路处理。协议字段和示例报文见 [GB/T 26875 对接说明](docs/GB26875_DAHUA_V103.md)。
 
 ## 配置与密钥
 
@@ -258,6 +323,10 @@ AI 工作台
 | `ops-assistant` | AI 运维助手 | 设备状态、活动告警、趋势、知识库辅助排障 |
 | `alarm-handler` | AI 告警研判 | 告警核验、影响判断、相似告警和处置建议 |
 | `system-observer` | AI 系统状态助手 | 系统状态、产品与设备数量、在线离线、告警与资源统计 |
+| `device-health-inspector` | AI 设备健康巡检 | 设备状态、数据新鲜度、活动告警和维修优先级建议 |
+| `protocol-assistant` | AI 协议接入助手 | 协议文档、点表和样本报文的字段映射草稿 |
+
+这些是 Harness 的内置插件。动态 Agent 会保存在 Harness 数据卷中，数量和名称以“AI 工作流 → 管理中心 → Agent 管理”的实时清单为准。
 
 ### 启动 Harness
 
@@ -293,6 +362,8 @@ docker compose --profile harness logs -f deepseek-harness platform-api
 - 模型和最大输出长度配置
 - 为每个工作流单独配置知识库绑定
 
+管理员进入“管理中心 → Agent 管理”后，还可以查看启用和禁用的完整清单。动态 Agent 支持 JSON 编辑、启用/禁用和删除；内置插件只读。保存或状态变更后不需要重新部署容器。
+
 ### 工作流知识库绑定
 
 展开“AI 工作流 → 工作流知识库绑定”，可以按租户为当前插件配置：
@@ -308,9 +379,9 @@ docker compose --profile harness logs -f deepseek-harness platform-api
 
 ### 新增业务插件
 
-管理员可以直接在“AI 工作流 → 通过 JSON 创建 Agent”粘贴 Manifest 并提交。平台会执行两层校验：Go API 检查字段和只读工具白名单，Harness 再验证完整 Manifest。成功后 Agent 立即出现在工作流下拉框，不需要重建容器。
+管理员可以直接在“AI 工作流 → Agent 管理”查看完整插件清单。动态 Agent 支持编辑 Manifest、启用/禁用和删除；“新建 Agent”仍可通过 JSON 粘贴 Manifest。平台会执行两层校验：Go API 检查字段和只读工具白名单，Harness 再验证完整 Manifest。保存后 Agent 立即出现在工作流下拉框，不需要重建容器。
 
-动态 Agent 保存在 `deepseek-harness-data` 卷的 `/data/plugins`，容器重启后仍然存在。内置 `alarm-handler`、`ops-assistant` 和 `system-observer` 禁止覆盖；自定义 Agent 使用相同 ID 再提交会更新。
+动态 Agent 保存在 `deepseek-harness-data` 卷的 `/data/plugins`，容器重启后仍然存在。内置 `alarm-handler`、`ops-assistant`、`system-observer`、`device-health-inspector` 和 `protocol-assistant` 只能查看，禁止覆盖、修改或删除；自定义 Agent 使用相同 ID 保存会更新。
 
 可用的只读工具为：
 
@@ -321,6 +392,7 @@ mcp__iot__query_alarm_list
 mcp__iot__query_property_history
 mcp__iot__query_similar_alarms
 mcp__iot__query_knowledge_base
+mcp__iot__create_rule_draft
 ```
 
 也可以继续通过代码维护内置插件。插件清单位于 `deploy/deepseek-harness/plugins/*.json`。复制现有清单后修改：
@@ -344,7 +416,7 @@ mcp__iot__query_knowledge_base
 
 ### Harness 安全边界
 
-- 只开放设备状态、告警、属性历史、相似告警和知识库查询。
+- 只开放设备状态、告警、属性历史、相似告警、知识库查询和默认禁用的规则草稿生成。
 - 不加载 shell、文件系统、Skills、Jobs、子 Agent 或设备控制工具。
 - 浏览器拿不到内部 MCP JWT。
 - 每次运行使用短期、绑定租户/用户/Run ID 的 MCP Token。
@@ -379,7 +451,7 @@ docker compose exec ollama ollama pull qwen3:8b
 docker compose restart platform-api
 ```
 
-AI 页面中的 Provider 沙箱支持 DeepSeek、Ollama 和 OpenAI-compatible 临时连接测试。沙箱 API Key 不写入数据库或审计日志。
+AI 页面“管理中心 → Provider 测试与配置”支持 DeepSeek、Ollama 和 OpenAI-compatible 连接测试。管理员可以添加自定义 OpenAI-compatible Provider，保存名称、Provider ID、Base URL 和模型配置到当前浏览器/租户的配置中；API Key 只在本次测试使用，不写入浏览器配置、数据库或审计日志。自定义 Provider 的 Base URL 来源必须加入 `IOT_AI_PROVIDER_TEST_ALLOWED_ORIGINS` 白名单，平台不会为了测试关闭 SSRF 防护。
 
 ## 知识库管理
 
@@ -456,12 +528,16 @@ GET/POST/PUT /api/v1/products[/{id}]
 GET/POST/PUT /api/v1/protocol-packages[/{id}]
 POST         /api/v1/protocol-packages/{id}/test
 GET/POST/PUT /api/v1/device-registry[/{id}]
+POST         /api/v1/discovered-devices/{id}/register
 POST         /api/v1/device-registry/{id}/credentials
 GET          /api/v1/device-registry/{id}/connection-guide
 POST         /api/v1/device-registry/{id}/debug
 POST         /api/v1/device-ingest/{deviceId}
+POST         /api/v1/device-states
 GET/POST     /api/v1/raw-messages
+POST         /api/v1/raw-messages/download
 GET          /api/v1/raw-messages/{id}
+GET          /api/v1/raw-messages/{id}/download
 POST         /api/v1/raw-messages/replay
 GET          /api/v1/replays/{id}
 GET          /api/v1/devices
@@ -474,10 +550,17 @@ POST         /api/v1/alarms/{id}/actions
 GET          /api/v1/ai/providers
 POST         /api/v1/ai/providers/test
 GET/POST     /api/v1/ai/workflows
+GET          /api/v1/ai/workflows/admin
+PUT/DELETE   /api/v1/ai/workflows/{id}
 GET/PUT      /api/v1/ai/workflows/{id}/knowledge-binding
 POST         /api/v1/ai/chat
 POST         /api/v1/ai/chat/stream
 GET          /api/v1/ai/alarm-analysis/{alarmId}
+POST         /api/v1/ai/alarm-analysis/{alarmId}/run
+POST         /api/v1/ai/health-inspection
+POST         /api/v1/ai/protocol-assistant/generate
+POST         /api/v1/ai/protocol-assistant/preview
+POST         /api/v1/ai/protocol-assistant/publish
 POST         /api/v1/ai/rule-draft
 POST         /api/v1/ai/reports
 GET/POST     /api/v1/knowledge/documents
@@ -607,7 +690,7 @@ go run ./cmd/loadgen -url http://localhost:8080 -token $login.accessToken `
    docker compose --profile harness ps
    ```
 
-2. Harness 健康接口应返回 `pluginCount: 3`：
+2. Harness 健康接口在全新数据卷上至少应返回 `pluginCount: 5`（内置插件数）；如果通过 Agent 管理新增并启用了动态插件，数量会相应增加：
 
    ```bash
    curl http://127.0.0.1:8091/health
