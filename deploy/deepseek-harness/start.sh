@@ -1,4 +1,5 @@
 #!/bin/sh
+# Keep this script LF-only so POSIX sh can parse it inside Linux containers.
 set -eu
 
 plugin_dir="${IOT_HARNESS_PLUGIN_DIR:-/data/plugins}"

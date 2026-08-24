@@ -24,6 +24,7 @@ RUN CI=1 pnpm --filter dsh-jsonrpc-agent-pkg deploy \
 RUN node /tmp/prepare-runtime-carrier.mjs /harness /harness/runtime-node
 
 COPY deploy/deepseek-harness/ /harness/examples/iot-ops-agent/
+RUN sed -i 's/\r$//' /harness/examples/iot-ops-agent/*.sh
 RUN test "$(tr -d '\r\n' < /harness/examples/iot-ops-agent/REVISION)" = "$DSH_REVISION"
 RUN node --test /harness/examples/iot-ops-agent/gateway.test.mjs
 RUN node --input-type=module -e "await import('/harness/runtime-node/node_modules/@deepseek-ai/dsh-agent-spine-demo/lib/index.js'); await import('/harness/runtime-node/node_modules/@deepseek-ai/dsh-mcp-client/lib/index.js')"
