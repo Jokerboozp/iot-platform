@@ -54,9 +54,13 @@ type Config struct {
 
 func Load() Config {
 	aiProvider := strings.ToLower(strings.TrimSpace(os.Getenv("IOT_AI_PROVIDER")))
+	deepSeekAPIKey := strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY"))
+	if aiProvider == "" && deepSeekAPIKey != "" {
+		aiProvider = "deepseek"
+	}
 	aiAPIKey := strings.TrimSpace(os.Getenv("IOT_AI_API_KEY"))
 	if aiAPIKey == "" && aiProvider == "deepseek" {
-		aiAPIKey = strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY"))
+		aiAPIKey = deepSeekAPIKey
 	}
 	return Config{
 		HTTPAddr:            get("IOT_HTTP_ADDR", ":8080"),

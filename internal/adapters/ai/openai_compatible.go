@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -16,6 +17,8 @@ import (
 )
 
 const maxAIProviderResponseBytes = 4 << 20
+
+const ruleDraftSystemPrompt = `将自然语言告警要求转换成一个 JSON 规则草稿。只能返回 JSON，不要输出 Markdown。必须严格使用以下结构：{"name":"简短中文名称","alarmType":"SMOKE_DETECTED","level":"HIGH","match":"all","conditions":[{"field":"smoke","operator":"eq","value":true}],"durationSeconds":0,"recovery":[]}。match 只能是字符串 all 或 any；conditions 和 recovery 必须是数组；每个条件只能包含 field、operator、value。alarmType 只能使用 FIRE_RISK、FIRE、SMOKE_DETECTED、FLAME_DETECTED、HIGH_TEMPERATURE、DEVICE_OFFLINE、WATER_PRESSURE_LOW、WATER_LEVEL_ABNORMAL、ELECTRICAL_FIRE、GAS_LEAK、MANUAL_ALARM；level 只能使用 CRITICAL、HIGH、MEDIUM、LOW、INFO。`
 
 type OpenAICompatible struct {
 	providerID, providerName, baseURL, model, apiKey string
@@ -126,17 +129,96 @@ func (o *OpenAICompatible) Chat(ctx context.Context, tenant, question string) (s
 }
 
 func (o *OpenAICompatible) RuleDraft(ctx context.Context, tenant, text string) (model.AlarmRule, error) {
-	content, err := o.call(ctx, "将自然语言告警要求转换成 JSON 规则草稿，包含 name、alarmType、level、match、conditions、durationSeconds、recovery。不要输出 Markdown。", text, true)
+	content, err := o.call(ctx, ruleDraftSystemPrompt, text, true)
 	if err != nil {
 		return model.AlarmRule{}, err
 	}
-	var rule model.AlarmRule
-	if err := json.Unmarshal([]byte(extractJSON(content)), &rule); err != nil {
+	rule, err := decodeRuleDraft(content)
+	if err != nil {
 		return rule, err
 	}
 	rule.TenantID, rule.Enabled, rule.Version = tenant, false, 1
 	rule.CreatedAt, rule.UpdatedAt = time.Now().UnixMilli(), time.Now().UnixMilli()
 	return rule, nil
+}
+
+func decodeRuleDraft(content string) (model.AlarmRule, error) {
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(extractJSON(content)), &raw); err != nil {
+		return model.AlarmRule{}, err
+	}
+	raw["alarmType"] = normalizeAlarmType(stringValue(raw["alarmType"]))
+	raw["level"] = strings.ToUpper(stringValue(raw["level"]))
+	match := strings.ToLower(stringValue(raw["match"]))
+	if match != "all" && match != "any" {
+		match = "all"
+	}
+	raw["match"] = match
+	raw["conditions"] = normalizeRuleConditions(raw["conditions"])
+	raw["recovery"] = normalizeRuleConditions(raw["recovery"])
+	normalized, err := json.Marshal(raw)
+	if err != nil {
+		return model.AlarmRule{}, err
+	}
+	var rule model.AlarmRule
+	if err = json.Unmarshal(normalized, &rule); err != nil {
+		return rule, err
+	}
+	return rule, nil
+}
+
+func normalizeRuleConditions(value any) []map[string]any {
+	conditions := []map[string]any{}
+	appendMap := func(item map[string]any) {
+		if field := strings.TrimSpace(stringValue(item["field"])); field != "" {
+			operator := strings.TrimSpace(stringValue(item["operator"]))
+			if operator == "" {
+				operator = "eq"
+			}
+			conditions = append(conditions, map[string]any{"field": field, "operator": operator, "value": item["value"]})
+			return
+		}
+		keys := make([]string, 0, len(item))
+		for key := range item {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			conditions = append(conditions, map[string]any{"field": key, "operator": "eq", "value": item[key]})
+		}
+	}
+	switch typed := value.(type) {
+	case []any:
+		for _, item := range typed {
+			if object, ok := item.(map[string]any); ok {
+				appendMap(object)
+			}
+		}
+	case map[string]any:
+		appendMap(typed)
+	}
+	return conditions
+}
+
+func normalizeAlarmType(value string) string {
+	normalized := strings.ToUpper(strings.NewReplacer("-", "_", " ", "_").Replace(strings.TrimSpace(value)))
+	switch normalized {
+	case "SMOKE", "SMOKE_ALARM", "SMOKE_DETECTOR":
+		return "SMOKE_DETECTED"
+	case "FLAME", "FLAME_ALARM":
+		return "FLAME_DETECTED"
+	case "HIGH_TEMP", "TEMPERATURE_HIGH":
+		return "HIGH_TEMPERATURE"
+	default:
+		return normalized
+	}
+}
+
+func stringValue(value any) string {
+	if text, ok := value.(string); ok {
+		return text
+	}
+	return ""
 }
 
 func (o *OpenAICompatible) Health(ctx context.Context) error {

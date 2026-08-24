@@ -78,6 +78,13 @@ test('AI workbench uses cancellable SSE workflows and stable message keys', asyn
   assert.match(sseSource, /getReader\(\)/)
 })
 
+test('AI rule drafts keep failures visible in the page', async () => {
+  const rulesView = await readFile(new URL('src/views/RulesView.vue', root), 'utf8')
+  assert.match(rulesView, /draftError\.value=e\?\.message/)
+  assert.match(rulesView, /v-if="draftError"/)
+  assert.match(rulesView, /规则草稿生成失败/)
+})
+
 test('frontend builds independently and proxies backend routes', async () => {
   const vite = await readFile(new URL('vite.config.js', root), 'utf8')
   const nginx = await readFile(new URL('nginx.conf', root), 'utf8')

@@ -24,6 +24,20 @@ func TestAIKeyFallbackIsProviderScoped(t *testing.T) {
 	}
 }
 
+func TestDeepSeekKeyEnablesProviderWhenProviderIsUnset(t *testing.T) {
+	t.Setenv("IOT_AI_PROVIDER", "")
+	t.Setenv("IOT_AI_API_KEY", "")
+	t.Setenv("DEEPSEEK_API_KEY", "deepseek-secret")
+
+	cfg := Load()
+	if cfg.AIProvider != "deepseek" {
+		t.Fatalf("AI provider=%q, want deepseek", cfg.AIProvider)
+	}
+	if cfg.AIAPIKey != "deepseek-secret" {
+		t.Fatalf("AI API key=%q", cfg.AIAPIKey)
+	}
+}
+
 func TestHarnessConfiguration(t *testing.T) {
 	t.Setenv("IOT_AI_HARNESS_URL", "https://harness.example/")
 	t.Setenv("IOT_AI_HARNESS_TOKEN", "service-token")

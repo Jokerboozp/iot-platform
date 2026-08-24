@@ -115,12 +115,12 @@ func (o *Ollama) Chat(ctx context.Context, tenant, question string) (string, err
 	return o.call(ctx, "你是消防物联网运维助手。回答必须基于提供的受控平台数据；缺少数据时明确说明，不能编造，也不能直接控制设备。租户："+tenant, question)
 }
 func (o *Ollama) RuleDraft(ctx context.Context, tenant, text string) (model.AlarmRule, error) {
-	content, err := o.call(ctx, "将自然语言告警要求转成 JSON 规则草稿。字段必须包含 name,alarmType,level,match,conditions,durationSeconds,recovery；condition 使用 field/operator/value。不要输出 Markdown。租户："+tenant, text)
+	content, err := o.call(ctx, ruleDraftSystemPrompt+"租户："+tenant, text)
 	if err != nil {
 		return model.AlarmRule{}, err
 	}
-	var rule model.AlarmRule
-	if err := json.Unmarshal([]byte(extractJSON(content)), &rule); err != nil {
+	rule, err := decodeRuleDraft(content)
+	if err != nil {
 		return rule, err
 	}
 	rule.TenantID = tenant

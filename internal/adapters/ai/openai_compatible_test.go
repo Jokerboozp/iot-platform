@@ -130,6 +130,22 @@ func TestOpenAICompatibleLimitsSameOriginRedirects(t *testing.T) {
 	}
 }
 
+func TestDecodeRuleDraftNormalizesObjectShapedModelOutput(t *testing.T) {
+	rule, err := decodeRuleDraft(`{"name":"smoke_detector_high_alarm","alarmType":"smoke","level":"high","match":{"deviceType":"smoke_detector"},"conditions":{"smoke":true},"durationSeconds":0,"recovery":{"event":"smoke_clear"}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rule.AlarmType != "SMOKE_DETECTED" || rule.Level != "HIGH" || rule.Match != "all" {
+		t.Fatalf("unexpected normalized rule: %#v", rule)
+	}
+	if len(rule.Conditions) != 1 || rule.Conditions[0].Field != "smoke" || rule.Conditions[0].Operator != "eq" || rule.Conditions[0].Value != true {
+		t.Fatalf("unexpected conditions: %#v", rule.Conditions)
+	}
+	if len(rule.Recovery) != 1 || rule.Recovery[0].Field != "event" || rule.Recovery[0].Value != "smoke_clear" {
+		t.Fatalf("unexpected recovery: %#v", rule.Recovery)
+	}
+}
+
 func TestProviderRegistry(t *testing.T) {
 	registry := NewProviderRegistry()
 	if len(registry.List()) < 4 {
