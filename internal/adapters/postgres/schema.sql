@@ -123,9 +123,19 @@ BEGIN
   END IF;
 END $$;
 CREATE TABLE IF NOT EXISTS ai_knowledge_doc (
-  id text PRIMARY KEY, tenant_id text NOT NULL, product_id text, object_bucket text NOT NULL,
+  id text PRIMARY KEY, tenant_id text NOT NULL, product_id text, category text, tags text[] NOT NULL DEFAULT '{}', object_bucket text NOT NULL,
   object_key text NOT NULL, filename text NOT NULL, status text NOT NULL, metadata jsonb NOT NULL DEFAULT '{}',
   created_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE ai_knowledge_doc ADD COLUMN IF NOT EXISTS category text;
+ALTER TABLE ai_knowledge_doc ADD COLUMN IF NOT EXISTS tags text[] NOT NULL DEFAULT '{}';
+
+CREATE TABLE IF NOT EXISTS ai_workflow_knowledge_binding (
+  tenant_id text NOT NULL,
+  workflow_id text NOT NULL,
+  body jsonb NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, workflow_id)
 );
 CREATE TABLE IF NOT EXISTS ai_tool_call_log (
   id bigserial PRIMARY KEY, tenant_id text NOT NULL, actor text, tool text NOT NULL,

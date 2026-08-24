@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
-import { access, readFile, readdir, stat } from 'node:fs/promises'
+import { access, mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { dirname, join, resolve } from 'node:path'
 import { Readable } from 'node:stream'
@@ -16,6 +16,7 @@ const DEFAULT_SESSION_ROOT = '/data/sessions'
 const DEFAULT_MCP_ORIGINS = 'http://platform-api:8080'
 
 export const READ_ONLY_TOOL_CEILING = Object.freeze([
+  'mcp__iot__query_system_overview',
   'mcp__iot__query_device_latest',
   'mcp__iot__query_alarm_list',
   'mcp__iot__query_property_history',
@@ -49,6 +50,7 @@ const BODY_KEYS = new Set([
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/
 const CAPABILITY_PATTERN = /^[^\u0000-\u001f\u007f]{1,64}$/u
+const BUILTIN_PLUGIN_IDS = new Set(['alarm-handler', 'ops-assistant', 'system-observer'])
 
 class HttpError extends Error {
   constructor(status, code, message) {
@@ -233,6 +235,7 @@ function publicPlugin(plugin) {
     defaultModel: plugin.defaultModel,
     maxTokens: plugin.maxTokens,
     capabilities: [...plugin.capabilities],
+    knowledgeEnabled: plugin.allowedTools.includes('mcp__iot__query_knowledge_base'),
   }
 }
 
@@ -749,6 +752,32 @@ export function createGateway(options = {}) {
     json(response, 200, { items: plugins.filter(plugin => plugin.enabled).map(publicPlugin) })
   }
 
+  const handleSavePlugin = async (request, response) => {
+    requireGatewayToken(request)
+    const raw = await readJson(request, maximumBodyBytes)
+    let candidate
+    try {
+      candidate = validatedManifest(raw, 'submitted-agent.json')
+    } catch (error) {
+      throw new HttpError(422, 'AGENT_MANIFEST_INVALID', error instanceof Error ? error.message : 'agent manifest is invalid')
+    }
+    if (BUILTIN_PLUGIN_IDS.has(candidate.id)) {
+      throw new HttpError(409, 'BUILTIN_PLUGIN_IMMUTABLE', 'built-in workflow plugins cannot be overwritten')
+    }
+    await mkdir(pluginDir, { recursive: true })
+    const target = join(pluginDir, `${candidate.id}.json`)
+    let updating = true
+    try { await access(target) } catch { updating = false }
+    const current = await loadPluginCatalog(pluginDir)
+    if (!updating && current.some(plugin => plugin.id === candidate.id)) {
+      throw new HttpError(409, 'WORKFLOW_ALREADY_EXISTS', 'a workflow with this id already exists')
+    }
+    const temporary = join(pluginDir, `.${candidate.id}.${randomBytes(8).toString('hex')}.tmp`)
+    await writeFile(temporary, `${JSON.stringify(raw, null, 2)}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
+    await rename(temporary, target)
+    json(response, updating ? 200 : 201, publicPlugin(candidate))
+  }
+
   const handleChat = async (request, response) => {
     requireGatewayToken(request)
     const mcpToken = bearerToken(request.headers.authorization)
@@ -872,6 +901,7 @@ export function createGateway(options = {}) {
     if (url.search !== '') throw new HttpError(400, 'QUERY_NOT_ALLOWED', 'query parameters are not supported')
     if (request.method === 'GET' && url.pathname === '/health') return handleHealth(response)
     if (request.method === 'GET' && url.pathname === '/v1/plugins') return handlePlugins(request, response)
+    if (request.method === 'POST' && url.pathname === '/v1/plugins') return handleSavePlugin(request, response)
     if (request.method === 'POST' && url.pathname === '/v1/chat/stream') return handleChat(request, response)
     if (['/health', '/v1/plugins', '/v1/chat/stream'].includes(url.pathname)) {
       throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'method is not allowed')

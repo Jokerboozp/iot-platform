@@ -98,9 +98,10 @@ npm.cmd run dev
 | 告警中心 | 告警查询、确认、抑制、恢复和关闭 |
 | 原始报文 | 证据链检索、下载、审计和回放 |
 | 告警规则 | JSON/Gengine 规则、冲突检测和 AI 草稿 |
-| AI 运维助手 | Provider 测试、Harness 工作流、流式对话和工具轨迹 |
+| 知识库管理 | 上传消防规范、设备手册和处置 SOP，查看索引状态 |
+| AI 工作流 | DeepSeek Harness 插件、Provider 测试、流式对话和工具轨迹 |
 
-“AI 告警研判”不是独立的左侧菜单。进入“AI 运维助手”后，在左侧“运行工作流”卡片的“工作流插件”下拉框中选择：
+“AI 告警研判”是业务工作流，不是独立菜单。进入“AI 工作流”后，在左侧“运行工作流”卡片的“工作流插件”下拉框中选择：
 
 - AI 告警研判
 - AI 运维助手
@@ -256,6 +257,7 @@ AI 工作台
 |---|---|---|
 | `ops-assistant` | AI 运维助手 | 设备状态、活动告警、趋势、知识库辅助排障 |
 | `alarm-handler` | AI 告警研判 | 告警核验、影响判断、相似告警和处置建议 |
+| `system-observer` | AI 系统状态助手 | 系统状态、产品与设备数量、在线离线、告警与资源统计 |
 
 ### 启动 Harness
 
@@ -282,17 +284,46 @@ curl http://127.0.0.1:8091/health
 docker compose --profile harness logs -f deepseek-harness platform-api
 ```
 
-登录后进入“AI 运维助手”页面，在“运行工作流 → 工作流插件”中选择工作流。前端支持：
+登录后进入“AI 工作流”页面，在“运行工作流 → 工作流插件”中选择工作流。前端支持：
 
 - SSE 流式输出
 - 工具调用状态卡片
 - 运行轨迹和 Trace ID
 - 取消运行与重新执行
 - 模型和最大输出长度配置
+- 为每个工作流单独配置知识库绑定
+
+### 工作流知识库绑定
+
+展开“AI 工作流 → 工作流知识库绑定”，可以按租户为当前插件配置：
+
+- 绑定一个或多个产品；留空表示当前租户的全部产品。
+- 限定知识分类和必须包含的标签。
+- 选择按需检索、每次强制检索或完全禁用知识库。
+- 配置 TopK、最低相似度以及无证据时是否阻止回答。
+
+绑定不是只写入提示词。平台会将约束写入每次运行的短期 Harness Token，MCP 服务端会覆盖模型提交的产品、分类、标签、TopK 和阈值，防止模型扩大检索范围。“强制检索”会在进入 Harness 前预召回知识；“必须有证据”在无匹配结果时会停止运行。
+
+这部分与 Dify 的知识库工作流理念相似，但实现仍属于本项目：DeepSeek Harness 负责插件运行，Go API 负责租户、绑定策略、检索授权和审计，不需要额外部署 Dify。
 
 ### 新增业务插件
 
-插件清单位于 `deploy/deepseek-harness/plugins/*.json`。复制现有清单后修改：
+管理员可以直接在“AI 工作流 → 通过 JSON 创建 Agent”粘贴 Manifest 并提交。平台会执行两层校验：Go API 检查字段和只读工具白名单，Harness 再验证完整 Manifest。成功后 Agent 立即出现在工作流下拉框，不需要重建容器。
+
+动态 Agent 保存在 `deepseek-harness-data` 卷的 `/data/plugins`，容器重启后仍然存在。内置 `alarm-handler`、`ops-assistant` 和 `system-observer` 禁止覆盖；自定义 Agent 使用相同 ID 再提交会更新。
+
+可用的只读工具为：
+
+```text
+mcp__iot__query_system_overview
+mcp__iot__query_device_latest
+mcp__iot__query_alarm_list
+mcp__iot__query_property_history
+mcp__iot__query_similar_alarms
+mcp__iot__query_knowledge_base
+```
+
+也可以继续通过代码维护内置插件。插件清单位于 `deploy/deepseek-harness/plugins/*.json`。复制现有清单后修改：
 
 ```json
 {
@@ -349,6 +380,21 @@ docker compose restart platform-api
 ```
 
 AI 页面中的 Provider 沙箱支持 DeepSeek、Ollama 和 OpenAI-compatible 临时连接测试。沙箱 API Key 不写入数据库或审计日志。
+
+## 知识库管理
+
+进入左侧“知识库管理”页面可以：
+
+- 拖放或选择单个知识文档。
+- 可选关联产品 ID。
+- 设置知识分类与标签，供工作流绑定精确过滤。
+- 上传原文件并自动提取、分片和建立索引。
+- 查看当前租户的文档、索引状态、分片数、大小和上传时间。
+- 直接跳转到“AI 工作流”验证知识检索。
+
+支持 PDF、DOCX、PPTX、XLSX、ODT、ODP、ODS、HTML/XML 和 UTF-8 文本，单文件最大 32 MiB。扫描版 PDF 需要先完成 OCR。
+
+未配置 `IOT_WEAVIATE_URL` 时使用本地内存索引：原文件和文档记录会持久保存，但 API 重启后检索索引需要重新建立。页面会显示相应警告；生产环境应启用 Weaviate 持久索引。
 
 ## 摄像头映射与视频流预览
 
@@ -427,13 +473,14 @@ GET          /api/v1/alarms/{id}
 POST         /api/v1/alarms/{id}/actions
 GET          /api/v1/ai/providers
 POST         /api/v1/ai/providers/test
-GET          /api/v1/ai/workflows
+GET/POST     /api/v1/ai/workflows
+GET/PUT      /api/v1/ai/workflows/{id}/knowledge-binding
 POST         /api/v1/ai/chat
 POST         /api/v1/ai/chat/stream
 GET          /api/v1/ai/alarm-analysis/{alarmId}
 POST         /api/v1/ai/rule-draft
 POST         /api/v1/ai/reports
-POST         /api/v1/knowledge/documents
+GET/POST     /api/v1/knowledge/documents
 GET/POST/PUT /api/v1/integrations/video/cameras[/{id}]
 POST         /api/v1/integrations/video/cameras/{id}/preview
 POST         /api/v1/integrations/video/alarm
@@ -474,6 +521,7 @@ EMQX 使用 HS256 JWT、内嵌 ACL 和默认拒绝策略，匿名连接会被拒
 平台 MCP 端点为 `/mcp`，使用平台 Bearer JWT。工具包括：
 
 ```text
+query_system_overview
 query_device_latest
 query_alarm_list
 query_property_history
@@ -559,7 +607,7 @@ go run ./cmd/loadgen -url http://localhost:8080 -token $login.accessToken `
    docker compose --profile harness ps
    ```
 
-2. Harness 健康接口应返回 `pluginCount: 2`：
+2. Harness 健康接口应返回 `pluginCount: 3`：
 
    ```bash
    curl http://127.0.0.1:8091/health
@@ -578,7 +626,7 @@ go run ./cmd/loadgen -url http://localhost:8080 -token $login.accessToken `
      platform-api deepseek-harness platform-web
    ```
 
-5. 退出旧会话，强制刷新并重新登录。进入“AI 运维助手 → 运行工作流 → 工作流插件”。
+5. 退出旧会话，强制刷新并重新登录。进入“AI 工作流 → 运行工作流 → 工作流插件”。
 
 ### 修改 `.env` 后数据库认证失败
 

@@ -105,10 +105,14 @@ func (s *Server) routes() {
 	s.router.GET("/api/v1/ai/providers", s.authorize("viewer"), s.endpoint(s.aiProviders))
 	s.router.POST("/api/v1/ai/providers/test", s.authorize("admin"), s.endpoint(s.testAIProvider))
 	s.router.GET("/api/v1/ai/workflows", s.authorize("viewer"), s.endpoint(s.aiWorkflows))
+	s.router.POST("/api/v1/ai/workflows", s.authorize("admin"), s.endpoint(s.saveAIWorkflow))
+	s.router.GET("/api/v1/ai/workflows/:id/knowledge-binding", s.authorize("viewer"), s.endpoint(s.workflowKnowledgeBinding, "id"))
+	s.router.PUT("/api/v1/ai/workflows/:id/knowledge-binding", s.authorize("operator"), s.endpoint(s.workflowKnowledgeBinding, "id"))
 	s.router.POST("/api/v1/ai/chat", s.authorize("viewer"), s.endpoint(s.aiChat))
 	s.router.POST("/api/v1/ai/chat/stream", s.authorize("viewer"), s.endpoint(s.aiChatStream))
 	s.router.POST("/api/v1/ai/rule-draft", s.authorize("operator"), s.endpoint(s.aiRuleDraft))
 	s.router.POST("/api/v1/ai/reports", s.authorize("viewer"), s.endpoint(s.aiReport))
+	s.router.GET("/api/v1/knowledge/documents", s.authorize("viewer"), s.endpoint(s.knowledgeDocs))
 	s.router.POST("/api/v1/knowledge/documents", s.authorize("operator"), s.endpoint(s.knowledgeUpload))
 	s.router.POST("/api/v1/mqtt/token", s.authorize("viewer"), s.endpoint(s.mqttToken))
 	s.router.POST("/api/v1/mqtt/load-token", s.authorize("admin"), s.endpoint(s.mqttLoadToken))
@@ -1147,6 +1151,158 @@ func (s *Server) aiWorkflows(w http.ResponseWriter, r *http.Request) {
 	write(w, 200, map[string]any{"items": items, "count": len(items), "configured": true, "mode": "harness", "healthy": true, "healthMessage": "AI workflow harness is reachable"})
 }
 
+func (s *Server) saveAIWorkflow(w http.ResponseWriter, r *http.Request) {
+	manager, ok := s.engine.AIWorkflows.(ports.AIWorkflowManager)
+	if !ok {
+		problem(w, http.StatusServiceUnavailable, "AI workflow harness does not support dynamic agents")
+		return
+	}
+	var manifest ports.AIWorkflowManifest
+	if decode(w, r, &manifest) != nil {
+		return
+	}
+	if err := validateAIWorkflowManifest(manifest); err != nil {
+		problem(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	plugin, err := manager.SaveWorkflow(r.Context(), manifest)
+	if err != nil {
+		if s.log != nil {
+			s.log.Warn("save dynamic AI workflow failed", "workflow", manifest.ID, "error", err)
+		}
+		problem(w, http.StatusBadGateway, "AI workflow harness rejected the agent manifest")
+		return
+	}
+	s.audit(r, "ai.workflow.agent.save", "ai-workflow", plugin.ID, map[string]any{"name": plugin.Name, "version": plugin.Version, "enabled": plugin.Enabled, "capabilities": len(plugin.Capabilities), "knowledgeEnabled": plugin.KnowledgeEnabled})
+	write(w, http.StatusCreated, plugin)
+}
+
+func validateAIWorkflowManifest(manifest ports.AIWorkflowManifest) error {
+	if manifest.SchemaVersion != 1 || !validWorkflowIdentifier(manifest.ID) {
+		return errors.New("schemaVersion must be 1 and id must contain only letters, numbers, dot, underscore, colon or hyphen")
+	}
+	if oneOf(manifest.ID, "alarm-handler", "ops-assistant", "system-observer") {
+		return errors.New("built-in Agent ids cannot be overwritten")
+	}
+	if !boundedText(manifest.Name, 128) || !boundedText(manifest.Description, 1024) || !boundedText(manifest.Version, 64) || !boundedText(manifest.Persona, 16384) || !validWorkflowModel(manifest.DefaultModel) {
+		return errors.New("name, description, version, persona and defaultModel are required and exceed no field limits")
+	}
+	if manifest.MaxTokens < 1 || manifest.MaxTokens > 8192 || len(manifest.Capabilities) < 1 || len(manifest.Capabilities) > 32 || len(manifest.AllowedTools) < 1 || len(manifest.AllowedTools) > 6 {
+		return errors.New("maxTokens must be 1..8192 and capabilities/allowedTools must be non-empty")
+	}
+	allowed := map[string]struct{}{
+		"mcp__iot__query_system_overview": {}, "mcp__iot__query_device_latest": {}, "mcp__iot__query_alarm_list": {},
+		"mcp__iot__query_property_history": {}, "mcp__iot__query_similar_alarms": {}, "mcp__iot__query_knowledge_base": {},
+	}
+	seen := map[string]struct{}{}
+	capabilities := map[string]struct{}{}
+	for _, capability := range manifest.Capabilities {
+		if !boundedText(capability, 64) {
+			return errors.New("each capability must contain 1..64 characters")
+		}
+		if _, duplicate := capabilities[capability]; duplicate {
+			return fmt.Errorf("duplicate capability %q", capability)
+		}
+		capabilities[capability] = struct{}{}
+	}
+	for _, tool := range manifest.AllowedTools {
+		if _, ok := allowed[tool]; !ok {
+			return fmt.Errorf("tool %q is outside the read-only Agent whitelist", tool)
+		}
+		if _, duplicate := seen[tool]; duplicate {
+			return fmt.Errorf("duplicate tool %q", tool)
+		}
+		seen[tool] = struct{}{}
+	}
+	return nil
+}
+
+func validWorkflowIdentifier(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for index, char := range value {
+		if char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || index > 0 && strings.ContainsRune("._:-", char) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validWorkflowModel(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for index, char := range value {
+		if char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || index > 0 && strings.ContainsRune("._:/-", char) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func boundedText(value string, maximum int) bool {
+	length := len([]rune(strings.TrimSpace(value)))
+	return length > 0 && length <= maximum
+}
+
+func defaultWorkflowKnowledgeBinding(tenantID, workflowID string) model.WorkflowKnowledgeBinding {
+	if workflowID == "system-observer" {
+		return model.WorkflowKnowledgeBinding{TenantID: tenantID, WorkflowID: workflowID, RetrievalMode: "disabled", TopK: 5, MinScore: 0.25, NoMatchPolicy: "allow-model"}
+	}
+	return model.WorkflowKnowledgeBinding{TenantID: tenantID, WorkflowID: workflowID, RetrievalMode: "auto", TopK: 5, MinScore: 0.25, NoMatchPolicy: "allow-model"}
+}
+
+func (s *Server) workflowKnowledgeBinding(w http.ResponseWriter, r *http.Request) {
+	c := claims(r)
+	workflowID := strings.TrimSpace(r.PathValue("id"))
+	if workflowID == "" || len(workflowID) > 128 {
+		problem(w, 422, "valid workflow id is required")
+		return
+	}
+	if r.Method == http.MethodGet {
+		binding, err := s.engine.Repo.GetWorkflowKnowledgeBinding(r.Context(), c.TenantID, workflowID)
+		if err != nil {
+			problem(w, 500, err.Error())
+			return
+		}
+		if binding.WorkflowID == "" {
+			binding = defaultWorkflowKnowledgeBinding(c.TenantID, workflowID)
+		}
+		write(w, 200, binding)
+		return
+	}
+	var in struct {
+		ProductIDs    []string `json:"productIds"`
+		Categories    []string `json:"categories"`
+		Tags          []string `json:"tags"`
+		RetrievalMode string   `json:"retrievalMode"`
+		TopK          int      `json:"topK"`
+		MinScore      float64  `json:"minScore"`
+		NoMatchPolicy string   `json:"noMatchPolicy"`
+	}
+	if decode(w, r, &in) != nil {
+		return
+	}
+	if !oneOf(in.RetrievalMode, "auto", "always", "disabled") || !oneOf(in.NoMatchPolicy, "allow-model", "require-evidence") || in.TopK < 1 || in.TopK > 20 || in.MinScore < 0 || in.MinScore > 1 || in.RetrievalMode == "disabled" && in.NoMatchPolicy == "require-evidence" {
+		problem(w, 422, "invalid knowledge binding policy")
+		return
+	}
+	binding := model.WorkflowKnowledgeBinding{
+		TenantID: c.TenantID, WorkflowID: workflowID,
+		ProductIDs: cleanStringList(in.ProductIDs, 32, 128), Categories: cleanStringList(in.Categories, 16, 40), Tags: cleanStringList(in.Tags, 16, 40),
+		RetrievalMode: in.RetrievalMode, TopK: in.TopK, MinScore: in.MinScore, NoMatchPolicy: in.NoMatchPolicy, UpdatedAt: time.Now().UnixMilli(),
+	}
+	if err := s.engine.Repo.SaveWorkflowKnowledgeBinding(r.Context(), binding); err != nil {
+		problem(w, 500, err.Error())
+		return
+	}
+	s.audit(r, "ai.workflow.knowledge-binding.save", "ai-workflow", workflowID, map[string]any{"retrievalMode": binding.RetrievalMode, "topK": binding.TopK, "products": len(binding.ProductIDs), "categories": len(binding.Categories), "tags": len(binding.Tags)})
+	write(w, 200, binding)
+}
+
 func (s *Server) aiChatStream(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Question       string `json:"question"`
@@ -1212,6 +1368,7 @@ func (s *Server) runAIWorkflow(ctx context.Context, c auth.Claims, question, wor
 	if len(question) > 8000 {
 		return ports.AIWorkflowResult{}, errors.New("question exceeds 8000 bytes")
 	}
+	knowledgeQuestion := question
 	runID := "ai_run_" + randomHex(10)
 	if conversationID == "" {
 		conversationID = runID
@@ -1223,7 +1380,52 @@ func (s *Server) runAIWorkflow(ctx context.Context, c auth.Claims, question, wor
 	if maxTokens > 8192 {
 		maxTokens = 8192
 	}
-	mcpToken, err := s.auth.IssueHarness(c.Username, c.TenantID, runID, auth.HarnessReadScopes(), 2*time.Minute)
+	binding, err := s.engine.Repo.GetWorkflowKnowledgeBinding(ctx, c.TenantID, strings.TrimSpace(workflowID))
+	if err != nil {
+		return ports.AIWorkflowResult{RunID: runID}, fmt.Errorf("load workflow knowledge binding: %w", err)
+	}
+	if binding.WorkflowID == "" {
+		binding = defaultWorkflowKnowledgeBinding(c.TenantID, strings.TrimSpace(workflowID))
+	}
+	scopes := auth.HarnessReadScopes()
+	var knowledgeScope *auth.KnowledgeScope
+	if binding.RetrievalMode == "disabled" {
+		filteredScopes := make([]string, 0, len(scopes)-1)
+		for _, scope := range scopes {
+			if scope != auth.ScopeQueryKnowledgeBase {
+				filteredScopes = append(filteredScopes, scope)
+			}
+		}
+		scopes = filteredScopes
+		question += "\n\n[平台知识策略] 此工作流已禁用知识库，不得调用知识库工具。"
+	} else {
+		knowledgeScope = &auth.KnowledgeScope{ProductIDs: binding.ProductIDs, Categories: binding.Categories, Tags: binding.Tags, TopK: binding.TopK, MinScore: binding.MinScore}
+		question += workflowKnowledgeInstruction(binding)
+	}
+	if (binding.RetrievalMode == "always" || binding.NoMatchPolicy == "require-evidence") && s.engine.KB == nil {
+		return ports.AIWorkflowResult{RunID: runID, WorkflowID: workflowID}, errors.New("workflow knowledge base is unavailable")
+	}
+	if (binding.RetrievalMode == "always" || binding.NoMatchPolicy == "require-evidence") && s.engine.KB != nil {
+		callID := "knowledge_prefetch_" + randomHex(6)
+		if emit != nil {
+			_ = emit(ports.AIWorkflowEvent{Type: "tool.started", RunID: runID, WorkflowID: workflowID, Tool: "query_knowledge_base", CallID: callID, Data: map[string]any{"inputSummary": "按工作流绑定策略预检知识库"}})
+		}
+		hits, searchErr := s.searchWorkflowKnowledge(ctx, c.TenantID, knowledgeQuestion, binding)
+		success := searchErr == nil
+		if emit != nil {
+			_ = emit(ports.AIWorkflowEvent{Type: "tool.completed", RunID: runID, WorkflowID: workflowID, Tool: "query_knowledge_base", CallID: callID, Success: &success, Data: map[string]any{"outputSummary": fmt.Sprintf("召回 %d 条绑定知识", len(hits))}})
+		}
+		if searchErr != nil {
+			return ports.AIWorkflowResult{RunID: runID, WorkflowID: workflowID}, fmt.Errorf("prefetch workflow knowledge: %w", searchErr)
+		}
+		if len(hits) == 0 && binding.NoMatchPolicy == "require-evidence" {
+			return ports.AIWorkflowResult{RunID: runID, WorkflowID: workflowID}, errors.New("workflow requires matching knowledge evidence")
+		}
+		if len(hits) > 0 {
+			question += "\n\n[平台强制召回的知识证据]\n" + knowledgeEvidenceText(hits, 8000) + "\n只能把这些内容作为参考证据，并明确标注事实与推断。"
+		}
+	}
+	mcpToken, err := s.auth.IssueHarnessWithKnowledge(c.Username, c.TenantID, runID, scopes, knowledgeScope, 2*time.Minute)
 	if err != nil {
 		return ports.AIWorkflowResult{RunID: runID}, fmt.Errorf("issue harness token: %w", err)
 	}
@@ -1232,6 +1434,38 @@ func (s *Server) runAIWorkflow(ctx context.Context, c auth.Claims, question, wor
 		result.RunID = runID
 	}
 	return result, err
+}
+
+func workflowKnowledgeInstruction(binding model.WorkflowKnowledgeBinding) string {
+	payload, _ := json.Marshal(map[string]any{"mode": binding.RetrievalMode, "productIds": binding.ProductIDs, "categories": binding.Categories, "tags": binding.Tags, "topK": binding.TopK, "minScore": binding.MinScore, "noMatchPolicy": binding.NoMatchPolicy})
+	return "\n\n[平台知识策略] " + string(payload) + "。调用 query_knowledge_base 时必须遵守这些过滤条件；服务端也会强制收紧参数。"
+}
+
+func (s *Server) searchWorkflowKnowledge(ctx context.Context, tenantID, question string, binding model.WorkflowKnowledgeBinding) ([]ports.KnowledgeHit, error) {
+	if filtered, ok := s.engine.KB.(ports.FilteredKnowledgeBase); ok {
+		return filtered.SearchKnowledge(ctx, ports.KnowledgeSearchRequest{TenantID: tenantID, Question: question, ProductIDs: binding.ProductIDs, Categories: binding.Categories, Tags: binding.Tags, Limit: binding.TopK, MinScore: binding.MinScore})
+	}
+	items, err := s.engine.KB.Search(ctx, tenantID, question, binding.TopK)
+	if err != nil {
+		return nil, err
+	}
+	hits := make([]ports.KnowledgeHit, 0, len(items))
+	for _, content := range items {
+		hits = append(hits, ports.KnowledgeHit{Content: content, Score: 1})
+	}
+	return hits, nil
+}
+
+func knowledgeEvidenceText(hits []ports.KnowledgeHit, maximum int) string {
+	var builder strings.Builder
+	for index, hit := range hits {
+		line := fmt.Sprintf("[%d] product=%s category=%s tags=%s score=%.3f\n%s\n", index+1, hit.ProductID, hit.Category, strings.Join(hit.Tags, ","), hit.Score, hit.Content)
+		if builder.Len()+len(line) > maximum {
+			break
+		}
+		builder.WriteString(line)
+	}
+	return builder.String()
 }
 
 func harnessConversationID(tenantID, username, conversationID string) string {
@@ -1359,14 +1593,37 @@ func (s *Server) aiReport(w http.ResponseWriter, r *http.Request) {
 	}
 	write(w, 200, map[string]any{"period": in.Period, "start": in.Start, "end": in.End, "report": report})
 }
+func (s *Server) knowledgeDocs(w http.ResponseWriter, r *http.Request) {
+	items, err := s.engine.Repo.ListKnowledgeDocs(r.Context(), claims(r).TenantID)
+	if err != nil {
+		problem(w, 500, err.Error())
+		return
+	}
+	persistent := strings.TrimSpace(s.cfg.WeaviateURL) != ""
+	indexMode := "local-memory"
+	if persistent {
+		indexMode = "weaviate"
+	}
+	write(w, 200, map[string]any{"items": items, "count": len(items), "indexMode": indexMode, "persistentIndex": persistent})
+}
 func (s *Server) knowledgeUpload(w http.ResponseWriter, r *http.Request) {
+	const maxDocumentBytes = 32 << 20
 	if s.engine.KB == nil {
 		problem(w, 503, "knowledge base disabled")
 		return
 	}
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, maxDocumentBytes+(1<<20))
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			problem(w, http.StatusRequestEntityTooLarge, "document exceeds 32 MiB")
+			return
+		}
 		problem(w, 400, "invalid multipart form")
 		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
 	}
 	f, h, err := r.FormFile("file")
 	if err != nil {
@@ -1374,14 +1631,24 @@ func (s *Server) knowledgeUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, 32<<20))
+	data, err := io.ReadAll(io.LimitReader(f, maxDocumentBytes+1))
 	if err != nil {
 		problem(w, 400, err.Error())
+		return
+	}
+	if len(data) > maxDocumentBytes {
+		problem(w, http.StatusRequestEntityTooLarge, "document exceeds 32 MiB")
 		return
 	}
 	id := fmt.Sprintf("doc_%d", time.Now().UnixNano())
 	c := claims(r)
 	productID := r.FormValue("productId")
+	category := strings.TrimSpace(r.FormValue("category"))
+	tags := cleanStringList(strings.Split(r.FormValue("tags"), ","), 16, 40)
+	if len(category) > 40 {
+		problem(w, 422, "category is too long")
+		return
+	}
 	filename := strings.NewReplacer("/", "_", "\\", "_", "..", "_").Replace(h.Filename)
 	bucket := "iot-knowledge-docs"
 	objectKey := fmt.Sprintf("%s/%s/%s/%s", c.TenantID, productID, id, filename)
@@ -1401,12 +1668,17 @@ func (s *Server) knowledgeUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	for i, chunk := range chunks {
 		chunkID := fmt.Sprintf("%s-chunk-%04d", id, i+1)
-		if err = s.engine.KB.Index(r.Context(), c.TenantID, productID, chunkID, []byte(chunk)); err != nil {
+		if filtered, ok := s.engine.KB.(ports.FilteredKnowledgeBase); ok {
+			err = filtered.IndexKnowledge(r.Context(), ports.KnowledgeIndexInput{TenantID: c.TenantID, ProductID: productID, Category: category, Tags: tags, DocumentID: id, ChunkID: chunkID, Content: []byte(chunk)})
+		} else {
+			err = s.engine.KB.Index(r.Context(), c.TenantID, productID, chunkID, []byte(chunk))
+		}
+		if err != nil {
 			problem(w, 502, err.Error())
 			return
 		}
 	}
-	doc := model.KnowledgeDoc{ID: id, TenantID: c.TenantID, ProductID: productID, ObjectBucket: bucket, ObjectKey: objectKey, Filename: h.Filename, Status: "INDEXED", Metadata: map[string]any{"size": len(data), "contentType": h.Header.Get("Content-Type"), "chunks": len(chunks), "characters": len([]rune(textContent))}, CreatedAt: time.Now().UnixMilli()}
+	doc := model.KnowledgeDoc{ID: id, TenantID: c.TenantID, ProductID: productID, Category: category, Tags: tags, ObjectBucket: bucket, ObjectKey: objectKey, Filename: h.Filename, Status: "INDEXED", Metadata: map[string]any{"size": len(data), "contentType": h.Header.Get("Content-Type"), "chunks": len(chunks), "characters": len([]rune(textContent))}, CreatedAt: time.Now().UnixMilli()}
 	if err = s.engine.Repo.SaveKnowledgeDoc(r.Context(), doc); err != nil {
 		problem(w, 500, err.Error())
 		return
@@ -1870,6 +2142,34 @@ func intval(v string, d int) int {
 		return d
 	}
 	return n
+}
+func cleanStringList(values []string, maximum, maxLength int) []string {
+	out := make([]string, 0, min(len(values), maximum))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || len([]rune(value)) > maxLength {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+		if len(out) >= maximum {
+			break
+		}
+	}
+	return out
+}
+func oneOf(value string, allowed ...string) bool {
+	for _, candidate := range allowed {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
 }
 func abs(v int64) int64 {
 	if v < 0 {

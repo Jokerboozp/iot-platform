@@ -11,6 +11,7 @@ export const name = 'iot-ops-policy'
 export const inject = ['tools']
 
 export const READ_ONLY_TOOL_CEILING = Object.freeze([
+  'mcp__iot__query_system_overview',
   'mcp__iot__query_device_latest',
   'mcp__iot__query_alarm_list',
   'mcp__iot__query_property_history',

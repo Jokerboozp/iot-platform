@@ -23,11 +23,26 @@ test('management controls and Chinese labels remain available', async () => {
 
 test('video preview and AI provider playground remain available', async () => {
   const source = await sourceText()
-  for (const label of ['视频流预览', '浏览器可直接预览 HLS', 'Provider 临时测试', '连接并测试插件', 'AI 运维助手', '运行轨迹', '工具调用']) {
+  for (const label of ['视频流预览', '浏览器可直接预览 HLS', 'Provider 临时测试', '连接并测试插件', 'DEEPSEEK HARNESS', 'AI 工作流', '运行轨迹', '工具调用']) {
     assert.match(source, new RegExp(label), `missing feature label: ${label}`)
   }
   const packageJson = JSON.parse(await readFile(new URL('package.json', root), 'utf8'))
   assert.ok(packageJson.dependencies?.['hls.js'], 'hls.js is required for browser HLS playback')
+})
+
+test('knowledge management uploads files and lists tenant documents', async () => {
+  const app = await readFile(new URL('src/App.vue', root), 'utf8')
+  const view = await readFile(new URL('src/views/KnowledgeView.vue', root), 'utf8')
+  for (const label of ['知识库管理', '上传知识文档', '上传并建立索引', '已上传文档', '打开 AI 工作流']) {
+    assert.match(`${app}\n${view}`, new RegExp(label), `missing knowledge UI label: ${label}`)
+  }
+  assert.match(view, /api\('\/api\/v1\/knowledge\/documents'\)/)
+  assert.match(view, /method:'POST', body:form/)
+  assert.match(view, /new FormData\(\)/)
+  assert.match(view, /persistentIndex/)
+  assert.match(view, /api\('\/api\/v1\/products'\)/)
+  assert.match(view, /<el-select v-model="productId" filterable clearable/)
+  for (const label of ['知识分类', '知识标签', '告警处置 SOP']) assert.match(view, new RegExp(label), `missing knowledge metadata UI: ${label}`)
 })
 
 test('AI workbench uses cancellable SSE workflows and stable message keys', async () => {
@@ -45,6 +60,19 @@ test('AI workbench uses cancellable SSE workflows and stable message keys', asyn
   assert.doesNotMatch(aiView, /conversationId\.value\s*=\s*event\.conversationId/)
   assert.doesNotMatch(aiView, /model:[^\n]*runtime\.value\.active/)
   assert.match(aiView, /conversationId\.value\s*=\s*makeId\('conversation'\)/)
+  for (const label of ['工作流知识库绑定', '强制检索', '最低相似度', '无匹配知识时', '保存知识库绑定']) assert.match(aiView, new RegExp(label), `missing workflow knowledge binding UI: ${label}`)
+  for (const label of ['通过 JSON 创建 Agent', 'Agent Manifest JSON', '校验并创建 Agent', '保存后立即进入工作流列表']) assert.match(aiView, new RegExp(label), `missing dynamic Agent UI: ${label}`)
+  for (const field of ['schemaVersion','id','name','description','version','enabled','persona','defaultModel','maxTokens','capabilities','allowedTools']) assert.match(aiView, new RegExp(`name:'${field}'`), `missing Agent field documentation: ${field}`)
+  assert.match(aiView, /JSON 标准不支持注释/)
+  assert.match(aiView, /allowedTools 可用工具/)
+  for (const label of ['本次运行', '选择工作流', '运行参数', '运行环境', '管理中心', 'AI 工作流管理']) assert.match(aiView, new RegExp(label), `missing workflow hierarchy label: ${label}`)
+  assert.match(aiView, /<el-drawer v-model="managementVisible"/)
+  assert.match(aiView, /<el-menu :default-active="managementTab"/)
+  for (const menuClass of ['menu-agent','menu-knowledge','menu-provider']) assert.match(aiView, new RegExp(menuClass), `missing colored management menu: ${menuClass}`)
+  assert.doesNotMatch(aiView, /<el-collapse/)
+  assert.match(aiView, /knowledge-binding/)
+  assert.match(aiView, /method:'PUT'/)
+  assert.match(aiView, /api\('\/api\/v1\/ai\/workflows', \{ method:'POST'/)
   assert.match(apiSource, /export async function apiStream/)
   assert.match(apiSource, /text\/event-stream/)
   assert.match(sseSource, /getReader\(\)/)

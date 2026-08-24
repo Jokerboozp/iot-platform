@@ -521,8 +521,52 @@ func (r *Repository) GetAIAnalysis(ctx context.Context, tenant, id string) (mode
 }
 func (r *Repository) SaveKnowledgeDoc(ctx context.Context, v model.KnowledgeDoc) error {
 	b, _ := json.Marshal(v.Metadata)
-	_, err := r.pool.Exec(ctx, `INSERT INTO ai_knowledge_doc(id,tenant_id,product_id,object_bucket,object_key,filename,status,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(id) DO UPDATE SET status=excluded.status,metadata=excluded.metadata`, v.ID, v.TenantID, v.ProductID, v.ObjectBucket, v.ObjectKey, v.Filename, v.Status, b)
+	_, err := r.pool.Exec(ctx, `INSERT INTO ai_knowledge_doc(id,tenant_id,product_id,category,tags,object_bucket,object_key,filename,status,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(id) DO UPDATE SET product_id=excluded.product_id,category=excluded.category,tags=excluded.tags,status=excluded.status,metadata=excluded.metadata`, v.ID, v.TenantID, v.ProductID, v.Category, v.Tags, v.ObjectBucket, v.ObjectKey, v.Filename, v.Status, b)
 	return err
+}
+func (r *Repository) ListKnowledgeDocs(ctx context.Context, tenant string) ([]model.KnowledgeDoc, error) {
+	rows, err := r.pool.Query(ctx, `SELECT id,tenant_id,coalesce(product_id,''),coalesce(category,''),coalesce(tags,'{}'),object_bucket,object_key,filename,status,metadata,(extract(epoch from created_at)*1000)::bigint FROM ai_knowledge_doc WHERE tenant_id=$1 ORDER BY created_at DESC,id DESC`, tenant)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.KnowledgeDoc{}
+	for rows.Next() {
+		var v model.KnowledgeDoc
+		var metadata []byte
+		if err = rows.Scan(&v.ID, &v.TenantID, &v.ProductID, &v.Category, &v.Tags, &v.ObjectBucket, &v.ObjectKey, &v.Filename, &v.Status, &metadata, &v.CreatedAt); err != nil {
+			return nil, err
+		}
+		if len(metadata) > 0 {
+			if err = json.Unmarshal(metadata, &v.Metadata); err != nil {
+				return nil, err
+			}
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+func (r *Repository) SaveWorkflowKnowledgeBinding(ctx context.Context, v model.WorkflowKnowledgeBinding) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	_, err = r.pool.Exec(ctx, `INSERT INTO ai_workflow_knowledge_binding(tenant_id,workflow_id,body) VALUES($1,$2,$3) ON CONFLICT(tenant_id,workflow_id) DO UPDATE SET body=excluded.body,updated_at=now()`, v.TenantID, v.WorkflowID, b)
+	return err
+}
+
+func (r *Repository) GetWorkflowKnowledgeBinding(ctx context.Context, tenant, workflowID string) (model.WorkflowKnowledgeBinding, error) {
+	var v model.WorkflowKnowledgeBinding
+	var b []byte
+	err := r.pool.QueryRow(ctx, `SELECT body FROM ai_workflow_knowledge_binding WHERE tenant_id=$1 AND workflow_id=$2`, tenant, workflowID).Scan(&b)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return v, nil
+	}
+	if err == nil {
+		err = json.Unmarshal(b, &v)
+	}
+	return v, err
 }
 func (r *Repository) SaveReplay(ctx context.Context, v model.ReplayRequest) error {
 	b, _ := json.Marshal(v)

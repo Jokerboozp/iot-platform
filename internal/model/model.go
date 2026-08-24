@@ -309,12 +309,30 @@ type KnowledgeDoc struct {
 	ID           string         `json:"id"`
 	TenantID     string         `json:"tenantId"`
 	ProductID    string         `json:"productId,omitempty"`
+	Category     string         `json:"category,omitempty"`
+	Tags         []string       `json:"tags,omitempty"`
 	ObjectBucket string         `json:"objectBucket"`
 	ObjectKey    string         `json:"objectKey"`
 	Filename     string         `json:"filename"`
 	Status       string         `json:"status"`
 	Metadata     map[string]any `json:"metadata,omitempty"`
 	CreatedAt    int64          `json:"createdAt"`
+}
+
+// WorkflowKnowledgeBinding constrains knowledge retrieval for one tenant and
+// one Harness workflow. The plugin manifest defines what the workflow can do;
+// this record defines which tenant knowledge it may use.
+type WorkflowKnowledgeBinding struct {
+	TenantID      string   `json:"tenantId"`
+	WorkflowID    string   `json:"workflowId"`
+	ProductIDs    []string `json:"productIds,omitempty"`
+	Categories    []string `json:"categories,omitempty"`
+	Tags          []string `json:"tags,omitempty"`
+	RetrievalMode string   `json:"retrievalMode"`
+	TopK          int      `json:"topK"`
+	MinScore      float64  `json:"minScore"`
+	NoMatchPolicy string   `json:"noMatchPolicy"`
+	UpdatedAt     int64    `json:"updatedAt"`
 }
 
 type ReplayRequest struct {

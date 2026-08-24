@@ -17,6 +17,7 @@ const claimsContextKey contextKey = "iot-auth-claims"
 const (
 	HarnessAudience           = "iot-platform-mcp"
 	ScopeQueryDeviceLatest    = "mcp:tool:query_device_latest"
+	ScopeQuerySystemOverview  = "mcp:tool:query_system_overview"
 	ScopeQueryAlarmList       = "mcp:tool:query_alarm_list"
 	ScopeQueryPropertyHistory = "mcp:tool:query_property_history"
 	ScopeQuerySimilarAlarms   = "mcp:tool:query_similar_alarms"
@@ -24,7 +25,7 @@ const (
 )
 
 func HarnessReadScopes() []string {
-	return []string{ScopeQueryDeviceLatest, ScopeQueryAlarmList, ScopeQueryPropertyHistory, ScopeQuerySimilarAlarms, ScopeQueryKnowledgeBase}
+	return []string{ScopeQuerySystemOverview, ScopeQueryDeviceLatest, ScopeQueryAlarmList, ScopeQueryPropertyHistory, ScopeQuerySimilarAlarms, ScopeQueryKnowledgeBase}
 }
 
 func ContextWithClaims(ctx context.Context, claims Claims) context.Context {
@@ -37,14 +38,22 @@ func ClaimsFromContext(ctx context.Context) (Claims, bool) {
 }
 
 type Claims struct {
-	Username string    `json:"username"`
-	TenantID string    `json:"tenantId"`
-	Role     string    `json:"role"`
-	Scopes   []string  `json:"scopes,omitempty"`
-	ACL      []ACLRule `json:"acl,omitempty"`
-	TokenUse string    `json:"tokenUse,omitempty"`
-	RunID    string    `json:"runId,omitempty"`
+	Username  string          `json:"username"`
+	TenantID  string          `json:"tenantId"`
+	Role      string          `json:"role"`
+	Scopes    []string        `json:"scopes,omitempty"`
+	ACL       []ACLRule       `json:"acl,omitempty"`
+	TokenUse  string          `json:"tokenUse,omitempty"`
+	RunID     string          `json:"runId,omitempty"`
+	Knowledge *KnowledgeScope `json:"knowledge,omitempty"`
 	jwt.RegisteredClaims
+}
+type KnowledgeScope struct {
+	ProductIDs []string `json:"productIds,omitempty"`
+	Categories []string `json:"categories,omitempty"`
+	Tags       []string `json:"tags,omitempty"`
+	TopK       int      `json:"topK,omitempty"`
+	MinScore   float64  `json:"minScore,omitempty"`
 }
 type ACLRule struct {
 	Permission string `json:"permission"`
@@ -71,17 +80,21 @@ func (m *Manager) IssueWithACL(user, tenant, role string, scopes []string, acl [
 }
 
 func (m *Manager) IssueHarness(user, tenant, runID string, scopes []string, ttl time.Duration) (string, error) {
+	return m.IssueHarnessWithKnowledge(user, tenant, runID, scopes, nil, ttl)
+}
+func (m *Manager) IssueHarnessWithKnowledge(user, tenant, runID string, scopes []string, knowledge *KnowledgeScope, ttl time.Duration) (string, error) {
 	if user == "" || tenant == "" || runID == "" || ttl <= 0 {
 		return "", errors.New("user, tenant, runId and positive ttl are required")
 	}
 	now := time.Now()
 	claims := Claims{
-		Username: user,
-		TenantID: tenant,
-		Role:     "viewer",
-		Scopes:   append([]string(nil), scopes...),
-		TokenUse: "harness",
-		RunID:    runID,
+		Username:  user,
+		TenantID:  tenant,
+		Role:      "viewer",
+		Scopes:    append([]string(nil), scopes...),
+		TokenUse:  "harness",
+		RunID:     runID,
+		Knowledge: knowledge,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    m.issuer,
 			Subject:   "harness:" + user,

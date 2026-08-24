@@ -2,7 +2,7 @@
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
-import { Monitor, Cpu, Box, Connection, Upload, VideoCamera, Bell, Document, Operation, ChatDotRound, Fold, Expand, SwitchButton } from '@element-plus/icons-vue'
+import { Monitor, Cpu, Box, Connection, Upload, VideoCamera, Bell, Document, Operation, Collection, ChatDotRound, Fold, Expand, SwitchButton } from '@element-plus/icons-vue'
 import { api, notifyError, session } from './api'
 import { alarmType } from './labels'
 import { startRealtime, stopRealtime } from './realtime'
@@ -15,6 +15,7 @@ const CameraMappingsView = defineAsyncComponent(() => import('./views/CameraMapp
 const AlarmsView = defineAsyncComponent(() => import('./views/AlarmsView.vue'))
 const RawView = defineAsyncComponent(() => import('./views/RawView.vue'))
 const RulesView = defineAsyncComponent(() => import('./views/RulesView.vue'))
+const KnowledgeView = defineAsyncComponent(() => import('./views/KnowledgeView.vue'))
 const AiView = defineAsyncComponent(() => import('./views/AiView.vue'))
 
 const authenticated = ref(Boolean(session.token))
@@ -38,13 +39,14 @@ const pages = {
   alarms: { title:'告警中心', sub:'告警确认、恢复与闭环处置', icon:Bell, component:AlarmsView },
   raw: { title:'原始报文', sub:'证据链检索、审计与回放', icon:Document, component:RawView },
   rules: { title:'告警规则', sub:'可审计的动态规则与 AI 草稿', icon:Operation, component:RulesView },
-  ai: { title:'AI 运维助手', sub:'受控工具查询与知识库问答', icon:ChatDotRound, component:AiView }
+  knowledge: { title:'知识库管理', sub:'消防规范、设备手册与处置 SOP 索引', icon:Collection, component:KnowledgeView },
+  ai: { title:'AI 工作流', sub:'DeepSeek Harness 插件、受控工具与知识库问答', icon:ChatDotRound, component:AiView }
 }
 const current = computed(() => pages[active.value])
 const menuGroups = [
   { label:'控制中心', items:['dashboard'] },
   { label:'设备接入', items:['devices','products','protocols','integration','cameras'] },
-  { label:'运行中心', items:['alarms','raw','rules','ai'] }
+  { label:'运行中心', items:['alarms','raw','rules','knowledge','ai'] }
 ]
 
 async function login() {

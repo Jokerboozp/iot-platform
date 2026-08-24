@@ -40,7 +40,8 @@ ENV NODE_ENV=production \
     IOT_HARNESS_HOST=0.0.0.0 \
     IOT_HARNESS_PORT=8091 \
     IOT_HARNESS_MCP_PROXY_PORT=8092 \
-    IOT_HARNESS_PLUGIN_DIR=/harness/examples/iot-ops-agent/plugins \
+    IOT_HARNESS_PLUGIN_DIR=/data/plugins \
+    IOT_HARNESS_PLUGIN_SEED_DIR=/harness/examples/iot-ops-agent/plugins \
     IOT_HARNESS_SESSION_ROOT=/data/sessions \
     IOT_HARNESS_WORKSPACE=/data/workspace \
     DSH_CORDIS_CONFIG=/harness/examples/iot-ops-agent/cordis.yml \
@@ -59,4 +60,4 @@ EXPOSE 8091
 VOLUME ["/data"]
 HEALTHCHECK --interval=15s --timeout=3s --start-period=30s --retries=4 \
   CMD ["node", "-e", "fetch('http://127.0.0.1:8091/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
-ENTRYPOINT ["node", "/harness/examples/iot-ops-agent/gateway.mjs"]
+ENTRYPOINT ["sh", "/harness/examples/iot-ops-agent/start.sh"]

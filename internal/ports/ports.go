@@ -60,6 +60,9 @@ type Repository interface {
 	SaveAIAnalysis(context.Context, model.AIAnalysis) error
 	GetAIAnalysis(context.Context, string, string) (model.AIAnalysis, error)
 	SaveKnowledgeDoc(context.Context, model.KnowledgeDoc) error
+	ListKnowledgeDocs(context.Context, string) ([]model.KnowledgeDoc, error)
+	SaveWorkflowKnowledgeBinding(context.Context, model.WorkflowKnowledgeBinding) error
+	GetWorkflowKnowledgeBinding(context.Context, string, string) (model.WorkflowKnowledgeBinding, error)
 	SaveReplay(context.Context, model.ReplayRequest) error
 	UpdateReplay(context.Context, model.ReplayRequest) error
 	GetReplay(context.Context, string) (model.ReplayRequest, error)
@@ -132,15 +135,30 @@ type AIPluginRegistry interface {
 // contracts: providers generate text, workflows may orchestrate read-only MCP
 // tools and stream progress events.
 type AIWorkflowPlugin struct {
-	SchemaVersion int      `json:"schemaVersion,omitempty"`
+	SchemaVersion    int      `json:"schemaVersion,omitempty"`
+	ID               string   `json:"id"`
+	Name             string   `json:"name"`
+	Description      string   `json:"description,omitempty"`
+	Version          string   `json:"version,omitempty"`
+	DefaultModel     string   `json:"defaultModel,omitempty"`
+	MaxTokens        int      `json:"maxTokens,omitempty"`
+	Enabled          bool     `json:"enabled"`
+	Capabilities     []string `json:"capabilities,omitempty"`
+	KnowledgeEnabled bool     `json:"knowledgeEnabled"`
+}
+
+type AIWorkflowManifest struct {
+	SchemaVersion int      `json:"schemaVersion"`
 	ID            string   `json:"id"`
 	Name          string   `json:"name"`
-	Description   string   `json:"description,omitempty"`
-	Version       string   `json:"version,omitempty"`
-	DefaultModel  string   `json:"defaultModel,omitempty"`
-	MaxTokens     int      `json:"maxTokens,omitempty"`
+	Description   string   `json:"description"`
+	Version       string   `json:"version"`
 	Enabled       bool     `json:"enabled"`
-	Capabilities  []string `json:"capabilities,omitempty"`
+	Persona       string   `json:"persona"`
+	DefaultModel  string   `json:"defaultModel"`
+	MaxTokens     int      `json:"maxTokens"`
+	Capabilities  []string `json:"capabilities"`
+	AllowedTools  []string `json:"allowedTools"`
 }
 
 type AIWorkflowRequest struct {
@@ -184,10 +202,52 @@ type AIWorkflowRuntime interface {
 	Health(context.Context) error
 }
 
+type AIWorkflowManager interface {
+	SaveWorkflow(context.Context, AIWorkflowManifest) (AIWorkflowPlugin, error)
+}
+
 type KnowledgeBase interface {
 	Index(context.Context, string, string, string, []byte) error
 	Search(context.Context, string, string, int) ([]string, error)
 	Health(context.Context) error
+}
+
+type KnowledgeIndexInput struct {
+	TenantID   string
+	ProductID  string
+	Category   string
+	Tags       []string
+	DocumentID string
+	ChunkID    string
+	Content    []byte
+}
+
+type KnowledgeSearchRequest struct {
+	TenantID   string
+	Question   string
+	ProductIDs []string
+	Categories []string
+	Tags       []string
+	Limit      int
+	MinScore   float64
+}
+
+type KnowledgeHit struct {
+	DocumentID string   `json:"documentId,omitempty"`
+	ChunkID    string   `json:"chunkId,omitempty"`
+	ProductID  string   `json:"productId,omitempty"`
+	Category   string   `json:"category,omitempty"`
+	Tags       []string `json:"tags,omitempty"`
+	Content    string   `json:"content"`
+	Score      float64  `json:"score"`
+}
+
+// FilteredKnowledgeBase is implemented by indexes that support workflow-bound
+// metadata filters. Keeping it separate preserves compatibility with custom
+// KnowledgeBase adapters.
+type FilteredKnowledgeBase interface {
+	IndexKnowledge(context.Context, KnowledgeIndexInput) error
+	SearchKnowledge(context.Context, KnowledgeSearchRequest) ([]KnowledgeHit, error)
 }
 
 type PlatformCatalog interface {

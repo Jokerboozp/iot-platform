@@ -16,6 +16,7 @@ import (
 func TestHarnessClientSeparatesCredentialsAndParsesNDJSON(t *testing.T) {
 	const serviceToken = "0123456789abcdef0123456789abcdef"
 	var streamBody map[string]any
+	var savedManifest ports.AIWorkflowManifest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-IOT-Harness-Token") != serviceToken {
 			t.Errorf("missing service credential: %q", r.Header.Get("X-IOT-Harness-Token"))
@@ -24,6 +25,14 @@ func TestHarnessClientSeparatesCredentialsAndParsesNDJSON(t *testing.T) {
 		case "/v1/plugins":
 			if r.Header.Get("Authorization") != "" {
 				t.Errorf("plugins request unexpectedly contains MCP credential")
+			}
+			if r.Method == http.MethodPost {
+				if err := json.NewDecoder(r.Body).Decode(&savedManifest); err != nil {
+					t.Fatal(err)
+				}
+				w.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(w).Encode(map[string]any{"id": savedManifest.ID, "name": savedManifest.Name, "enabled": savedManifest.Enabled})
+				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{"id": "ops-assistant", "name": "Ops", "enabled": true, "defaultModel": "deepseek-v4-flash", "maxTokens": 16384}}})
 		case "/v1/chat/stream":
@@ -52,6 +61,10 @@ func TestHarnessClientSeparatesCredentialsAndParsesNDJSON(t *testing.T) {
 	plugins, err := client.ListWorkflows(context.Background())
 	if err != nil || len(plugins) != 1 || plugins[0].ID != "ops-assistant" || plugins[0].DefaultModel != "deepseek-v4-flash" || plugins[0].MaxTokens != 16384 {
 		t.Fatalf("plugins=%#v err=%v", plugins, err)
+	}
+	created, err := client.SaveWorkflow(context.Background(), ports.AIWorkflowManifest{SchemaVersion: 1, ID: "dynamic", Name: "Dynamic", Description: "Dynamic Agent", Version: "1.0.0", Enabled: true, Persona: "Read-only status agent", DefaultModel: "deepseek-chat", MaxTokens: 2048, Capabilities: []string{"status"}, AllowedTools: []string{"mcp__iot__query_system_overview"}})
+	if err != nil || created.ID != "dynamic" || savedManifest.ID != "dynamic" {
+		t.Fatalf("created=%#v saved=%#v err=%v", created, savedManifest, err)
 	}
 	var types []string
 	result, err := client.StreamChat(context.Background(), ports.AIWorkflowRequest{RunID: "run-1", ConversationID: "conv-1", WorkflowID: "ops-assistant", Question: "status?", MCPToken: "short-mcp-jwt"}, func(event ports.AIWorkflowEvent) error {

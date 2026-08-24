@@ -107,6 +107,39 @@ func (h *HarnessClient) ListWorkflows(ctx context.Context) ([]ports.AIWorkflowPl
 	return items, nil
 }
 
+func (h *HarnessClient) SaveWorkflow(ctx context.Context, manifest ports.AIWorkflowManifest) (ports.AIWorkflowPlugin, error) {
+	var plugin ports.AIWorkflowPlugin
+	payload, err := json.Marshal(manifest)
+	if err != nil {
+		return plugin, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.baseURL+"/v1/plugins", bytes.NewReader(payload))
+	if err != nil {
+		return plugin, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	h.authorizeService(req)
+	res, err := h.client.Do(req)
+	if err != nil {
+		return plugin, fmt.Errorf("save harness workflow: %w", err)
+	}
+	defer res.Body.Close()
+	body, readErr := io.ReadAll(io.LimitReader(res.Body, maxHarnessResponseBytes+1))
+	if readErr != nil {
+		return plugin, readErr
+	}
+	if len(body) > maxHarnessResponseBytes {
+		return plugin, errors.New("harness workflow response exceeds 1 MiB")
+	}
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return plugin, fmt.Errorf("save harness workflow: status %d", res.StatusCode)
+	}
+	if err = json.Unmarshal(body, &plugin); err != nil {
+		return plugin, fmt.Errorf("decode saved harness workflow: %w", err)
+	}
+	return plugin, nil
+}
+
 func (h *HarnessClient) StreamChat(ctx context.Context, in ports.AIWorkflowRequest, emit func(ports.AIWorkflowEvent) error) (ports.AIWorkflowResult, error) {
 	if strings.TrimSpace(in.RunID) == "" || strings.TrimSpace(in.Question) == "" || strings.TrimSpace(in.MCPToken) == "" {
 		return ports.AIWorkflowResult{}, errors.New("runId, question and MCP token are required")

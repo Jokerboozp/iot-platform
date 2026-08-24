@@ -16,27 +16,28 @@ import (
 var ErrNotFound = errors.New("not found")
 
 type Repository struct {
-	mu            sync.RWMutex
-	raw           map[string]model.RawArchiveIndex
-	standard      map[string]model.StandardMessage
-	states        map[string]model.DeviceState
-	stateEvents   []model.DeviceState
-	rules         map[string]model.AlarmRule
-	alarms        map[string]model.Alarm
-	video         map[string]model.VideoAlarmEvent
-	videoMappings map[string]model.VideoCameraMapping
-	ai            map[string]model.AIAnalysis
-	knowledge     map[string]model.KnowledgeDoc
-	replays       map[string]model.ReplayRequest
-	audits        []model.AuditLog
-	aiToolCalls   []model.AIToolCallLog
-	products      map[string]model.Product
-	protocols     map[string]model.ProtocolPackage
-	devices       map[string]model.ManagedDevice
+	mu                sync.RWMutex
+	raw               map[string]model.RawArchiveIndex
+	standard          map[string]model.StandardMessage
+	states            map[string]model.DeviceState
+	stateEvents       []model.DeviceState
+	rules             map[string]model.AlarmRule
+	alarms            map[string]model.Alarm
+	video             map[string]model.VideoAlarmEvent
+	videoMappings     map[string]model.VideoCameraMapping
+	ai                map[string]model.AIAnalysis
+	knowledge         map[string]model.KnowledgeDoc
+	workflowKnowledge map[string]model.WorkflowKnowledgeBinding
+	replays           map[string]model.ReplayRequest
+	audits            []model.AuditLog
+	aiToolCalls       []model.AIToolCallLog
+	products          map[string]model.Product
+	protocols         map[string]model.ProtocolPackage
+	devices           map[string]model.ManagedDevice
 }
 
 func NewRepository() *Repository {
-	return &Repository{raw: map[string]model.RawArchiveIndex{}, standard: map[string]model.StandardMessage{}, states: map[string]model.DeviceState{}, rules: map[string]model.AlarmRule{}, alarms: map[string]model.Alarm{}, video: map[string]model.VideoAlarmEvent{}, videoMappings: map[string]model.VideoCameraMapping{}, ai: map[string]model.AIAnalysis{}, knowledge: map[string]model.KnowledgeDoc{}, replays: map[string]model.ReplayRequest{}, products: map[string]model.Product{}, protocols: map[string]model.ProtocolPackage{}, devices: map[string]model.ManagedDevice{}}
+	return &Repository{raw: map[string]model.RawArchiveIndex{}, standard: map[string]model.StandardMessage{}, states: map[string]model.DeviceState{}, rules: map[string]model.AlarmRule{}, alarms: map[string]model.Alarm{}, video: map[string]model.VideoAlarmEvent{}, videoMappings: map[string]model.VideoCameraMapping{}, ai: map[string]model.AIAnalysis{}, knowledge: map[string]model.KnowledgeDoc{}, workflowKnowledge: map[string]model.WorkflowKnowledgeBinding{}, replays: map[string]model.ReplayRequest{}, products: map[string]model.Product{}, protocols: map[string]model.ProtocolPackage{}, devices: map[string]model.ManagedDevice{}}
 }
 
 func key(parts ...string) string { return strings.Join(parts, "\x00") }
@@ -448,6 +449,40 @@ func (r *Repository) SaveKnowledgeDoc(_ context.Context, v model.KnowledgeDoc) e
 	defer r.mu.Unlock()
 	r.knowledge[key(v.TenantID, v.ID)] = v
 	return nil
+}
+func (r *Repository) ListKnowledgeDocs(_ context.Context, tenant string) ([]model.KnowledgeDoc, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := []model.KnowledgeDoc{}
+	for _, v := range r.knowledge {
+		if v.TenantID == tenant {
+			out = append(out, clone(v))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt == out[j].CreatedAt {
+			return out[i].ID > out[j].ID
+		}
+		return out[i].CreatedAt > out[j].CreatedAt
+	})
+	return out, nil
+}
+
+func (r *Repository) SaveWorkflowKnowledgeBinding(_ context.Context, v model.WorkflowKnowledgeBinding) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.workflowKnowledge[key(v.TenantID, v.WorkflowID)] = clone(v)
+	return nil
+}
+
+func (r *Repository) GetWorkflowKnowledgeBinding(_ context.Context, tenant, workflowID string) (model.WorkflowKnowledgeBinding, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	v, ok := r.workflowKnowledge[key(tenant, workflowID)]
+	if !ok {
+		return model.WorkflowKnowledgeBinding{}, nil
+	}
+	return clone(v), nil
 }
 func (r *Repository) SaveReplay(_ context.Context, v model.ReplayRequest) error {
 	r.mu.Lock()

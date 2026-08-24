@@ -2,39 +2,61 @@ package knowledge
 
 import (
 	"context"
-	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"sync"
 	"unicode"
+
+	"iot-platform/internal/ports"
 )
 
 type Local struct {
 	mu   sync.RWMutex
 	docs map[string][]document
 }
-type document struct{ id, product, text string }
+type document struct {
+	id, documentID, product, category, text string
+	tags                                    []string
+}
 
 func NewLocal() *Local { return &Local{docs: map[string][]document{}} }
 func (k *Local) Index(_ context.Context, tenant, product, id string, data []byte) error {
+	return k.IndexKnowledge(context.Background(), ports.KnowledgeIndexInput{TenantID: tenant, ProductID: product, DocumentID: id, ChunkID: id, Content: data})
+}
+func (k *Local) IndexKnowledge(_ context.Context, in ports.KnowledgeIndexInput) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	k.docs[tenant] = append(k.docs[tenant], document{id, product, string(data)})
+	k.docs[in.TenantID] = append(k.docs[in.TenantID], document{id: in.ChunkID, documentID: in.DocumentID, product: in.ProductID, category: in.Category, tags: append([]string(nil), in.Tags...), text: string(in.Content)})
 	return nil
 }
 func (k *Local) Search(_ context.Context, tenant, q string, limit int) ([]string, error) {
+	hits, err := k.SearchKnowledge(context.Background(), ports.KnowledgeSearchRequest{TenantID: tenant, Question: q, Limit: limit})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(hits))
+	for _, hit := range hits {
+		out = append(out, hit.Content)
+	}
+	return out, nil
+}
+func (k *Local) SearchKnowledge(_ context.Context, in ports.KnowledgeSearchRequest) ([]ports.KnowledgeHit, error) {
 	k.mu.RLock()
 	defer k.mu.RUnlock()
-	if limit <= 0 {
-		limit = 5
+	if in.Limit <= 0 {
+		in.Limit = 5
 	}
-	terms := tokens(q)
+	terms := tokens(in.Question)
 	type hit struct {
 		score int
-		text  string
+		doc   document
 	}
 	hits := []hit{}
-	for _, d := range k.docs[tenant] {
+	for _, d := range k.docs[in.TenantID] {
+		if !matchesAny(d.product, in.ProductIDs) || !matchesAny(d.category, in.Categories) || !containsAll(d.tags, in.Tags) {
+			continue
+		}
 		score := 0
 		lower := strings.ToLower(d.text)
 		for _, t := range terms {
@@ -45,16 +67,21 @@ func (k *Local) Search(_ context.Context, tenant, q string, limit int) ([]string
 			if len([]rune(snippet)) > 800 {
 				snippet = string([]rune(snippet)[:800])
 			}
-			hits = append(hits, hit{score, snippet})
+			d.text = snippet
+			hits = append(hits, hit{score, d})
 		}
 	}
 	sort.Slice(hits, func(i, j int) bool { return hits[i].score > hits[j].score })
-	out := []string{}
+	out := []ports.KnowledgeHit{}
 	for i, h := range hits {
-		if i >= limit {
+		if i >= in.Limit {
 			break
 		}
-		out = append(out, h.text)
+		normalized := math.Min(1, float64(h.score)/float64(max(1, len(terms))))
+		if normalized < in.MinScore {
+			continue
+		}
+		out = append(out, ports.KnowledgeHit{DocumentID: h.doc.documentID, ChunkID: h.doc.id, ProductID: h.doc.product, Category: h.doc.category, Tags: append([]string(nil), h.doc.tags...), Content: h.doc.text, Score: normalized})
 	}
 	return out, nil
 }
@@ -70,4 +97,30 @@ func tokens(s string) []string {
 	return out
 }
 
-var _ = fmt.Sprint
+func matchesAny(value string, allowed []string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	for _, candidate := range allowed {
+		if strings.EqualFold(strings.TrimSpace(value), strings.TrimSpace(candidate)) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAll(values, required []string) bool {
+	for _, wanted := range required {
+		found := false
+		for _, value := range values {
+			if strings.EqualFold(strings.TrimSpace(value), strings.TrimSpace(wanted)) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}

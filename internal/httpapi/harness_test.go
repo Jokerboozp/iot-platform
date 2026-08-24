@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"iot-platform/internal/adapters/knowledge"
 	"iot-platform/internal/adapters/local"
 	"iot-platform/internal/adapters/memory"
 	"iot-platform/internal/auth"
@@ -26,11 +27,28 @@ import (
 type captureWorkflowRuntime struct {
 	mu       sync.Mutex
 	requests []ports.AIWorkflowRequest
+	plugins  []ports.AIWorkflowPlugin
 	fail     bool
 }
 
 func (f *captureWorkflowRuntime) ListWorkflows(context.Context) ([]ports.AIWorkflowPlugin, error) {
-	return []ports.AIWorkflowPlugin{{ID: "ops-assistant", Name: "Ops", Enabled: true}}, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]ports.AIWorkflowPlugin{{ID: "ops-assistant", Name: "Ops", Enabled: true}}, f.plugins...), nil
+}
+
+func (f *captureWorkflowRuntime) SaveWorkflow(_ context.Context, manifest ports.AIWorkflowManifest) (ports.AIWorkflowPlugin, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	knowledge := false
+	for _, tool := range manifest.AllowedTools {
+		if tool == "mcp__iot__query_knowledge_base" {
+			knowledge = true
+		}
+	}
+	plugin := ports.AIWorkflowPlugin{SchemaVersion: manifest.SchemaVersion, ID: manifest.ID, Name: manifest.Name, Description: manifest.Description, Version: manifest.Version, DefaultModel: manifest.DefaultModel, MaxTokens: manifest.MaxTokens, Enabled: manifest.Enabled, Capabilities: manifest.Capabilities, KnowledgeEnabled: knowledge}
+	f.plugins = append(f.plugins, plugin)
+	return plugin, nil
 }
 
 func (f *captureWorkflowRuntime) StreamChat(_ context.Context, in ports.AIWorkflowRequest, emit func(ports.AIWorkflowEvent) error) (ports.AIWorkflowResult, error) {
@@ -86,10 +104,40 @@ func TestHarnessHTTPBridgeAndTenantScopedConversation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	operatorToken, err := api.auth.Issue("operator", "tenant-a", "operator", nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminToken, err := api.auth.Issue("admin", "tenant-a", "admin", nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	workflows := requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/ai/workflows", token, nil, http.StatusOK)
 	if workflows["configured"] != true || workflows["healthy"] != true || workflows["count"].(float64) != 1 {
 		t.Fatalf("unexpected workflows response: %#v", workflows)
+	}
+	manifest := map[string]any{"schemaVersion": 1, "id": "custom-status", "name": "Custom Status", "description": "Status statistics", "version": "1.0.0", "enabled": true, "persona": "Always query the system overview before answering status questions.", "defaultModel": "deepseek-v4-flash", "maxTokens": 2048, "capabilities": []string{"status"}, "allowedTools": []string{"mcp__iot__query_system_overview"}}
+	requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/ai/workflows", operatorToken, manifest, http.StatusForbidden)
+	unsafe := map[string]any{}
+	for key, value := range manifest {
+		unsafe[key] = value
+	}
+	unsafe["id"] = "unsafe-agent"
+	unsafe["allowedTools"] = []string{"mcp__iot__control_device"}
+	requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/ai/workflows", adminToken, unsafe, http.StatusUnprocessableEntity)
+	createdAgent := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/ai/workflows", adminToken, manifest, http.StatusCreated)
+	if createdAgent["id"] != "custom-status" || createdAgent["name"] != "Custom Status" {
+		t.Fatalf("unexpected dynamic Agent: %#v", createdAgent)
+	}
+	defaultBinding := requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/ai/workflows/ops-assistant/knowledge-binding", token, nil, http.StatusOK)
+	if defaultBinding["retrievalMode"] != "auto" || defaultBinding["topK"] != float64(5) {
+		t.Fatalf("unexpected default knowledge binding: %#v", defaultBinding)
+	}
+	requestJSON(t, server.Client(), http.MethodPut, server.URL+"/api/v1/ai/workflows/ops-assistant/knowledge-binding", token, map[string]any{"retrievalMode": "disabled", "topK": 5, "minScore": .2, "noMatchPolicy": "allow-model"}, http.StatusForbidden)
+	savedBinding := requestJSON(t, server.Client(), http.MethodPut, server.URL+"/api/v1/ai/workflows/ops-assistant/knowledge-binding", operatorToken, map[string]any{"productIds": []string{"fire-smoke"}, "categories": []string{"manual"}, "tags": []string{"certified"}, "retrievalMode": "auto", "topK": 3, "minScore": .4, "noMatchPolicy": "allow-model"}, http.StatusOK)
+	if savedBinding["workflowId"] != "ops-assistant" || savedBinding["topK"] != float64(3) {
+		t.Fatalf("unexpected saved knowledge binding: %#v", savedBinding)
 	}
 	chat := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/ai/chat", token, map[string]any{"question": "status?", "workflowId": "ops-assistant", "conversationId": "browser-controlled", "model": "deepseek-chat", "maxTokens": 99999}, http.StatusOK)
 	if chat["answer"] != "safe answer" || !strings.HasPrefix(chat["runId"].(string), "ai_run_") {
@@ -109,6 +157,12 @@ func TestHarnessHTTPBridgeAndTenantScopedConversation(t *testing.T) {
 	if claims.TokenUse != "harness" || claims.RunID != captured.RunID || !claims.HasAudience(auth.HarnessAudience) || len(claims.Scopes) != len(auth.HarnessReadScopes()) {
 		t.Fatalf("unsafe harness token: %#v", claims)
 	}
+	if claims.Knowledge == nil || claims.Knowledge.TopK != 3 || claims.Knowledge.MinScore != .4 || strings.Join(claims.Knowledge.ProductIDs, ",") != "fire-smoke" {
+		t.Fatalf("knowledge binding was not enforced in harness token: %#v", claims.Knowledge)
+	}
+	if !strings.Contains(captured.Question, "平台知识策略") || !strings.Contains(captured.Question, "fire-smoke") {
+		t.Fatalf("knowledge policy was not supplied to harness: %q", captured.Question)
+	}
 	if captured.ConversationID == "browser-controlled" || captured.ConversationID != harnessConversationID("tenant-a", "alice", "browser-controlled") {
 		t.Fatalf("conversation ID was not tenant scoped: %q", captured.ConversationID)
 	}
@@ -117,6 +171,19 @@ func TestHarnessHTTPBridgeAndTenantScopedConversation(t *testing.T) {
 	}
 	if captured.Model != "deepseek-chat" {
 		t.Fatalf("model was not passed to harness: %q", captured.Model)
+	}
+
+	engine.KB = knowledge.NewLocal()
+	if err = engine.KB.(ports.FilteredKnowledgeBase).IndexKnowledge(context.Background(), ports.KnowledgeIndexInput{TenantID: "tenant-a", ProductID: "fire-smoke", Category: "alarm-sop", Tags: []string{"certified"}, DocumentID: "doc-1", ChunkID: "chunk-1", Content: []byte("烟雾 告警 处置 需要 现场 复核")}); err != nil {
+		t.Fatal(err)
+	}
+	requestJSON(t, server.Client(), http.MethodPut, server.URL+"/api/v1/ai/workflows/ops-assistant/knowledge-binding", operatorToken, map[string]any{"productIds": []string{"fire-smoke"}, "categories": []string{"alarm-sop"}, "tags": []string{"certified"}, "retrievalMode": "always", "topK": 3, "minScore": .5, "noMatchPolicy": "require-evidence"}, http.StatusOK)
+	requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/ai/chat", token, map[string]any{"question": "烟雾 告警", "workflowId": "ops-assistant"}, http.StatusOK)
+	runtime.mu.Lock()
+	forced := runtime.requests[len(runtime.requests)-1]
+	runtime.mu.Unlock()
+	if !strings.Contains(forced.Question, "平台强制召回的知识证据") || !strings.Contains(forced.Question, "现场 复核") {
+		t.Fatalf("forced knowledge evidence was not supplied to Harness: %q", forced.Question)
 	}
 
 	streamReq, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/ai/chat/stream", bytes.NewBufferString(`{"question":"stream?","conversationId":"browser-controlled"}`))

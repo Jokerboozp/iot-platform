@@ -79,7 +79,7 @@ async function ndjson(response) {
 
 test('catalog is manifest-driven and exposes capabilities without policy internals', async () => {
   const plugins = await loadPluginCatalog(join(deploymentDir, 'plugins'))
-  assert.deepEqual(plugins.map(plugin => plugin.id), ['alarm-handler', 'ops-assistant'])
+  assert.deepEqual(plugins.map(plugin => plugin.id), ['alarm-handler', 'ops-assistant', 'system-observer'])
   assert.ok(plugins.every(plugin => plugin.capabilities.length > 0))
 
   const { baseUrl } = await startGateway(async () => ({ run: async () => result(), close: async () => {} }))
@@ -90,9 +90,42 @@ test('catalog is manifest-driven and exposes capabilities without policy interna
   })
   assert.equal(response.status, 200)
   const body = await response.json()
-  assert.equal(body.items.length, 2)
+  assert.equal(body.items.length, 3)
   assert.ok(body.items.every(plugin => Array.isArray(plugin.capabilities)))
   assert.ok(body.items.every(plugin => plugin.persona === undefined && plugin.allowedTools === undefined))
+})
+
+test('admin API atomically creates a persistent Agent manifest that is immediately listed', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'iot-harness-dynamic-agent-'))
+  temporaryDirectories.push(root)
+  const seed = JSON.parse(await readFile(join(deploymentDir, 'plugins', 'ops-assistant.json'), 'utf8'))
+  seed.id = 'seed-agent'
+  seed.name = 'Seed Agent'
+  await writeFile(join(root, 'seed-agent.json'), JSON.stringify(seed))
+  const { baseUrl } = await startGateway(async () => ({ run: async () => result(), close: async () => {} }), { pluginDir: root })
+  const manifest = {
+    ...seed,
+    id: 'dynamic-status-agent',
+    name: 'Dynamic Status Agent',
+    description: 'Created from the management UI',
+    allowedTools: ['mcp__iot__query_system_overview'],
+  }
+  const created = await fetch(`${baseUrl}/v1/plugins`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-iot-harness-token': gatewayToken },
+    body: JSON.stringify(manifest),
+  })
+  assert.equal(created.status, 201)
+  assert.equal((await created.json()).id, manifest.id)
+  const persisted = JSON.parse(await readFile(join(root, `${manifest.id}.json`), 'utf8'))
+  assert.equal(persisted.name, manifest.name)
+  const listed = await fetch(`${baseUrl}/v1/plugins`, { headers: { 'x-iot-harness-token': gatewayToken } })
+  assert.deepEqual((await listed.json()).items.map(plugin => plugin.id), ['dynamic-status-agent', 'seed-agent'])
+  const immutable = await fetch(`${baseUrl}/v1/plugins`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-iot-harness-token': gatewayToken },
+    body: JSON.stringify({ ...manifest, id: 'ops-assistant' }),
+  })
+  assert.equal(immutable.status, 409)
 })
 
 test('gateway refuses internal tokens shorter than 32 characters', () => {

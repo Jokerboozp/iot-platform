@@ -6,11 +6,14 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 
+	"iot-platform/internal/adapters/memory"
 	"iot-platform/internal/auth"
 	"iot-platform/internal/core"
+	"iot-platform/internal/model"
 )
 
 func TestHarnessToolSurfaceIsReadOnlyAndScopeChecked(t *testing.T) {
@@ -36,7 +39,7 @@ func TestHarnessToolSurfaceIsReadOnlyAndScopeChecked(t *testing.T) {
 		t.Fatalf("tools/list status=%d body=%s", listResponse.Code, listResponse.Body.String())
 	}
 	body := listResponse.Body.String()
-	for _, tool := range []string{"query_device_latest", "query_alarm_list", "query_property_history", "query_similar_alarms", "query_knowledge_base"} {
+	for _, tool := range []string{"query_system_overview", "query_device_latest", "query_alarm_list", "query_property_history", "query_similar_alarms", "query_knowledge_base"} {
 		if !strings.Contains(body, `"name":"`+tool+`"`) {
 			t.Fatalf("missing read tool %q: %s", tool, body)
 		}
@@ -53,6 +56,39 @@ func TestHarnessToolSurfaceIsReadOnlyAndScopeChecked(t *testing.T) {
 	handler.ServeHTTP(callResponse, call)
 	if callResponse.Code != http.StatusOK || !strings.Contains(callResponse.Body.String(), "not authorized") {
 		t.Fatalf("out-of-scope tool call was not rejected: status=%d body=%s", callResponse.Code, callResponse.Body.String())
+	}
+}
+
+func TestSystemOverviewAggregatesTenantStatistics(t *testing.T) {
+	repo := memory.NewRepository()
+	ctx := context.Background()
+	if err := repo.SaveProduct(ctx, model.Product{ID: "smoke", TenantID: "tenant-a", Status: "ENABLED", Category: "smoke"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveManagedDevice(ctx, model.ManagedDevice{ID: "device-1", TenantID: "tenant-a", ProductID: "smoke", Status: "ENABLED", DeviceRole: "DIRECT"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.UpsertDeviceState(ctx, model.DeviceState{TenantID: "tenant-a", ProductID: "smoke", DeviceID: "device-1", ConnectionStatus: "ONLINE", DataStatus: "FRESH", BusinessStatus: "ONLINE", LastSeenAt: time.Now().UnixMilli()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveRule(ctx, model.AlarmRule{ID: "rule-1", TenantID: "tenant-a", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := repo.UpsertAlarm(ctx, model.Alarm{ID: "alarm-1", TenantID: "tenant-a", DeviceID: "device-1", Status: "ACTIVE", AlarmLevel: "HIGH", Source: "iot", LastTriggeredAt: time.Now().UnixMilli()}); err != nil {
+		t.Fatal(err)
+	}
+	overview, err := buildSystemOverview(ctx, &core.Engine{Repo: repo}, "tenant-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if overview["systemStatus"] != "DEGRADED" {
+		t.Fatalf("unexpected component status: %#v", overview["components"])
+	}
+	devices := overview["devices"].(map[string]any)
+	alarms := overview["alarms"].(map[string]any)
+	products := overview["products"].(map[string]any)
+	if devices["total"] != 1 || devices["reported"] != 1 || products["total"] != 1 || alarms["active"] != 1 || alarms["highRiskActive"] != 1 {
+		t.Fatalf("unexpected overview: %#v", overview)
 	}
 }
 

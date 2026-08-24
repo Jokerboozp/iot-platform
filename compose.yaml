@@ -93,6 +93,8 @@ services:
       IOT_HARNESS_GATEWAY_TOKEN: ${IOT_AI_HARNESS_TOKEN:-local-harness-gateway-token-change-me-now}
       IOT_HARNESS_SESSION_ROOT: /data/sessions
       IOT_HARNESS_WORKSPACE: /data/workspace
+      IOT_HARNESS_PLUGIN_DIR: /data/plugins
+      IOT_HARNESS_PLUGIN_SEED_DIR: /harness/examples/iot-ops-agent/plugins
       IOT_HARNESS_MCP_ALLOWED_ORIGINS: http://platform-api:8080
       IOT_HARNESS_MAX_CONCURRENCY: ${IOT_HARNESS_MAX_CONCURRENCY:-4}
       IOT_HARNESS_MAX_CACHED_CONVERSATIONS: ${IOT_HARNESS_MAX_CACHED_CONVERSATIONS:-8}

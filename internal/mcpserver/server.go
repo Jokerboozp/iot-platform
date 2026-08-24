@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -29,6 +30,14 @@ func NewHarness(engine *core.Engine) http.Handler {
 
 func newServer(engine *core.Engine, harness bool, endpoint string) http.Handler {
 	s := server.NewMCPServer("iot-platform-tools", "1.0.0", server.WithToolCapabilities(false), server.WithInstructions("只读查询消防物联网数据；不能执行 SQL、控制设备或自动启用规则。"), server.WithRecovery())
+	s.AddTool(mcp.NewTool("query_system_overview", mcp.WithDescription("统计当前租户的系统状态、产品、设备、在线状态、告警、规则、摄像头和知识库数量")), func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		tenant, err := tenantForTool(ctx, auth.ScopeQuerySystemOverview, harness)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		v, err := buildSystemOverview(ctx, engine, tenant)
+		return auditedResult(ctx, engine, "query_system_overview", map[string]any{}, v, err)
+	})
 	s.AddTool(mcp.NewTool("query_device_latest", mcp.WithDescription("查询当前租户内某设备的最新在线和业务状态"), mcp.WithString("deviceId", mcp.Required(), mcp.Description("设备 ID"))), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		tenant, err := tenantForTool(ctx, auth.ScopeQueryDeviceLatest, harness)
 		if err != nil {
@@ -73,7 +82,7 @@ func newServer(engine *core.Engine, harness bool, endpoint string) http.Handler 
 		v, err := engine.Repo.ListAlarms(ctx, ports.AlarmFilter{TenantID: tenant, DeviceID: req.GetString("deviceId", ""), Limit: limit})
 		return auditedResult(ctx, engine, "query_similar_alarms", map[string]any{"deviceId": req.GetString("deviceId", "")}, v, err)
 	})
-	s.AddTool(mcp.NewTool("query_knowledge_base", mcp.WithDescription("检索当前租户的设备手册、SOP 和维修知识"), mcp.WithString("question", mcp.Required()), mcp.WithNumber("limit")), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	s.AddTool(mcp.NewTool("query_knowledge_base", mcp.WithDescription("按当前租户、产品、分类和标签检索设备手册、SOP 与维修知识"), mcp.WithString("question", mcp.Required()), mcp.WithArray("productIds", mcp.WithStringItems()), mcp.WithArray("categories", mcp.WithStringItems()), mcp.WithArray("tags", mcp.WithStringItems()), mcp.WithNumber("limit"), mcp.WithNumber("minScore")), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		tenant, err := tenantForTool(ctx, auth.ScopeQueryKnowledgeBase, harness)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
@@ -85,8 +94,28 @@ func newServer(engine *core.Engine, harness bool, endpoint string) http.Handler 
 		if harness {
 			limit = boundedLimit(limit, 5, 20)
 		}
+		products := req.GetStringSlice("productIds", nil)
+		categories := req.GetStringSlice("categories", nil)
+		tags := req.GetStringSlice("tags", nil)
+		minScore := req.GetFloat("minScore", 0)
+		if c, ok := auth.ClaimsFromContext(ctx); ok && c.TokenUse == "harness" && c.Knowledge != nil {
+			products = append([]string(nil), c.Knowledge.ProductIDs...)
+			categories = append([]string(nil), c.Knowledge.Categories...)
+			tags = append([]string(nil), c.Knowledge.Tags...)
+			if c.Knowledge.TopK > 0 && limit > c.Knowledge.TopK {
+				limit = c.Knowledge.TopK
+			}
+			if minScore < c.Knowledge.MinScore {
+				minScore = c.Knowledge.MinScore
+			}
+		}
+		input := map[string]any{"question": req.GetString("question", ""), "productIds": products, "categories": categories, "tags": tags, "limit": limit, "minScore": minScore}
+		if filtered, ok := engine.KB.(ports.FilteredKnowledgeBase); ok {
+			v, searchErr := filtered.SearchKnowledge(ctx, ports.KnowledgeSearchRequest{TenantID: tenant, Question: req.GetString("question", ""), ProductIDs: products, Categories: categories, Tags: tags, Limit: limit, MinScore: minScore})
+			return auditedResult(ctx, engine, "query_knowledge_base", input, v, searchErr)
+		}
 		v, err := engine.KB.Search(ctx, tenant, req.GetString("question", ""), limit)
-		return auditedResult(ctx, engine, "query_knowledge_base", map[string]any{"question": req.GetString("question", "")}, v, err)
+		return auditedResult(ctx, engine, "query_knowledge_base", input, v, err)
 	})
 	if !harness {
 		s.AddTool(mcp.NewTool("create_rule_draft", mcp.WithDescription("把自然语言告警要求转换为禁用状态的规则草稿；必须人工审核后才能启用"), mcp.WithString("inputText", mcp.Required())), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -99,6 +128,167 @@ func newServer(engine *core.Engine, harness bool, endpoint string) http.Handler 
 		})
 	}
 	return server.NewStreamableHTTPServer(s, server.WithStateLess(true), server.WithEndpointPath(endpoint))
+}
+
+func buildSystemOverview(ctx context.Context, engine *core.Engine, tenant string) (map[string]any, error) {
+	products, err := engine.Repo.ListProducts(ctx, tenant)
+	if err != nil {
+		return nil, err
+	}
+	protocols, err := engine.Repo.ListProtocolPackages(ctx, tenant)
+	if err != nil {
+		return nil, err
+	}
+	devices, err := engine.Repo.ListManagedDevices(ctx, tenant)
+	if err != nil {
+		return nil, err
+	}
+	states, err := engine.Repo.ListDeviceStates(ctx, tenant)
+	if err != nil {
+		return nil, err
+	}
+	rules, err := engine.Repo.ListRules(ctx, tenant)
+	if err != nil {
+		return nil, err
+	}
+	alarms, err := engine.Repo.ListAlarms(ctx, ports.AlarmFilter{TenantID: tenant, Limit: 10000})
+	if err != nil {
+		return nil, err
+	}
+	cameras, err := engine.Repo.ListVideoCameraMappings(ctx, tenant)
+	if err != nil {
+		return nil, err
+	}
+	documents, err := engine.Repo.ListKnowledgeDocs(ctx, tenant)
+	if err != nil {
+		return nil, err
+	}
+
+	productStatus, productCategory := map[string]int{}, map[string]int{}
+	for _, item := range products {
+		increment(productStatus, item.Status)
+		increment(productCategory, item.Category)
+	}
+	protocolStatus := map[string]int{}
+	for _, item := range protocols {
+		increment(protocolStatus, item.Status)
+	}
+	deviceStatus, deviceRole := map[string]int{}, map[string]int{}
+	registered := make(map[string]struct{}, len(devices))
+	autoRegistered := 0
+	for _, item := range devices {
+		registered[item.ID] = struct{}{}
+		increment(deviceStatus, item.Status)
+		increment(deviceRole, item.DeviceRole)
+		if item.AutoRegistered {
+			autoRegistered++
+		}
+	}
+	connectionStatus, dataStatus, businessStatus := map[string]int{}, map[string]int{}, map[string]int{}
+	reported, discovered, latestSeenAt := 0, 0, int64(0)
+	for _, item := range states {
+		if _, ok := registered[item.DeviceID]; !ok {
+			discovered++
+			continue
+		}
+		reported++
+		increment(connectionStatus, item.ConnectionStatus)
+		increment(dataStatus, item.DataStatus)
+		increment(businessStatus, item.BusinessStatus)
+		if item.LastSeenAt > latestSeenAt {
+			latestSeenAt = item.LastSeenAt
+		}
+	}
+	ruleEnabled := 0
+	for _, item := range rules {
+		if item.Enabled {
+			ruleEnabled++
+		}
+	}
+	alarmStatus, alarmLevel, alarmSource := map[string]int{}, map[string]int{}, map[string]int{}
+	active, highActive, recent24h := 0, 0, 0
+	cutoff := time.Now().Add(-24 * time.Hour).UnixMilli()
+	for _, item := range alarms {
+		increment(alarmStatus, item.Status)
+		increment(alarmLevel, item.AlarmLevel)
+		increment(alarmSource, item.Source)
+		if item.Status == "ACTIVE" {
+			active++
+			if item.AlarmLevel == "HIGH" || item.AlarmLevel == "CRITICAL" || item.AlarmLevel == "EMERGENCY" {
+				highActive++
+			}
+		}
+		if item.LastTriggeredAt >= cutoff {
+			recent24h++
+		}
+	}
+	cameraEnabled, previewReady := 0, 0
+	for _, item := range cameras {
+		if item.Enabled {
+			cameraEnabled++
+		}
+		if item.Enabled && strings.TrimSpace(item.StreamURL) != "" {
+			previewReady++
+		}
+	}
+	indexedDocs, chunks := 0, 0
+	for _, item := range documents {
+		if item.Status == "INDEXED" {
+			indexedDocs++
+		}
+		switch value := item.Metadata["chunks"].(type) {
+		case int:
+			chunks += value
+		case float64:
+			chunks += int(value)
+		}
+	}
+	components := map[string]string{
+		"repository": componentHealth(ctx, engine.Repo),
+		"archive":    componentHealth(ctx, engine.Archive),
+		"eventBus":   componentHealth(ctx, engine.Bus),
+		"realtime":   componentHealth(ctx, engine.Realtime),
+		"knowledge":  componentHealth(ctx, engine.KB),
+		"aiWorkflow": componentHealth(ctx, engine.AIWorkflows),
+	}
+	status := "RUNNING"
+	for name, value := range components {
+		if name != "knowledge" && name != "aiWorkflow" && value != "HEALTHY" {
+			status = "DEGRADED"
+		}
+	}
+	return map[string]any{
+		"tenantId": tenant, "generatedAt": time.Now().UnixMilli(), "systemStatus": status, "components": components,
+		"products":         map[string]any{"total": len(products), "byStatus": productStatus, "byCategory": productCategory},
+		"protocolPackages": map[string]any{"total": len(protocols), "byStatus": protocolStatus},
+		"devices":          map[string]any{"total": len(devices), "byStatus": deviceStatus, "byRole": deviceRole, "autoRegistered": autoRegistered, "reported": reported, "neverReported": max(0, len(devices)-reported), "discoveredUnregistered": discovered, "connectionStatus": connectionStatus, "dataStatus": dataStatus, "businessStatus": businessStatus, "latestSeenAt": latestSeenAt},
+		"alarms":           map[string]any{"loaded": len(alarms), "truncated": len(alarms) == 10000, "active": active, "highRiskActive": highActive, "triggeredLast24h": recent24h, "byStatus": alarmStatus, "byLevel": alarmLevel, "bySource": alarmSource},
+		"rules":            map[string]any{"total": len(rules), "enabled": ruleEnabled, "disabled": len(rules) - ruleEnabled},
+		"cameras":          map[string]any{"total": len(cameras), "enabled": cameraEnabled, "streamConfigured": previewReady},
+		"knowledge":        map[string]any{"documents": len(documents), "indexed": indexedDocs, "chunks": chunks},
+	}, nil
+}
+
+type healthChecker interface{ Health(context.Context) error }
+
+func componentHealth(ctx context.Context, component healthChecker) string {
+	if component == nil {
+		return "DISABLED"
+	}
+	healthCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := component.Health(healthCtx); err != nil {
+		return "UNAVAILABLE"
+	}
+	return "HEALTHY"
+}
+
+func increment(counts map[string]int, value string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		value = "UNKNOWN"
+	}
+	counts[value]++
 }
 
 func tenantForTool(ctx context.Context, scope string, harness bool) (string, error) {
