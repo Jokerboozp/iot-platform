@@ -37,6 +37,9 @@ type Repository interface {
 	GetRawIndex(context.Context, string, string) (model.RawArchiveIndex, error)
 	ListRawIndexes(context.Context, RawFilter) ([]model.RawArchiveIndex, error)
 	SaveStandardMessage(context.Context, model.StandardMessage) error
+	SaveStandardMessageIfAbsent(context.Context, model.StandardMessage) (bool, error)
+	ClaimStandardMessage(context.Context, model.StandardMessage) (shouldProcess bool, created bool, err error)
+	MarkStandardMessageProcessed(context.Context, string, string) error
 	GetStandardMessageByRaw(context.Context, string, string) (model.StandardMessage, error)
 	GetLatestMessage(context.Context, string, string) (model.StandardMessage, error)
 	PropertyHistory(context.Context, string, string, string, int64, int64, int) ([]map[string]any, error)
@@ -47,6 +50,10 @@ type Repository interface {
 	SaveRule(context.Context, model.AlarmRule) error
 	ListRules(context.Context, string) ([]model.AlarmRule, error)
 	DeleteRule(context.Context, string, string) error
+	SaveRulePending(context.Context, string, string, string, int64) error
+	GetRulePending(context.Context, string, string, string) (int64, bool, error)
+	DeleteRulePending(context.Context, string, string, string) error
+	DeleteRulePendings(context.Context, string, string) error
 	UpsertAlarm(context.Context, model.Alarm) (model.Alarm, bool, error)
 	GetAlarm(context.Context, string, string) (model.Alarm, error)
 	ListAlarms(context.Context, AlarmFilter) ([]model.Alarm, error)

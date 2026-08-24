@@ -295,6 +295,16 @@ type AlarmRule struct {
 	UpdatedAt       int64           `json:"updatedAt"`
 }
 
+// RulePending records the first observation of a duration-based rule match.
+// It is persisted so a process restart does not silently reset the timer.
+type RulePending struct {
+	TenantID  string `json:"tenantId"`
+	RuleID    string `json:"ruleId"`
+	DeviceID  string `json:"deviceId"`
+	Since     int64  `json:"since"`
+	UpdatedAt int64  `json:"updatedAt"`
+}
+
 type UIActionEvent struct {
 	ID          string     `json:"id"`
 	TenantID    string     `json:"tenantId"`
@@ -309,6 +319,7 @@ type Alarm struct {
 	ID               string         `json:"alarmId"`
 	TenantID         string         `json:"tenantId"`
 	RuleID           string         `json:"ruleId"`
+	TriggerID        string         `json:"triggerId,omitempty"`
 	DeviceID         string         `json:"deviceId"`
 	DeviceName       string         `json:"deviceName,omitempty"`
 	AlarmType        string         `json:"alarmType"`

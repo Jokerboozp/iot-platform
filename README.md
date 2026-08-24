@@ -43,6 +43,14 @@ http://localhost:8080
 密码：admin123
 ```
 
+内置管理员只能为白名单中的租户签发管理员 Token。默认白名单只有 `tenant_001`；确需让内置管理员管理多个租户时，必须显式配置：
+
+```dotenv
+IOT_ADMIN_TENANTS=tenant_001,tenant_002
+```
+
+登录请求中的 `tenantId` 不在白名单时会被拒绝。外部目录认证使用目录返回的租户，不信任请求体中的租户字段。
+
 查看日志：
 
 ```bash
@@ -499,7 +507,14 @@ X-Timestamp: Unix 秒
 X-Signature: hex(HMAC-SHA256(secret, timestamp + rawBody))
 ```
 
-时间戳允许误差 5 分钟，`eventId` 用于幂等。
+时间戳允许误差 5 分钟，`eventId` 用于幂等。生产环境还必须把平台绑定到租户，避免签名平台代发其他租户告警：
+
+```dotenv
+IOT_VIDEO_PLATFORM_SECRETS=video-platform-1:<platform-secret>
+IOT_VIDEO_PLATFORM_TENANTS=video-platform-1:tenant_001
+```
+
+平台绑定不匹配的 `tenantId` 会被拒绝；生产 Webhook 的 `cameraId` 还必须属于该租户且处于启用状态。MQTT 视频和设备状态消息同样以租户范围 Topic 为准，不信任 Payload 中的租户字段。
 
 ## API 快速验证
 

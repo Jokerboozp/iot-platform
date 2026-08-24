@@ -2,6 +2,7 @@ package redisadapter
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,9 +22,14 @@ type Repository struct {
 func New(base ports.Repository, addr, password string) *Repository {
 	return &Repository{Repository: base, client: redis.NewClient(&redis.Options{Addr: addr, Password: password})}
 }
-func stateKey(tenant, device string) string { return fmt.Sprintf("device:state:%s:%s", tenant, device) }
+func cacheSegment(value string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(value))
+}
+func stateKey(tenant, device string) string {
+	return fmt.Sprintf("device:state:%s:%s", cacheSegment(tenant), cacheSegment(device))
+}
 func latestKey(tenant, device string) string {
-	return fmt.Sprintf("device:latest:%s:%s", tenant, device)
+	return fmt.Sprintf("device:latest:%s:%s", cacheSegment(tenant), cacheSegment(device))
 }
 func (r *Repository) UpsertDeviceState(ctx context.Context, v model.DeviceState) error {
 	if err := r.Repository.UpsertDeviceState(ctx, v); err != nil {
@@ -33,19 +39,32 @@ func (r *Repository) UpsertDeviceState(ctx context.Context, v model.DeviceState)
 	pipe := r.client.TxPipeline()
 	pipe.Set(ctx, stateKey(v.TenantID, v.DeviceID), b, 0)
 	if v.BusinessStatus == "ONLINE" {
-		pipe.SAdd(ctx, "device:online:"+v.TenantID, v.DeviceID)
+		pipe.SAdd(ctx, "device:online:"+cacheSegment(v.TenantID), v.DeviceID)
 	} else {
-		pipe.SRem(ctx, "device:online:"+v.TenantID, v.DeviceID)
+		pipe.SRem(ctx, "device:online:"+cacheSegment(v.TenantID), v.DeviceID)
 	}
 	_, err := pipe.Exec(ctx)
 	return err
 }
 func (r *Repository) SaveStandardMessage(ctx context.Context, v model.StandardMessage) error {
-	if err := r.Repository.SaveStandardMessage(ctx, v); err != nil {
-		return err
+	_, err := r.SaveStandardMessageIfAbsent(ctx, v)
+	return err
+}
+func (r *Repository) SaveStandardMessageIfAbsent(ctx context.Context, v model.StandardMessage) (bool, error) {
+	created, err := r.Repository.SaveStandardMessageIfAbsent(ctx, v)
+	if err != nil || !created {
+		return created, err
 	}
 	b, _ := json.Marshal(v)
-	return r.client.Set(ctx, latestKey(v.TenantID, v.DeviceID), b, 7*24*time.Hour).Err()
+	return true, r.client.Set(ctx, latestKey(v.TenantID, v.DeviceID), b, 7*24*time.Hour).Err()
+}
+func (r *Repository) ClaimStandardMessage(ctx context.Context, v model.StandardMessage) (bool, bool, error) {
+	shouldProcess, created, err := r.Repository.ClaimStandardMessage(ctx, v)
+	if err != nil || !shouldProcess {
+		return shouldProcess, created, err
+	}
+	b, _ := json.Marshal(v)
+	return true, created, r.client.Set(ctx, latestKey(v.TenantID, v.DeviceID), b, 7*24*time.Hour).Err()
 }
 func (r *Repository) GetLatestMessage(ctx context.Context, tenant, device string) (model.StandardMessage, error) {
 	var v model.StandardMessage
@@ -56,7 +75,7 @@ func (r *Repository) GetLatestMessage(ctx context.Context, tenant, device string
 	return r.Repository.GetLatestMessage(ctx, tenant, device)
 }
 func alarmKey(v model.Alarm) string {
-	return fmt.Sprintf("alarm:active:%s:%s:%s", v.TenantID, v.DeviceID, v.RuleID)
+	return fmt.Sprintf("alarm:active:%s:%s:%s", cacheSegment(v.TenantID), cacheSegment(v.DeviceID), cacheSegment(v.RuleID))
 }
 func (r *Repository) UpsertAlarm(ctx context.Context, v model.Alarm) (model.Alarm, bool, error) {
 	a, created, err := r.Repository.UpsertAlarm(ctx, v)

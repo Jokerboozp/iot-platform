@@ -49,3 +49,19 @@ func TestHarnessConfiguration(t *testing.T) {
 		t.Fatalf("unexpected harness configuration: %#v", cfg)
 	}
 }
+
+func TestVideoPlatformTenantBindings(t *testing.T) {
+	t.Setenv("IOT_VIDEO_PLATFORM_TENANTS", "video-a:tenant-a,video-b:tenant-b")
+	cfg := Load()
+	if cfg.VideoPlatformTenants["video-a"] != "tenant-a" || cfg.VideoPlatformTenants["video-b"] != "tenant-b" {
+		t.Fatalf("unexpected video tenant bindings: %#v", cfg.VideoPlatformTenants)
+	}
+}
+
+func TestAdminTenantAllowlist(t *testing.T) {
+	t.Setenv("IOT_ADMIN_TENANTS", "tenant-a, tenant-b")
+	cfg := Load()
+	if len(cfg.AdminTenants) != 2 || cfg.AdminTenants[0] != "tenant-a" || cfg.AdminTenants[1] != "tenant-b" {
+		t.Fatalf("unexpected admin tenant allowlist: %#v", cfg.AdminTenants)
+	}
+}

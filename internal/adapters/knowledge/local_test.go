@@ -26,3 +26,17 @@ func TestLocalKnowledgeAppliesWorkflowMetadataFilters(t *testing.T) {
 		t.Fatalf("unexpected filtered hits: %#v", hits)
 	}
 }
+
+func TestLocalKnowledgeSupportsSingleCharacterChineseQueries(t *testing.T) {
+	index := NewLocal()
+	if err := index.IndexKnowledge(context.Background(), ports.KnowledgeIndexInput{TenantID: "tenant-a", DocumentID: "doc-water", ChunkID: "chunk-water", Content: []byte("水压异常处置")}); err != nil {
+		t.Fatal(err)
+	}
+	hits, err := index.SearchKnowledge(context.Background(), ports.KnowledgeSearchRequest{TenantID: "tenant-a", Question: "水", Limit: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 || hits[0].DocumentID != "doc-water" {
+		t.Fatalf("single-character query returned %#v", hits)
+	}
+}

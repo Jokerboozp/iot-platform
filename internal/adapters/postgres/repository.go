@@ -225,11 +225,34 @@ func (r *Repository) ListRawIndexes(ctx context.Context, f ports.RawFilter) ([]m
 	return out, rows.Err()
 }
 func (r *Repository) SaveStandardMessage(ctx context.Context, v model.StandardMessage) error {
+	_, err := r.SaveStandardMessageIfAbsent(ctx, v)
+	return err
+}
+func (r *Repository) SaveStandardMessageIfAbsent(ctx context.Context, v model.StandardMessage) (bool, error) {
 	body, _ := json.Marshal(v)
 	props, _ := json.Marshal(v.Properties)
 	event, _ := json.Marshal(v.Event)
 	tags, _ := json.Marshal(v.Tags)
-	_, err := r.pool.Exec(ctx, `INSERT INTO standard_message(tenant_id,message_id,raw_message_id,product_id,device_id,message_type,ts,properties,event,tags,body) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT DO NOTHING`, v.TenantID, v.MessageID, v.RawMessageID, v.ProductID, v.DeviceID, v.MessageType, v.Timestamp, props, event, tags, body)
+	tag, err := r.pool.Exec(ctx, `INSERT INTO standard_message(tenant_id,message_id,raw_message_id,product_id,device_id,message_type,ts,properties,event,tags,body) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT DO NOTHING`, v.TenantID, v.MessageID, v.RawMessageID, v.ProductID, v.DeviceID, v.MessageType, v.Timestamp, props, event, tags, body)
+	return tag.RowsAffected() == 1, err
+}
+func (r *Repository) ClaimStandardMessage(ctx context.Context, v model.StandardMessage) (bool, bool, error) {
+	created, err := r.SaveStandardMessageIfAbsent(ctx, v)
+	if err != nil || created {
+		return created, created, err
+	}
+	var processed int64
+	err = r.pool.QueryRow(ctx, `SELECT processed_at FROM standard_message WHERE tenant_id=$1 AND message_id=$2`, v.TenantID, v.MessageID).Scan(&processed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, false, ErrNotFound
+	}
+	return processed == 0, false, err
+}
+func (r *Repository) MarkStandardMessageProcessed(ctx context.Context, tenant, messageID string) error {
+	tag, err := r.pool.Exec(ctx, `UPDATE standard_message SET processed_at=1 WHERE tenant_id=$1 AND message_id=$2`, tenant, messageID)
+	if err == nil && tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
 	return err
 }
 func (r *Repository) getStandard(ctx context.Context, query string, args ...any) (model.StandardMessage, error) {
@@ -350,6 +373,26 @@ func (r *Repository) DeleteRule(ctx context.Context, tenant, id string) error {
 	}
 	return err
 }
+func (r *Repository) SaveRulePending(ctx context.Context, tenant, ruleID, deviceID string, since int64) error {
+	_, err := r.pool.Exec(ctx, `INSERT INTO alarm_rule_pending(tenant_id,rule_id,device_id,since_at) VALUES($1,$2,$3,$4) ON CONFLICT(tenant_id,rule_id,device_id) DO UPDATE SET since_at=LEAST(alarm_rule_pending.since_at, EXCLUDED.since_at), updated_at=now()`, tenant, ruleID, deviceID, since)
+	return err
+}
+func (r *Repository) GetRulePending(ctx context.Context, tenant, ruleID, deviceID string) (int64, bool, error) {
+	var since int64
+	err := r.pool.QueryRow(ctx, `SELECT since_at FROM alarm_rule_pending WHERE tenant_id=$1 AND rule_id=$2 AND device_id=$3`, tenant, ruleID, deviceID).Scan(&since)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	return since, err == nil, err
+}
+func (r *Repository) DeleteRulePending(ctx context.Context, tenant, ruleID, deviceID string) error {
+	_, err := r.pool.Exec(ctx, `DELETE FROM alarm_rule_pending WHERE tenant_id=$1 AND rule_id=$2 AND device_id=$3`, tenant, ruleID, deviceID)
+	return err
+}
+func (r *Repository) DeleteRulePendings(ctx context.Context, tenant, ruleID string) error {
+	_, err := r.pool.Exec(ctx, `DELETE FROM alarm_rule_pending WHERE tenant_id=$1 AND rule_id=$2`, tenant, ruleID)
+	return err
+}
 func (r *Repository) UpsertAlarm(ctx context.Context, v model.Alarm) (model.Alarm, bool, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -362,6 +405,12 @@ func (r *Repository) UpsertAlarm(ctx context.Context, v model.Alarm) (model.Alar
 		var old model.Alarm
 		if err = json.Unmarshal(body, &old); err != nil {
 			return v, false, err
+		}
+		if v.TriggerID != "" && old.TriggerID == v.TriggerID {
+			if err = tx.Commit(ctx); err != nil {
+				return v, false, err
+			}
+			return old, false, nil
 		}
 		old.LastTriggeredAt = v.LastTriggeredAt
 		old.TriggerCount++

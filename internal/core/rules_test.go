@@ -16,6 +16,15 @@ func TestMatchRuleAll(t *testing.T) {
 		t.Fatal("unexpected match")
 	}
 }
+
+func TestMatchRuleEventPath(t *testing.T) {
+	rule := model.AlarmRule{TenantID: "t", Enabled: true, Conditions: []model.RuleCondition{{Field: "event.smoke", Operator: "eq", Value: true}}}
+	msg := model.StandardMessage{TenantID: "t", Event: map[string]any{"smoke": true}}
+	if !MatchRule(rule, msg) {
+		t.Fatal("event-prefixed condition should match the event field")
+	}
+}
+
 func TestAlarmTopicSanitizesSegments(t *testing.T) {
 	a := model.Alarm{CityCode: "city", DistrictCode: "district/escape", BuildingID: "A", DeviceType: "smoke", DeviceID: "d"}
 	if got := a.MQTTTopic("raised"); got != "/iot/alarm/raised/city/district_escape/A/smoke/d" {

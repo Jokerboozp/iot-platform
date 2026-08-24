@@ -44,6 +44,7 @@ func TestHTTPWorkflow(t *testing.T) {
 	cfg.DevMode = true
 	cfg.JWTSecret = "test-secret-at-least-32-characters"
 	cfg.CORSAllowedOrigins = []string{"http://localhost:5173"}
+	cfg.AdminTenants = []string{"tenant_001", "tenant_002", "tenant_video_other"}
 	api := New(cfg, engine, engine.Metrics.(*metrics.Registry), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if _, ok := api.Handler().(*gin.Engine); !ok {
 		t.Fatalf("HTTP server is not backed by Gin: %T", api.Handler())

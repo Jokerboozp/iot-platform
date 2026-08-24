@@ -34,9 +34,10 @@ CREATE TABLE IF NOT EXISTS standard_message (
   tenant_id text NOT NULL, message_id text NOT NULL, raw_message_id text NOT NULL,
   product_id text NOT NULL, device_id text NOT NULL, message_type text NOT NULL,
   ts bigint NOT NULL, properties jsonb NOT NULL DEFAULT '{}', event jsonb NOT NULL DEFAULT '{}',
-  tags jsonb NOT NULL DEFAULT '{}', body jsonb NOT NULL,
+  tags jsonb NOT NULL DEFAULT '{}', body jsonb NOT NULL, processed_at bigint NOT NULL DEFAULT 0,
   PRIMARY KEY (tenant_id, message_id)
 );
+ALTER TABLE standard_message ADD COLUMN IF NOT EXISTS processed_at bigint NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS standard_message_device_time_idx ON standard_message(tenant_id, device_id, ts DESC);
 CREATE INDEX IF NOT EXISTS standard_message_raw_idx ON standard_message(tenant_id, raw_message_id);
 
@@ -54,6 +55,11 @@ CREATE TABLE IF NOT EXISTS device_state_event (
 CREATE TABLE IF NOT EXISTS alarm_rule (
   tenant_id text NOT NULL, id text NOT NULL, product_id text, enabled boolean NOT NULL,
   body jsonb NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (tenant_id, id)
+);
+CREATE TABLE IF NOT EXISTS alarm_rule_pending (
+  tenant_id text NOT NULL, rule_id text NOT NULL, device_id text NOT NULL,
+  since_at bigint NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, rule_id, device_id)
 );
 CREATE TABLE IF NOT EXISTS alarm_record (
   tenant_id text NOT NULL, id text NOT NULL, rule_id text NOT NULL, device_id text NOT NULL,

@@ -125,11 +125,21 @@ func MatchConditions(conditions []model.RuleCondition, msg model.StandardMessage
 	return true
 }
 func fieldValue(msg model.StandardMessage, path string) (any, bool) {
-	path = strings.TrimPrefix(path, "properties.")
+	if strings.HasPrefix(path, "properties.") {
+		v, ok := msg.Properties[strings.TrimPrefix(path, "properties.")]
+		return v, ok
+	}
+	if strings.HasPrefix(path, "tags.") {
+		v, ok := msg.Tags[strings.TrimPrefix(path, "tags.")]
+		return v, ok
+	}
+	if strings.HasPrefix(path, "event.") {
+		v, ok := msg.Event[strings.TrimPrefix(path, "event.")]
+		return v, ok
+	}
 	if v, ok := msg.Properties[path]; ok {
 		return v, true
 	}
-	path = strings.TrimPrefix(path, "tags.")
 	if v, ok := msg.Tags[path]; ok {
 		return v, true
 	}

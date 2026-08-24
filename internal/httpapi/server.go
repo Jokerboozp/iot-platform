@@ -145,8 +145,9 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if decode(w, r, &in) != nil {
 		return
 	}
+	builtinAdmin := in.Username == s.cfg.AdminUser && in.Password == s.cfg.AdminPassword
 	role := "admin"
-	if in.Username != s.cfg.AdminUser || in.Password != s.cfg.AdminPassword {
+	if !builtinAdmin {
 		if s.engine.Catalog == nil {
 			problem(w, 401, "invalid credentials")
 			return
@@ -159,8 +160,13 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		in.TenantID = external.TenantID
 		role = external.Role
 	}
+	in.TenantID = strings.TrimSpace(in.TenantID)
 	if in.TenantID == "" {
 		in.TenantID = "tenant_001"
+	}
+	if builtinAdmin && !adminTenantAllowed(s.cfg.AdminTenants, in.TenantID) {
+		problem(w, http.StatusForbidden, "admin tenant is not allowed")
+		return
 	}
 	token, _ := s.auth.Issue(in.Username, in.TenantID, role, nil, 8*time.Hour)
 	write(w, 200, map[string]any{"accessToken": token, "expiresIn": 28800, "tenantId": in.TenantID, "role": role})
@@ -873,6 +879,7 @@ func (s *Server) saveRule(w http.ResponseWriter, r *http.Request) {
 	c := claims(r)
 	v.TenantID = c.TenantID
 	status := http.StatusCreated
+	wasEnabled := false
 	if id := r.PathValue("id"); id != "" {
 		status = http.StatusOK
 		v.ID = id
@@ -884,6 +891,7 @@ func (s *Server) saveRule(w http.ResponseWriter, r *http.Request) {
 		found := false
 		for _, current := range items {
 			if current.ID == id {
+				wasEnabled = current.Enabled
 				v.CreatedAt = current.CreatedAt
 				v.Version = current.Version + 1
 				found = true
@@ -924,6 +932,12 @@ func (s *Server) saveRule(w http.ResponseWriter, r *http.Request) {
 		write(w, 409, map[string]any{"type": "rule-conflict", "detail": "rule conflicts require explicit confirmation", "conflicts": conflicts})
 		return
 	}
+	if status == http.StatusOK && wasEnabled && !v.Enabled {
+		if err := s.engine.DisableRule(r.Context(), c.TenantID, v.ID); err != nil {
+			problem(w, 500, err.Error())
+			return
+		}
+	}
 	if err := s.engine.Repo.SaveRule(r.Context(), v); err != nil {
 		problem(w, 500, err.Error())
 		return
@@ -933,7 +947,7 @@ func (s *Server) saveRule(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) deleteRule(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := s.engine.Repo.DeleteRule(r.Context(), claims(r).TenantID, id); err != nil {
+	if err := s.engine.DeleteRule(r.Context(), claims(r).TenantID, id); err != nil {
 		problem(w, 404, "rule not found")
 		return
 	}
@@ -1911,6 +1925,11 @@ func (s *Server) videoWebhook(w http.ResponseWriter, r *http.Request) {
 		problem(w, 401, "invalid signature")
 		return
 	}
+	expectedTenant := strings.TrimSpace(s.cfg.VideoPlatformTenants[platform])
+	if expectedTenant == "" && !s.cfg.DevMode {
+		problem(w, 401, "video platform tenant binding is not configured")
+		return
+	}
 	ts, _ := strconv.ParseInt(timestamp, 10, 64)
 	if secret != "" && abs(time.Now().Unix()-ts) > 300 {
 		problem(w, 401, "stale timestamp")
@@ -1920,6 +1939,20 @@ func (s *Server) videoWebhook(w http.ResponseWriter, r *http.Request) {
 	if err = json.Unmarshal(body, &v); err != nil {
 		problem(w, 400, "invalid JSON")
 		return
+	}
+	if expectedTenant != "" {
+		if v.TenantID != "" && v.TenantID != expectedTenant {
+			problem(w, 403, "video platform is not bound to this tenant")
+			return
+		}
+		v.TenantID = expectedTenant
+	}
+	if !s.cfg.DevMode {
+		mapping, mappingErr := s.engine.Repo.GetVideoCameraMapping(r.Context(), v.TenantID, v.CameraID)
+		if mappingErr != nil || !mapping.Enabled {
+			problem(w, 403, "camera is not bound to this tenant or is disabled")
+			return
+		}
 	}
 	a, created, err := s.engine.IngestVideo(r.Context(), v)
 	if err != nil {
@@ -2246,6 +2279,18 @@ func tenant(c auth.Claims, requested string) string {
 		return c.TenantID
 	}
 	return c.TenantID
+}
+func adminTenantAllowed(configured []string, requested string) bool {
+	if len(configured) == 0 {
+		configured = []string{"tenant_001"}
+	}
+	requested = strings.TrimSpace(requested)
+	for _, tenantID := range configured {
+		if strings.TrimSpace(tenantID) == requested {
+			return true
+		}
+	}
+	return false
 }
 func decode(w http.ResponseWriter, r *http.Request, v any) error {
 	r.Body = http.MaxBytesReader(w, r.Body, 10<<20)

@@ -19,6 +19,8 @@ type Repository struct {
 	mu                sync.RWMutex
 	raw               map[string]model.RawArchiveIndex
 	standard          map[string]model.StandardMessage
+	standardProcessed map[string]bool
+	rulePending       map[string]int64
 	states            map[string]model.DeviceState
 	stateEvents       []model.DeviceState
 	rules             map[string]model.AlarmRule
@@ -37,7 +39,7 @@ type Repository struct {
 }
 
 func NewRepository() *Repository {
-	return &Repository{raw: map[string]model.RawArchiveIndex{}, standard: map[string]model.StandardMessage{}, states: map[string]model.DeviceState{}, rules: map[string]model.AlarmRule{}, alarms: map[string]model.Alarm{}, video: map[string]model.VideoAlarmEvent{}, videoMappings: map[string]model.VideoCameraMapping{}, ai: map[string]model.AIAnalysis{}, knowledge: map[string]model.KnowledgeDoc{}, workflowKnowledge: map[string]model.WorkflowKnowledgeBinding{}, replays: map[string]model.ReplayRequest{}, products: map[string]model.Product{}, protocols: map[string]model.ProtocolPackage{}, devices: map[string]model.ManagedDevice{}}
+	return &Repository{raw: map[string]model.RawArchiveIndex{}, standard: map[string]model.StandardMessage{}, standardProcessed: map[string]bool{}, rulePending: map[string]int64{}, states: map[string]model.DeviceState{}, rules: map[string]model.AlarmRule{}, alarms: map[string]model.Alarm{}, video: map[string]model.VideoAlarmEvent{}, videoMappings: map[string]model.VideoCameraMapping{}, ai: map[string]model.AIAnalysis{}, knowledge: map[string]model.KnowledgeDoc{}, workflowKnowledge: map[string]model.WorkflowKnowledgeBinding{}, replays: map[string]model.ReplayRequest{}, products: map[string]model.Product{}, protocols: map[string]model.ProtocolPackage{}, devices: map[string]model.ManagedDevice{}}
 }
 
 func key(parts ...string) string { return strings.Join(parts, "\x00") }
@@ -214,10 +216,40 @@ func page[T any](v []T, offset, limit int) []T {
 	}
 	return v[offset:end]
 }
-func (r *Repository) SaveStandardMessage(_ context.Context, v model.StandardMessage) error {
+func (r *Repository) SaveStandardMessage(ctx context.Context, v model.StandardMessage) error {
+	_, err := r.SaveStandardMessageIfAbsent(ctx, v)
+	return err
+}
+func (r *Repository) SaveStandardMessageIfAbsent(_ context.Context, v model.StandardMessage) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.standard[key(v.TenantID, v.MessageID)] = v
+	k := key(v.TenantID, v.MessageID)
+	if _, exists := r.standard[k]; exists {
+		return false, nil
+	}
+	r.standard[k] = v
+	r.standardProcessed[k] = false
+	return true, nil
+}
+func (r *Repository) ClaimStandardMessage(_ context.Context, v model.StandardMessage) (bool, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	k := key(v.TenantID, v.MessageID)
+	if _, exists := r.standard[k]; !exists {
+		r.standard[k] = v
+		r.standardProcessed[k] = false
+		return true, true, nil
+	}
+	return !r.standardProcessed[k], false, nil
+}
+func (r *Repository) MarkStandardMessageProcessed(_ context.Context, tenant, messageID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	k := key(tenant, messageID)
+	if _, exists := r.standard[k]; !exists {
+		return ErrNotFound
+	}
+	r.standardProcessed[k] = true
 	return nil
 }
 func (r *Repository) GetStandardMessageByRaw(_ context.Context, tenant, rawID string) (model.StandardMessage, error) {
@@ -324,11 +356,47 @@ func (r *Repository) DeleteRule(_ context.Context, tenant, id string) error {
 	delete(r.rules, k)
 	return nil
 }
+func (r *Repository) SaveRulePending(_ context.Context, tenant, ruleID, deviceID string, since int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	k := key(tenant, ruleID, deviceID)
+	if current, ok := r.rulePending[k]; ok && current <= since {
+		return nil
+	}
+	r.rulePending[k] = since
+	return nil
+}
+func (r *Repository) GetRulePending(_ context.Context, tenant, ruleID, deviceID string) (int64, bool, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	since, ok := r.rulePending[key(tenant, ruleID, deviceID)]
+	return since, ok, nil
+}
+func (r *Repository) DeleteRulePending(_ context.Context, tenant, ruleID, deviceID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.rulePending, key(tenant, ruleID, deviceID))
+	return nil
+}
+func (r *Repository) DeleteRulePendings(_ context.Context, tenant, ruleID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	prefix := key(tenant, ruleID) + "\x00"
+	for pendingKey := range r.rulePending {
+		if strings.HasPrefix(pendingKey, prefix) {
+			delete(r.rulePending, pendingKey)
+		}
+	}
+	return nil
+}
 func (r *Repository) UpsertAlarm(_ context.Context, v model.Alarm) (model.Alarm, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for k, a := range r.alarms {
 		if a.TenantID == v.TenantID && a.DeviceID == v.DeviceID && a.RuleID == v.RuleID && (a.Status == "ACTIVE" || a.Status == "ACKED") {
+			if v.TriggerID != "" && a.TriggerID == v.TriggerID {
+				return cloneAlarm(a), false, nil
+			}
 			a.LastTriggeredAt = v.LastTriggeredAt
 			a.TriggerCount++
 			if v.Confidence > a.Confidence {

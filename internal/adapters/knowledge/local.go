@@ -90,7 +90,7 @@ func tokens(s string) []string {
 	f := func(r rune) bool { return unicode.IsSpace(r) || strings.ContainsRune(",，。；;:：/\\()（）", r) }
 	out := []string{}
 	for _, v := range strings.FieldsFunc(strings.ToLower(s), f) {
-		if len([]rune(v)) > 1 {
+		if strings.TrimSpace(v) != "" {
 			out = append(out, v)
 		}
 	}

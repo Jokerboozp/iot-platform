@@ -52,17 +52,36 @@ func New(ctx context.Context, base string, repo ports.Repository) (*Repository, 
 	return r, nil
 }
 func (r *Repository) SaveStandardMessage(ctx context.Context, v model.StandardMessage) error {
-	if err := r.Repository.SaveStandardMessage(ctx, v); err != nil {
-		return err
+	_, err := r.SaveStandardMessageIfAbsent(ctx, v)
+	return err
+}
+func (r *Repository) SaveStandardMessageIfAbsent(ctx context.Context, v model.StandardMessage) (bool, error) {
+	created, err := r.Repository.SaveStandardMessageIfAbsent(ctx, v)
+	if err != nil || !created {
+		return created, err
 	}
 	if v.MessageType != model.PropertyReport && v.MessageType != model.AlarmReport {
-		return nil
+		return true, nil
 	}
 	row := map[string]any{"tenant_id": v.TenantID, "device_id": v.DeviceID, "product_id": v.ProductID, "message_id": v.MessageID, "ts": time.UnixMilli(v.Timestamp).UTC().Format("2006-01-02 15:04:05.000"), "properties": v.Properties}
 	b, _ := json.Marshal(row)
 	b = append(b, '\n')
-	_, err := r.query(ctx, "INSERT INTO iot_telemetry FORMAT JSONEachRow", b)
-	return err
+	_, err = r.query(ctx, "INSERT INTO iot_telemetry FORMAT JSONEachRow", b)
+	return true, err
+}
+func (r *Repository) ClaimStandardMessage(ctx context.Context, v model.StandardMessage) (bool, bool, error) {
+	shouldProcess, created, err := r.Repository.ClaimStandardMessage(ctx, v)
+	if err != nil || !shouldProcess || !created {
+		return shouldProcess, created, err
+	}
+	if v.MessageType != model.PropertyReport && v.MessageType != model.AlarmReport {
+		return true, true, nil
+	}
+	row := map[string]any{"tenant_id": v.TenantID, "device_id": v.DeviceID, "product_id": v.ProductID, "message_id": v.MessageID, "ts": time.UnixMilli(v.Timestamp).UTC().Format("2006-01-02 15:04:05.000"), "properties": v.Properties}
+	b, _ := json.Marshal(row)
+	b = append(b, '\n')
+	_, err = r.query(ctx, "INSERT INTO iot_telemetry FORMAT JSONEachRow", b)
+	return true, true, err
 }
 func (r *Repository) PropertyHistory(ctx context.Context, tenant, device, property string, start, end int64, limit int) ([]map[string]any, error) {
 	if limit <= 0 {

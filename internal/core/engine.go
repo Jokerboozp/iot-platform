@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
 	"time"
 
 	"iot-platform/internal/model"
@@ -19,26 +18,25 @@ import (
 )
 
 type Engine struct {
-	Repo                   ports.Repository
-	Archive                ports.Archive
-	Bus                    ports.EventBus
-	Realtime               ports.RealtimePublisher
-	AI                     ports.AIClient
-	AIPlugins              ports.AIPluginRegistry
-	AIWorkflows            ports.AIWorkflowRuntime
-	KB                     ports.KnowledgeBase
-	Catalog                ports.PlatformCatalog
-	Parsers                *parser.Registry
-	Clock                  ports.Clock
-	Log                    *slog.Logger
-	Metrics                interface{ Inc(string) }
-	VideoMediaAllowedHosts []string
-	mu                     sync.Mutex
-	pending                map[string]int64
+	Repo                      ports.Repository
+	Archive                   ports.Archive
+	Bus                       ports.EventBus
+	Realtime                  ports.RealtimePublisher
+	AI                        ports.AIClient
+	AIPlugins                 ports.AIPluginRegistry
+	AIWorkflows               ports.AIWorkflowRuntime
+	KB                        ports.KnowledgeBase
+	Catalog                   ports.PlatformCatalog
+	Parsers                   *parser.Registry
+	Clock                     ports.Clock
+	Log                       *slog.Logger
+	Metrics                   interface{ Inc(string) }
+	VideoMediaAllowedHosts    []string
+	RequireVideoCameraMapping bool
 }
 
 func New(repo ports.Repository, archive ports.Archive, bus ports.EventBus, realtime ports.RealtimePublisher, parsers *parser.Registry, log *slog.Logger) *Engine {
-	return &Engine{Repo: repo, Archive: archive, Bus: bus, Realtime: realtime, Parsers: parsers, Clock: ports.RealClock{}, Log: log, pending: map[string]int64{}}
+	return &Engine{Repo: repo, Archive: archive, Bus: bus, Realtime: realtime, Parsers: parsers, Clock: ports.RealClock{}, Log: log}
 }
 func (e *Engine) Start(ctx context.Context) error {
 	subs := []struct {
@@ -237,8 +235,12 @@ func (e *Engine) handleStandard(ctx context.Context, b []byte) error {
 	if err := json.Unmarshal(b, &msg); err != nil {
 		return err
 	}
-	if err := e.Repo.SaveStandardMessage(ctx, msg); err != nil {
+	shouldProcess, _, err := e.Repo.ClaimStandardMessage(ctx, msg)
+	if err != nil {
 		return err
+	}
+	if !shouldProcess {
+		return nil
 	}
 	if err := e.touchState(ctx, msg); err != nil {
 		return err
@@ -249,38 +251,47 @@ func (e *Engine) handleStandard(ctx context.Context, b []byte) error {
 	}
 	for _, rule := range rules {
 		if MatchRule(rule, msg) {
-			if rule.DurationSeconds > 0 && !e.durationSatisfied(rule, msg) {
-				continue
+			if rule.DurationSeconds > 0 {
+				satisfied, durationErr := e.durationSatisfied(ctx, rule, msg)
+				if durationErr != nil {
+					return durationErr
+				}
+				if !satisfied {
+					continue
+				}
 			}
 			if _, _, err := e.raiseRuleAlarm(ctx, rule, msg); err != nil {
 				return err
 			}
 		} else if MatchConditions(rule.Recovery, msg) {
-			e.clearDuration(rule, msg)
-			_ = e.recoverRuleAlarm(ctx, rule, msg)
+			if err := e.clearDuration(ctx, rule, msg); err != nil {
+				return err
+			}
+			if err := e.recoverRuleAlarm(ctx, rule, msg); err != nil {
+				return err
+			}
 		} else {
-			e.clearDuration(rule, msg)
+			if err := e.clearDuration(ctx, rule, msg); err != nil {
+				return err
+			}
 		}
 	}
-	return nil
+	return e.Repo.MarkStandardMessageProcessed(ctx, msg.TenantID, msg.MessageID)
 }
 
-func (e *Engine) clearDuration(rule model.AlarmRule, msg model.StandardMessage) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	delete(e.pending, strings.Join([]string{rule.TenantID, rule.ID, msg.DeviceID}, "|"))
+func (e *Engine) clearDuration(ctx context.Context, rule model.AlarmRule, msg model.StandardMessage) error {
+	return e.Repo.DeleteRulePending(ctx, rule.TenantID, rule.ID, msg.DeviceID)
 }
-func (e *Engine) durationSatisfied(rule model.AlarmRule, msg model.StandardMessage) bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	k := strings.Join([]string{rule.TenantID, rule.ID, msg.DeviceID}, "|")
+func (e *Engine) durationSatisfied(ctx context.Context, rule model.AlarmRule, msg model.StandardMessage) (bool, error) {
 	now := e.Clock.Now().Unix()
-	since, ok := e.pending[k]
-	if !ok {
-		e.pending[k] = now
-		return false
+	since, found, err := e.Repo.GetRulePending(ctx, rule.TenantID, rule.ID, msg.DeviceID)
+	if err != nil {
+		return false, err
 	}
-	return now-since >= rule.DurationSeconds
+	if !found {
+		return false, e.Repo.SaveRulePending(ctx, rule.TenantID, rule.ID, msg.DeviceID, now)
+	}
+	return now-since >= rule.DurationSeconds, nil
 }
 func (e *Engine) touchState(ctx context.Context, msg model.StandardMessage) error {
 	state, err := e.Repo.GetDeviceState(ctx, msg.TenantID, msg.DeviceID)
@@ -305,7 +316,7 @@ func (e *Engine) touchState(ctx context.Context, msg model.StandardMessage) erro
 }
 func (e *Engine) raiseRuleAlarm(ctx context.Context, rule model.AlarmRule, msg model.StandardMessage) (model.Alarm, bool, error) {
 	now := e.Clock.Now().UnixMilli()
-	a := model.Alarm{ID: id("alarm"), TenantID: msg.TenantID, RuleID: rule.ID, DeviceID: msg.DeviceID, AlarmType: rule.AlarmType, AlarmLevel: rule.Level, Status: "ACTIVE", Source: "device", CityCode: tag(msg, "cityCode", "unknown"), DistrictCode: tag(msg, "districtCode", "unknown"), BuildingID: tag(msg, "buildingId", "unknown"), DeviceType: tag(msg, "deviceType", msg.ProductID), AreaID: tag(msg, "areaId", ""), FirstTriggeredAt: now, LastTriggeredAt: now, TriggerCount: 1, Details: map[string]any{"message": msg, "ruleName": rule.Name}}
+	a := model.Alarm{ID: id("alarm"), TenantID: msg.TenantID, RuleID: rule.ID, TriggerID: msg.MessageID, DeviceID: msg.DeviceID, AlarmType: rule.AlarmType, AlarmLevel: rule.Level, Status: "ACTIVE", Source: "device", CityCode: tag(msg, "cityCode", "unknown"), DistrictCode: tag(msg, "districtCode", "unknown"), BuildingID: tag(msg, "buildingId", "unknown"), DeviceType: tag(msg, "deviceType", msg.ProductID), AreaID: tag(msg, "areaId", ""), FirstTriggeredAt: now, LastTriggeredAt: now, TriggerCount: 1, Details: map[string]any{"message": msg, "ruleName": rule.Name}}
 	saved, created, err := e.Repo.UpsertAlarm(ctx, a)
 	if err != nil {
 		return saved, false, err
@@ -343,6 +354,66 @@ func (e *Engine) recoverRuleAlarm(ctx context.Context, rule model.AlarmRule, msg
 		payload, _ := json.Marshal(a)
 		_ = e.Bus.Publish(ctx, model.TopicAlarmRecovered, a.ID, payload)
 		_ = e.Realtime.Publish(ctx, a.MQTTTopic("recovered"), payload, 1, false)
+	}
+	return nil
+}
+
+// DeleteRule removes a rule and closes any alarms that can no longer be
+// recovered by the deleted rule. Historical alarm rows are retained.
+func (e *Engine) DeleteRule(ctx context.Context, tenant, ruleID string) error {
+	if err := e.Repo.DeleteRule(ctx, tenant, ruleID); err != nil {
+		return err
+	}
+	if err := e.Repo.DeleteRulePendings(ctx, tenant, ruleID); err != nil {
+		return err
+	}
+	return e.closeRuleAlarms(ctx, tenant, ruleID)
+}
+
+// DisableRule clears duration state and closes active/acknowledged alarms
+// before a rule is switched off. Historical alarm rows remain available.
+func (e *Engine) DisableRule(ctx context.Context, tenant, ruleID string) error {
+	if err := e.Repo.DeleteRulePendings(ctx, tenant, ruleID); err != nil {
+		return err
+	}
+	return e.closeRuleAlarms(ctx, tenant, ruleID)
+}
+
+func (e *Engine) closeRuleAlarms(ctx context.Context, tenant, ruleID string) error {
+	const batchSize = 1000
+	for _, status := range []string{"ACTIVE", "ACKED"} {
+		offset := 0
+		for {
+			alarms, err := e.Repo.ListAlarms(ctx, ports.AlarmFilter{TenantID: tenant, Status: status, Limit: batchSize, Offset: offset})
+			if err != nil {
+				return err
+			}
+			if len(alarms) == 0 {
+				break
+			}
+			changed := false
+			for _, alarm := range alarms {
+				if alarm.RuleID != ruleID {
+					continue
+				}
+				alarm.Status = "RECOVERED"
+				alarm.RecoveredAt = e.Clock.Now().UnixMilli()
+				if err := e.Repo.UpdateAlarm(ctx, alarm); err != nil {
+					return err
+				}
+				payload := mustJSON(alarm)
+				_ = e.Bus.Publish(ctx, model.TopicAlarmRecovered, alarm.ID, payload)
+				_ = e.Realtime.Publish(ctx, alarm.MQTTTopic("recovered"), payload, 1, false)
+				changed = true
+			}
+			if changed {
+				// Updating rows removes them from the status-filtered result set;
+				// restart at zero so offset pagination cannot skip the next row.
+				offset = 0
+				continue
+			}
+			offset += len(alarms)
+		}
 	}
 	return nil
 }
@@ -403,7 +474,11 @@ func (e *Engine) IngestVideo(ctx context.Context, v model.VideoAlarmEvent) (mode
 	if v.ReceivedAt == 0 {
 		v.ReceivedAt = e.Clock.Now().UnixMilli()
 	}
-	if mapping, mappingErr := e.Repo.GetVideoCameraMapping(ctx, v.TenantID, v.CameraID); mappingErr == nil {
+	mapping, mappingErr := e.Repo.GetVideoCameraMapping(ctx, v.TenantID, v.CameraID)
+	if mappingErr != nil && e.RequireVideoCameraMapping {
+		return model.Alarm{}, false, fmt.Errorf("camera %s is not bound to tenant %s", v.CameraID, v.TenantID)
+	}
+	if mappingErr == nil {
 		if !mapping.Enabled {
 			return model.Alarm{}, false, fmt.Errorf("camera %s is disabled", v.CameraID)
 		}
@@ -447,7 +522,7 @@ func (e *Engine) IngestVideo(ctx context.Context, v model.VideoAlarmEvent) (mode
 	}
 	_ = e.Bus.Publish(ctx, model.TopicVideoAlarm, v.CameraID, mustJSON(v))
 	now := e.Clock.Now().UnixMilli()
-	a := model.Alarm{ID: id("alarm"), TenantID: v.TenantID, RuleID: "video:" + v.AlarmType, DeviceID: v.CameraID, DeviceName: v.CameraName, AlarmType: v.AlarmType, AlarmLevel: v.AlarmLevel, Status: "ACTIVE", Source: "video", CityCode: v.CityCode, DistrictCode: v.DistrictCode, BuildingID: v.BuildingID, DeviceType: "video_ai", AreaID: v.AreaID, FirstTriggeredAt: now, LastTriggeredAt: now, TriggerCount: 1, Confidence: v.Confidence, Details: map[string]any{"videoEvent": v}}
+	a := model.Alarm{ID: id("alarm"), TenantID: v.TenantID, RuleID: "video:" + v.AlarmType, TriggerID: v.EventID, DeviceID: v.CameraID, DeviceName: v.CameraName, AlarmType: v.AlarmType, AlarmLevel: v.AlarmLevel, Status: "ACTIVE", Source: "video", CityCode: v.CityCode, DistrictCode: v.DistrictCode, BuildingID: v.BuildingID, DeviceType: "video_ai", AreaID: v.AreaID, FirstTriggeredAt: now, LastTriggeredAt: now, TriggerCount: 1, Confidence: v.Confidence, Details: map[string]any{"videoEvent": v}}
 	if a.AlarmLevel == "" {
 		a.AlarmLevel = map[bool]string{true: "MEDIUM", false: "HIGH"}[v.Confidence < 0.6]
 	}
