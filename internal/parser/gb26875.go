@@ -128,9 +128,27 @@ func applyGB26875Data(msg *model.StandardMessage, frame gb26875Frame) error {
 	msg.Raw["typeFlag"] = fmt.Sprintf("0x%02X", typeFlag)
 	msg.Raw["objectCount"] = count
 	if frame.Command == 0x00 && typeFlag == 0x00 {
+		if count != 1 || len(frame.Data) != 112 {
+			return fmt.Errorf("GB26875 registration expects one 110-byte object")
+		}
 		msg.MessageType = model.StateChange
 		msg.Event = map[string]any{"type": "REGISTER", "objectCount": count}
-		msg.Properties = map[string]any{"registered": true, "registrationPayload": strings.ToUpper(hex.EncodeToString(frame.Data[2:]))}
+		msg.Properties = map[string]any{"registered": true, "registrationObjectLength": len(frame.Data[2:]), "registrationPayload": strings.ToUpper(hex.EncodeToString(frame.Data[2:]))}
+		return nil
+	}
+	if frame.Command == 0x01 && typeFlag == 0x5A {
+		if count != 1 || len(frame.Data) != 8 {
+			return fmt.Errorf("GB26875 time synchronization expects one 6-byte time object")
+		}
+		at := decodeGB26875Time(frame.Data[2:])
+		if isGB26875PlatformAddress(frame.Source) {
+			msg.MessageType = model.CommandReply
+			msg.Event = map[string]any{"type": "TIME_SYNC", "synchronizedAt": at}
+		} else {
+			msg.MessageType = model.EventReport
+			msg.Event = map[string]any{"type": "TIME_SYNC_REQUEST", "requestedAt": at}
+		}
+		msg.Properties = map[string]any{"requestedAt": at}
 		return nil
 	}
 	if frame.Command == 0x02 && typeFlag == 0x02 {
@@ -139,11 +157,12 @@ func applyGB26875Data(msg *model.StandardMessage, frame gb26875Frame) error {
 	return fmt.Errorf("unsupported GB26875 command/type combination 0x%02X/0x%02X", frame.Command, typeFlag)
 }
 
-// BuildGB26875RegistrationFrame builds the 110-byte v1.03 registration
-// application unit used by the supplied protocol. Fields not needed by the
-// virtual device remain zero-filled.
+// BuildGB26875RegistrationFrame builds the 112-byte v1.03 registration
+// application unit: a 2-byte data identifier followed by the protocol's
+// 110-byte registration object. Fields not needed by the virtual device remain
+// zero-filled.
 func BuildGB26875RegistrationFrame(sequence uint16, source [6]byte, at time.Time) []byte {
-	application := make([]byte, 110)
+	application := make([]byte, 112)
 	application[0], application[1] = 0x00, 0x01
 	application[2], application[3] = 0x01, 0x03
 	copy(application[18:34], []byte(strings.ToUpper(hex.EncodeToString(source[:]))))
@@ -269,6 +288,22 @@ func BuildGB26875AckFrame(sequence uint16, destination [6]byte, at time.Time) []
 	return buildGB26875Frame(sequence, [6]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, destination, 0x03, nil, at)
 }
 
+// BuildGB26875TimeSyncFrame builds the platform response to a device time
+// synchronization request, or the optional platform-initiated time sync
+// command. The v1.03 frame uses command 0x01 and a type 0x5A, one-object,
+// six-byte BCD time application unit.
+func BuildGB26875TimeSyncFrame(sequence uint16, destination [6]byte, at time.Time) []byte {
+	application := append([]byte{0x5A, 0x01}, encodeGB26875Time(at)...)
+	return buildGB26875Frame(sequence, [6]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, destination, 0x01, application, at)
+}
+
+// BuildGB26875TimeSyncRequestFrame builds the optional device-originated time
+// synchronization request used by the v1.03 request/response flow.
+func BuildGB26875TimeSyncRequestFrame(sequence uint16, source [6]byte, at time.Time) []byte {
+	application := append([]byte{0x5A, 0x01}, encodeGB26875Time(at)...)
+	return buildGB26875Frame(sequence, source, [6]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, 0x01, application, at)
+}
+
 func buildGB26875Frame(sequence uint16, source, destination [6]byte, command byte, application []byte, at time.Time) []byte {
 	frame := make([]byte, 2+gb26875ControlLength+len(application)+1+2)
 	copy(frame[:2], "@@")
@@ -294,6 +329,10 @@ func encodeGB26875Time(at time.Time) []byte {
 }
 
 func encodeBCD(value int) byte { return byte(value/10<<4 | value%10) }
+
+func isGB26875PlatformAddress(value string) bool {
+	return strings.EqualFold(value, "FFFFFFFFFFFF") || strings.EqualFold(value, "000000000000")
+}
 
 func marshalHexPayload(frame []byte) json.RawMessage {
 	value, _ := json.Marshal(strings.ToUpper(hex.EncodeToString(frame)))

@@ -14,7 +14,7 @@ JetLinks 协议包改造（原文第 6 章）按用户要求排除。其余章�
 | 在线/离线判定 | `internal/core/engine.go` | 已实现三状态、超时扫描和状态事件 |
 | 规则、告警生命周期 | JSON + Gengine、物模型校验、冲突检测、Redis 活动缓存 | 已实现并有自动化测试 |
 | MQTT WebSocket 前端订阅 | 内置 MQTT 3.1.1 WS 客户端、短期 ACL Token、自动续期 | 已实现并由真实 EMQX 鉴权实测 |
-| API/BFF 与消防页面 | `internal/httpapi`、`frontend` | 已实现 Gin API/MCP 与 Vue 3 Web 前后端分离，Nginx 同源代理 |
+| API/BFF 与消防页面 | `internal/httpapi`、`iot_front` | 已实现 Gin API/MCP 与独立 Vue 3 Web 前端，Nginx 同源代理 |
 | 视频识别接入 | Webhook/MQTT、HMAC、摄像机映射、跨源融合、持久异步媒体转存 | 已实现并有自动化测试 |
 | AI 告警诊断 | Eino 编排、Ollama、10m/1h/24h 趋势、同类告警、知识检索 | 已实现异步旁路与失败降级 |
 | AI 运维助手 | `core.OpsChat` | 已实现受控数据上下文，不执行 SQL/设备控制 |

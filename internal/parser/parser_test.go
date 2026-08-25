@@ -50,6 +50,9 @@ func TestGB26875RejectsBadChecksum(t *testing.T) {
 
 func TestGB26875RegistrationFrame(t *testing.T) {
 	frame := BuildGB26875RegistrationFrame(1, [6]byte{1, 2, 3, 4, 5, 6}, time.Now())
+	if len(frame) != 142 {
+		t.Fatalf("v1.03 registration frame should be 142 bytes, got %d", len(frame))
+	}
 	payload, _ := json.Marshal(hex.EncodeToString(frame))
 	message, err := (GB26875Parser{}).Parse(model.RawMessage{Protocol: "gb26875-dahua-v1.03", PayloadFormat: "hex", Payload: payload})
 	if err != nil {
@@ -57,6 +60,29 @@ func TestGB26875RegistrationFrame(t *testing.T) {
 	}
 	if message.MessageType != model.StateChange || message.Event["type"] != "REGISTER" || message.Properties["registered"] != true {
 		t.Fatalf("unexpected registration: %#v", message)
+	}
+}
+
+func TestGB26875TimeSyncRequestAndResponse(t *testing.T) {
+	at := time.Date(2026, 8, 25, 10, 11, 12, 0, time.Local)
+	source := [6]byte{1, 2, 3, 4, 5, 6}
+	request := BuildGB26875TimeSyncRequestFrame(7, source, at)
+	requestPayload, _ := json.Marshal(hex.EncodeToString(request))
+	requestMessage, err := (GB26875Parser{}).Parse(model.RawMessage{Protocol: "gb26875-dahua-v1.03", PayloadFormat: "hex", Payload: requestPayload, ReceivedAt: at.UnixMilli()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requestMessage.MessageType != model.EventReport || requestMessage.Event["type"] != "TIME_SYNC_REQUEST" {
+		t.Fatalf("unexpected time sync request: %#v", requestMessage)
+	}
+	response := BuildGB26875TimeSyncFrame(7, source, at)
+	responsePayload, _ := json.Marshal(hex.EncodeToString(response))
+	responseMessage, err := (GB26875Parser{}).Parse(model.RawMessage{Protocol: "gb26875-dahua-v1.03", PayloadFormat: "hex", Payload: responsePayload, ReceivedAt: at.UnixMilli()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if responseMessage.MessageType != model.CommandReply || responseMessage.Event["type"] != "TIME_SYNC" {
+		t.Fatalf("unexpected time sync response: %#v", responseMessage)
 	}
 }
 

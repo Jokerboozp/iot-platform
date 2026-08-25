@@ -16,6 +16,9 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -76,6 +79,7 @@ func (s *Server) routes() {
 	s.router.GET("/api/v1/protocol-packages", s.authorize("viewer"), s.endpoint(s.protocolPackages))
 	s.router.POST("/api/v1/protocol-packages", s.authorize("operator"), s.endpoint(s.saveProtocolPackage))
 	s.router.PUT("/api/v1/protocol-packages/:id", s.authorize("operator"), s.endpoint(s.saveProtocolPackage, "id"))
+	s.router.POST("/api/v1/protocol-packages/:id/artifact", s.authorize("operator"), s.endpoint(s.uploadProtocolArtifact, "id"))
 	s.router.POST("/api/v1/protocol-packages/:id/test", s.authorize("operator"), s.endpoint(s.testProtocolPackage, "id"))
 	s.router.GET("/api/v1/device-registry", s.authorize("viewer"), s.endpoint(s.deviceRegistry))
 	s.router.POST("/api/v1/device-registry", s.authorize("operator"), s.endpoint(s.saveManagedDevice))
@@ -246,7 +250,7 @@ func (s *Server) protocolPackages(w http.ResponseWriter, r *http.Request) {
 		problem(w, 500, err.Error())
 		return
 	}
-	write(w, 200, map[string]any{"items": items, "count": len(items), "parserTypes": []string{"custom_json_parser", "configurable_json_parser", "configurable_hex_parser", "javascript_sandbox_parser", "gb26875_dahua_parser", "fire_smoke_parser", "modbus_parser"}})
+	write(w, 200, map[string]any{"items": items, "count": len(items), "parserTypes": []string{"custom_json_parser", "configurable_json_parser", "configurable_hex_parser", "javascript_sandbox_parser", parser.GoProtocolParserName, "gb26875_dahua_parser", "fire_smoke_parser", "modbus_parser"}})
 }
 func (s *Server) saveProtocolPackage(w http.ResponseWriter, r *http.Request) {
 	var v model.ProtocolPackage
@@ -265,7 +269,7 @@ func (s *Server) saveProtocolPackage(w http.ResponseWriter, r *http.Request) {
 		problem(w, 422, "name and parserType are required")
 		return
 	}
-	allowed := map[string]bool{"custom_json_parser": true, "configurable_json_parser": true, "configurable_hex_parser": true, "javascript_sandbox_parser": true, "gb26875_dahua_parser": true, "fire_smoke_parser": true, "modbus_parser": true}
+	allowed := map[string]bool{"custom_json_parser": true, "configurable_json_parser": true, "configurable_hex_parser": true, "javascript_sandbox_parser": true, parser.GoProtocolParserName: true, "gb26875_dahua_parser": true, "fire_smoke_parser": true, "modbus_parser": true}
 	if !allowed[v.ParserType] {
 		problem(w, 422, "unsupported parserType")
 		return
@@ -298,6 +302,14 @@ func (s *Server) saveProtocolPackage(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UnixMilli()
 	if old, getErr := s.engine.Repo.GetProtocolPackage(r.Context(), c.TenantID, v.ID); getErr == nil {
 		v.CreatedAt = old.CreatedAt
+		if v.Config == nil {
+			v.Config = map[string]any{}
+		}
+		if _, hasArtifact := v.Config["artifact"]; !hasArtifact {
+			if artifact, exists := old.Config["artifact"]; exists {
+				v.Config["artifact"] = artifact
+			}
+		}
 	}
 	if v.CreatedAt == 0 {
 		v.CreatedAt = now
@@ -309,6 +321,126 @@ func (s *Server) saveProtocolPackage(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, "protocol.save", "protocolPackage", v.ID, map[string]any{"version": v.Version, "status": v.Status})
 	write(w, 201, v)
+}
+
+const maxProtocolArtifactUpload = int64(64 << 20)
+
+// uploadProtocolArtifact stores a compiled Go worker next to the platform
+// data directory and records only its relative path and digest in the protocol
+// package. Source code is deliberately not compiled in the API process: build
+// it in a controlled CI/worker environment, then upload the resulting binary.
+func (s *Server) uploadProtocolArtifact(w http.ResponseWriter, r *http.Request) {
+	tenant := claims(r).TenantID
+	packageID := r.PathValue("id")
+	pkg, err := s.engine.Repo.GetProtocolPackage(r.Context(), tenant, packageID)
+	if err != nil {
+		problem(w, http.StatusNotFound, "protocol package not found")
+		return
+	}
+	if pkg.ParserType != parser.GoProtocolParserName {
+		problem(w, http.StatusUnprocessableEntity, "protocol package parserType must be go_protocol_parser")
+		return
+	}
+	if err := r.ParseMultipartForm(maxProtocolArtifactUpload + (1 << 20)); err != nil {
+		problem(w, http.StatusBadRequest, "invalid multipart artifact upload")
+		return
+	}
+	file, header, err := r.FormFile("artifact")
+	if err != nil {
+		file, header, err = r.FormFile("file")
+	}
+	if err != nil {
+		problem(w, http.StatusUnprocessableEntity, "artifact file is required")
+		return
+	}
+	defer file.Close()
+	if header == nil || strings.TrimSpace(header.Filename) == "" || strings.ContainsAny(header.Filename, `/\\`) {
+		problem(w, http.StatusUnprocessableEntity, "artifact filename is invalid")
+		return
+	}
+	if pkg.Version == "" {
+		pkg.Version = "1.0.0"
+	}
+	for _, segment := range []string{tenant, packageID, pkg.Version} {
+		if !safeArtifactSegment(segment) {
+			problem(w, http.StatusUnprocessableEntity, "protocol package path segment is invalid")
+			return
+		}
+	}
+	root, err := filepath.Abs(s.cfg.DataDir)
+	if err != nil {
+		problem(w, http.StatusInternalServerError, "resolve protocol artifact directory")
+		return
+	}
+	directory := filepath.Join(root, "protocol-packages", tenant, packageID, pkg.Version)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		problem(w, http.StatusInternalServerError, "create protocol artifact directory")
+		return
+	}
+	temporary, err := os.CreateTemp(directory, ".artifact-*")
+	if err != nil {
+		problem(w, http.StatusInternalServerError, "create protocol artifact")
+		return
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	hash := sha256.New()
+	writer := io.MultiWriter(temporary, hash)
+	written, copyErr := io.Copy(writer, io.LimitReader(file, maxProtocolArtifactUpload+1))
+	if closeErr := temporary.Close(); copyErr == nil {
+		copyErr = closeErr
+	}
+	if copyErr != nil {
+		problem(w, http.StatusBadRequest, "read protocol artifact")
+		return
+	}
+	if written <= 0 || written > maxProtocolArtifactUpload {
+		problem(w, http.StatusRequestEntityTooLarge, "protocol artifact must be between 1 and 64 MiB")
+		return
+	}
+	artifactName := "artifact"
+	if runtime.GOOS == "windows" {
+		artifactName += ".exe"
+	}
+	target := filepath.Join(directory, artifactName)
+	if err := os.Chmod(temporaryPath, 0o700); err != nil {
+		problem(w, http.StatusInternalServerError, "set protocol artifact permissions")
+		return
+	}
+	if runtime.GOOS == "windows" {
+		if removeErr := os.Remove(target); removeErr != nil && !os.IsNotExist(removeErr) {
+			problem(w, http.StatusInternalServerError, "replace protocol artifact")
+			return
+		}
+	}
+	if err := os.Rename(temporaryPath, target); err != nil {
+		problem(w, http.StatusInternalServerError, "activate protocol artifact")
+		return
+	}
+	relative, err := filepath.Rel(root, target)
+	if err != nil {
+		problem(w, http.StatusInternalServerError, "store protocol artifact path")
+		return
+	}
+	if pkg.Config == nil {
+		pkg.Config = map[string]any{}
+	}
+	pkg.Config["artifact"] = map[string]any{
+		"path": filepath.ToSlash(relative), "filename": header.Filename,
+		"sha256": hex.EncodeToString(hash.Sum(nil)), "size": written,
+		"protocol": "json-lines-v1", "uploadedAt": time.Now().UnixMilli(),
+	}
+	pkg.UpdatedAt = time.Now().UnixMilli()
+	if err := s.engine.Repo.SaveProtocolPackage(r.Context(), pkg); err != nil {
+		problem(w, http.StatusInternalServerError, "save protocol artifact metadata")
+		return
+	}
+	s.audit(r, "protocol.artifact.upload", "protocolPackage", pkg.ID, map[string]any{"sha256": pkg.Config["artifact"].(map[string]any)["sha256"], "size": written})
+	write(w, http.StatusCreated, pkg)
+}
+
+func safeArtifactSegment(value string) bool {
+	return value != "" && value != "." && value != ".." && !strings.ContainsAny(value, `/\\`) && !strings.Contains(value, "..")
 }
 func (s *Server) testProtocolPackage(w http.ResponseWriter, r *http.Request) {
 	pkg, err := s.engine.Repo.GetProtocolPackage(r.Context(), claims(r).TenantID, r.PathValue("id"))

@@ -4,7 +4,7 @@ data/
 *.exe
 *.log
 coverage.out
-frontend/node_modules/
-frontend/dist/
+iot_front/node_modules/
+iot_front/dist/
 upstream/deepseek-harness/
 upstream/deepseek-harness.revision

@@ -170,8 +170,9 @@ type Product struct {
 
 // ProtocolPackage is a declarative protocol-package release. ParserType points
 // at a reviewed parser registered in the Go process. The sandbox JavaScript
-// parser is the exception: its pure transformation source is stored in Config
-// and executed without host capabilities.
+// parser stores a pure transformation source in Config; go_protocol_parser
+// stores a checksum-verified, compiled worker artifact in Config and invokes it
+// through the external JSON-lines contract.
 type ProtocolPackage struct {
 	ID            string         `json:"id"`
 	TenantID      string         `json:"tenantId"`

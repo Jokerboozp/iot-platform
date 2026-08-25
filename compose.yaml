@@ -74,7 +74,7 @@ services:
     <<: *service-defaults
     image: ${IOT_PLATFORM_WEB_IMAGE:-iot-platform-web:local}
     build:
-      context: ./frontend
+      context: ./iot_front
       dockerfile: Dockerfile
     environment:
       IOT_VIDEO_PREVIEW_CSP_SOURCES: ${IOT_VIDEO_PREVIEW_CSP_SOURCES:-}
@@ -94,7 +94,9 @@ services:
       GB26875_TENANT: ${GB26875_TENANT:-tenant_001}
       GB26875_USERNAME: ${IOT_ADMIN_USER:-admin}
       GB26875_PASSWORD: ${IOT_ADMIN_PASSWORD:-admin123}
-    ports: ["${GB26875_PORT:-26875}:26875/tcp", "${GB26875_PORT:-26875}:26875/udp"]
+      GB26875_CONTROL_LISTEN: ${GB26875_CONTROL_LISTEN:-}
+      GB26875_CONTROL_TOKEN: ${GB26875_CONTROL_TOKEN:-}
+    ports: ["${GB26875_PORT:-26875}:26875/tcp", "${GB26875_PORT:-26875}:26875/udp", "127.0.0.1:${GB26875_CONTROL_PORT:-26876}:26876"]
     depends_on:
       platform-api: {condition: service_started}
 

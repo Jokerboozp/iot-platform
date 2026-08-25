@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -34,7 +36,7 @@ func main() {
 		password = flag.String("password", "admin123", "platform password")
 		deviceID = flag.String("device", "gb26875_virtual_001", "virtual device ID")
 		source   = flag.String("source", "123456789012", "12 hexadecimal source-address digits")
-		scenario = flag.String("scenario", "manual-alarm", "manual-alarm, manual-normal, smoke-alarm, sound-light-start or sound-light-stop")
+		scenario = flag.String("scenario", "manual-alarm", "manual-alarm, manual-normal, smoke-alarm, sound-light-start, sound-light-stop or time-sync-request")
 		dryRun   = flag.Bool("dry-run", false, "only print the generated protocol frame")
 	)
 	flag.Parse()
@@ -62,20 +64,28 @@ func main() {
 		check(err)
 		defer conn.Close()
 		_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+		reader := bufio.NewReader(conn)
 		registration := parser.BuildGB26875RegistrationFrame(0, sourceAddress, time.Now())
 		_, err = conn.Write(registration)
 		check(err)
-		registrationAck := make([]byte, 30)
-		_, err = io.ReadFull(conn, registrationAck)
+		registrationAck, err := readGB26875Frame(reader)
 		check(err)
+		check(parseGatewayResponse(registrationAck, "ACK"))
+		if *scenario == "time-sync-request" {
+			request := parser.BuildGB26875TimeSyncRequestFrame(1, sourceAddress, time.Now())
+			_, err = conn.Write(request)
+			check(err)
+			response, readErr := readGB26875Frame(reader)
+			check(readErr)
+			check(parseGatewayResponse(response, "TIME_SYNC"))
+			fmt.Printf("虚拟设备已通过 %s 网关完成时钟同步请求\n请求帧: %s\n响应帧: %s\n", strings.ToUpper(*network), strings.ToUpper(hex.EncodeToString(request)), strings.ToUpper(hex.EncodeToString(response)))
+			return
+		}
 		_, err = conn.Write(frame)
 		check(err)
-		ack := make([]byte, 30)
-		_, err = io.ReadFull(conn, ack)
+		ack, err := readGB26875Frame(reader)
 		check(err)
-		ackPayload, _ := json.Marshal(hex.EncodeToString(ack))
-		ackMessage, err := (parser.GB26875Parser{}).Parse(model.RawMessage{MessageID: "raw_ack", Protocol: "gb26875-dahua-v1.03", PayloadFormat: "hex", Payload: ackPayload, ReceivedAt: time.Now().UnixMilli()})
-		check(err)
+		ackMessage := parseGatewayResponseMessage(ack)
 		fmt.Printf("虚拟设备已通过 %s 网关上报 %s，平台返回 %v\n协议帧: %s\n", strings.ToUpper(*network), *scenario, ackMessage.Event["type"], hexFrame)
 		return
 	}
@@ -122,9 +132,59 @@ func scenarioValues(name string) (byte, uint16, string, error) {
 		return 137, 1<<5 | 1<<6, "virtual sound light started", nil
 	case "sound-light-stop":
 		return 137, 0, "virtual sound light stopped", nil
+	case "time-sync-request":
+		return 0, 0, "virtual time synchronization request", nil
 	default:
 		return 0, 0, "", fmt.Errorf("unknown scenario %q", name)
 	}
+}
+
+func readGB26875Frame(reader *bufio.Reader) ([]byte, error) {
+	for {
+		first, err := reader.ReadByte()
+		if err != nil {
+			return nil, err
+		}
+		if first != '@' {
+			continue
+		}
+		second, err := reader.ReadByte()
+		if err != nil {
+			return nil, err
+		}
+		if second != '@' {
+			continue
+		}
+		break
+	}
+	header := make([]byte, 25)
+	if _, err := io.ReadFull(reader, header); err != nil {
+		return nil, err
+	}
+	length := int(binary.LittleEndian.Uint16(header[22:24]))
+	if length > 512 {
+		return nil, fmt.Errorf("application data length %d exceeds 512", length)
+	}
+	tail := make([]byte, length+3)
+	if _, err := io.ReadFull(reader, tail); err != nil {
+		return nil, err
+	}
+	return append(append([]byte{'@', '@'}, header...), tail...), nil
+}
+
+func parseGatewayResponse(frame []byte, expected string) error {
+	message := parseGatewayResponseMessage(frame)
+	if got, _ := message.Event["type"].(string); got != expected {
+		return fmt.Errorf("gateway response event %q, want %q", got, expected)
+	}
+	return nil
+}
+
+func parseGatewayResponseMessage(frame []byte) *model.StandardMessage {
+	payload, _ := json.Marshal(hex.EncodeToString(frame))
+	message, err := (parser.GB26875Parser{}).Parse(model.RawMessage{MessageID: "raw_ack", Protocol: "gb26875-dahua-v1.03", PayloadFormat: "hex", Payload: payload, ReceivedAt: time.Now().UnixMilli()})
+	check(err)
+	return message
 }
 
 func (c *client) do(ctx context.Context, method, path string, body, out any) error {

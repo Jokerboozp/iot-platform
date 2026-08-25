@@ -3,8 +3,8 @@
 data
 *.log
 bin
-frontend/node_modules
-frontend/dist
+iot_front/node_modules
+iot_front/dist
 upstream/deepseek-harness/.git
 upstream/deepseek-harness/**/node_modules
 upstream/deepseek-harness/**/lib

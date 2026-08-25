@@ -93,7 +93,7 @@ go run ./cmd/iot-platform
 另开终端启动前端：
 
 ```bash
-cd frontend
+cd iot_front
 npm ci
 npm run dev
 ```
@@ -108,7 +108,7 @@ $env:IOT_CORS_ALLOWED_ORIGINS='http://localhost:5173'
 go run ./cmd/iot-platform
 
 # 另开终端
-cd frontend
+cd iot_front
 npm.cmd ci
 npm.cmd run dev
 ```
@@ -169,7 +169,7 @@ npm.cmd run dev
 | 设备与产品 | 产品、协议包、设备注册、设备/网关凭证、发现设备转注册 |
 | 接入指南 | 管理端 REST、设备凭证 HTTP、MQTT 原始 Topic、设备数据联调 |
 | 原始证据链 | gzip JSONL 微批归档、SHA-256、幂等索引、单条精确恢复 |
-| 协议解析 | JSON/Hex 配置映射、受限 JavaScript 脚本、AI 协议接入助手、消防烟感/GB26875/Modbus 示例解析器，失败 Topic 与 DLQ |
+| 协议解析 | JSON/Hex 配置映射、受限 JavaScript 脚本、可上传 Go 协议 Worker、AI 协议接入助手、消防烟感/GB26875/Modbus 示例解析器，失败 Topic 与 DLQ |
 | 分层存储 | MinIO、Redpanda、ClickHouse、Redis、PostgreSQL、可选 Weaviate |
 | 状态管理 | ONLINE、OFFLINE、SUSPECTED_OFFLINE 与多维离线判定 |
 | 规则与告警 | JSON/Gengine、物模型校验、冲突检测、告警生命周期和审计 |
@@ -223,13 +223,15 @@ internal/core                 状态、规则、告警、视频、AI、回放
 internal/adapters             数据库、消息、对象存储、AI/RAG 适配器
 internal/httpapi              Gin REST API、JWT/RBAC、Webhook
 internal/mcpserver            平台 MCP 与 Harness 专用只读 MCP
-frontend                      Vue 3、Element Plus、HLS.js、Nginx
+iot_front                    独立 Vue 3、shadcn-vue 视觉系统、Element Plus 兼容层、HLS.js、Nginx 前端项目
 deploy/deepseek-harness       Harness 网关、插件清单和构建适配
 deploy/k8s                    Kubernetes 基线清单
 ops                           Prometheus、Grafana、Loki、EMQX 配置
 scripts                       上游源码拉取等项目脚本
 docs                          AI Harness、ThingsPanel 和覆盖说明
 ```
+
+设备协议的选择、发布和运行时链路见 [设备协议接入流程](docs/设备协议接入流程.md)；复杂协议的 Go Worker 契约见 [Go 协议包接入](docs/GO_PROTOCOL_PACKAGES.md)。
 
 ## Docker 服务与端口
 
@@ -277,6 +279,8 @@ go run ./cmd/gb26875-virtual-device --help
 ```
 
 网关接收设备报文后调用平台设备接入接口；平台侧仍按“设备管理 → 产品协议绑定 → 原始报文 → 标准消息”的链路处理。协议字段和示例报文见 [GB/T 26875 对接说明](docs/GB26875_DAHUA_V103.md)。
+
+协议开发现在按复杂度提供三条路径：JSON/固定字段十六进制直接配置；受限 JavaScript 适用于纯转换；变长、TLV、状态机或请求/应答协议可选择 `go_protocol_parser`，上传受 SHA-256、路径、超时和输出大小限制的已编译 Go Worker。Go 源码不能在 API 进程内直接编译执行，完整契约见 [Go 协议包接入](docs/GO_PROTOCOL_PACKAGES.md)。
 
 ## 配置与密钥
 
@@ -541,6 +545,7 @@ $headers = @{ Authorization = "Bearer $($login.accessToken)" }
 POST         /api/v1/auth/login
 GET/POST/PUT /api/v1/products[/{id}]
 GET/POST/PUT /api/v1/protocol-packages[/{id}]
+POST         /api/v1/protocol-packages/{id}/artifact
 POST         /api/v1/protocol-packages/{id}/test
 GET/POST/PUT /api/v1/device-registry[/{id}]
 POST         /api/v1/discovered-devices/{id}/register
@@ -659,7 +664,7 @@ go vet ./...
 前端：
 
 ```bash
-cd frontend
+cd iot_front
 npm ci
 npm test
 npm run build
