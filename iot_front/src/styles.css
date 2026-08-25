@@ -154,6 +154,8 @@ pre { max-height: 360px; overflow: auto; padding: 14px; color: #dbeafe; backgrou
 .surface-card > .el-card__body { padding: 20px; }
 .table-card > .el-card__body { padding: 0; }
 .table-card > .el-card__header { padding-bottom: 16px; }
+.list-pagination { display:flex; justify-content:flex-end; padding:14px 16px; border-top:1px solid var(--border); background:#fff; }
+.list-pagination .el-pagination { flex-wrap:wrap; justify-content:flex-end; }
 .card-header { width: 100%; justify-content: space-between; gap: 14px; }
 .card-header small { color: var(--muted-foreground); font-weight: 400; }
 .el-button { min-height: 32px; height: 32px; padding: 0 13px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--el-button-border-color, var(--border)); border-radius: .5rem; font-size: 12px; font-weight: 600; line-height: 1; box-shadow: 0 1px 2px rgba(15,23,42,.04); transition: color .16s ease, background-color .16s ease, border-color .16s ease, box-shadow .16s ease, transform .16s ease; }

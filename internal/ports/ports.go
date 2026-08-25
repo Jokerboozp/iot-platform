@@ -24,18 +24,23 @@ type Repository interface {
 	SaveProduct(context.Context, model.Product) error
 	GetProduct(context.Context, string, string) (model.Product, error)
 	ListProducts(context.Context, string) ([]model.Product, error)
+	ListProductsPage(context.Context, string, int, int) ([]model.Product, int, error)
 	SaveProtocolPackage(context.Context, model.ProtocolPackage) error
 	GetProtocolPackage(context.Context, string, string) (model.ProtocolPackage, error)
 	ListProtocolPackages(context.Context, string) ([]model.ProtocolPackage, error)
+	ListProtocolPackagesPage(context.Context, string, int, int) ([]model.ProtocolPackage, int, error)
 	SaveManagedDevice(context.Context, model.ManagedDevice) error
 	GetManagedDevice(context.Context, string, string) (model.ManagedDevice, error)
 	GetManagedDeviceByAccessKey(context.Context, string) (model.ManagedDevice, error)
 	ListManagedDevices(context.Context, string) ([]model.ManagedDevice, error)
+	ListManagedDevicesPage(context.Context, string, int, int) ([]model.ManagedDevice, int, error)
+	CountManagedDeviceChildren(context.Context, string, []string) (map[string]int, error)
 	SaveRawIndex(context.Context, model.RawArchiveIndex) (bool, error)
 	MarkRawPublished(context.Context, string, string, int64, string) error
 	ListPendingRawIndexes(context.Context, int) ([]model.RawArchiveIndex, error)
 	GetRawIndex(context.Context, string, string) (model.RawArchiveIndex, error)
 	ListRawIndexes(context.Context, RawFilter) ([]model.RawArchiveIndex, error)
+	CountRawIndexes(context.Context, RawFilter) (int, error)
 	SaveStandardMessage(context.Context, model.StandardMessage) error
 	SaveStandardMessageIfAbsent(context.Context, model.StandardMessage) (bool, error)
 	ClaimStandardMessage(context.Context, model.StandardMessage) (shouldProcess bool, created bool, err error)
@@ -43,12 +48,17 @@ type Repository interface {
 	GetStandardMessageByRaw(context.Context, string, string) (model.StandardMessage, error)
 	GetLatestMessage(context.Context, string, string) (model.StandardMessage, error)
 	PropertyHistory(context.Context, string, string, string, int64, int64, int) ([]map[string]any, error)
+	PropertyHistoryPage(context.Context, string, string, string, int64, int64, int, int) ([]map[string]any, int, error)
 	UpsertDeviceState(context.Context, model.DeviceState) error
 	GetDeviceState(context.Context, string, string) (model.DeviceState, error)
 	ListDeviceStates(context.Context, string) ([]model.DeviceState, error)
+	ListDeviceStatesPage(context.Context, string, int, int) ([]model.DeviceState, int, error)
+	ListUnregisteredDeviceStatesPage(context.Context, string, int, int) ([]model.DeviceState, int, error)
+	CountDeviceStates(context.Context, string, bool) (int, int, error)
 	SaveDeviceStateEvent(context.Context, model.DeviceState) error
 	SaveRule(context.Context, model.AlarmRule) error
 	ListRules(context.Context, string) ([]model.AlarmRule, error)
+	ListRulesPage(context.Context, string, int, int) ([]model.AlarmRule, int, error)
 	DeleteRule(context.Context, string, string) error
 	SaveRulePending(context.Context, string, string, string, int64) error
 	GetRulePending(context.Context, string, string, string) (int64, bool, error)
@@ -57,6 +67,7 @@ type Repository interface {
 	UpsertAlarm(context.Context, model.Alarm) (model.Alarm, bool, error)
 	GetAlarm(context.Context, string, string) (model.Alarm, error)
 	ListAlarms(context.Context, AlarmFilter) ([]model.Alarm, error)
+	CountAlarms(context.Context, AlarmFilter) (int, error)
 	UpdateAlarm(context.Context, model.Alarm) error
 	SaveVideoEvent(context.Context, model.VideoAlarmEvent) (bool, error)
 	UpdateVideoEvent(context.Context, model.VideoAlarmEvent) error
@@ -64,10 +75,12 @@ type Repository interface {
 	SaveVideoCameraMapping(context.Context, model.VideoCameraMapping) error
 	GetVideoCameraMapping(context.Context, string, string) (model.VideoCameraMapping, error)
 	ListVideoCameraMappings(context.Context, string) ([]model.VideoCameraMapping, error)
+	ListVideoCameraMappingsPage(context.Context, string, int, int) ([]model.VideoCameraMapping, int, error)
 	SaveAIAnalysis(context.Context, model.AIAnalysis) error
 	GetAIAnalysis(context.Context, string, string) (model.AIAnalysis, error)
 	SaveKnowledgeDoc(context.Context, model.KnowledgeDoc) error
 	ListKnowledgeDocs(context.Context, string) ([]model.KnowledgeDoc, error)
+	ListKnowledgeDocsPage(context.Context, string, int, int) ([]model.KnowledgeDoc, int, error)
 	SaveWorkflowKnowledgeBinding(context.Context, model.WorkflowKnowledgeBinding) error
 	GetWorkflowKnowledgeBinding(context.Context, string, string) (model.WorkflowKnowledgeBinding, error)
 	SaveReplay(context.Context, model.ReplayRequest) error

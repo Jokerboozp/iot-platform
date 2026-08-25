@@ -71,6 +71,13 @@ func (r *Repository) ListProducts(_ context.Context, tenant string) ([]model.Pro
 	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt > out[j].UpdatedAt })
 	return out, nil
 }
+func (r *Repository) ListProductsPage(ctx context.Context, tenant string, limit, offset int) ([]model.Product, int, error) {
+	items, err := r.ListProducts(ctx, tenant)
+	if err != nil {
+		return nil, 0, err
+	}
+	return page(items, offset, limit), len(items), nil
+}
 func (r *Repository) SaveProtocolPackage(_ context.Context, v model.ProtocolPackage) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -97,6 +104,13 @@ func (r *Repository) ListProtocolPackages(_ context.Context, tenant string) ([]m
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt > out[j].UpdatedAt })
 	return out, nil
+}
+func (r *Repository) ListProtocolPackagesPage(ctx context.Context, tenant string, limit, offset int) ([]model.ProtocolPackage, int, error) {
+	items, err := r.ListProtocolPackages(ctx, tenant)
+	if err != nil {
+		return nil, 0, err
+	}
+	return page(items, offset, limit), len(items), nil
 }
 func (r *Repository) SaveManagedDevice(_ context.Context, v model.ManagedDevice) error {
 	r.mu.Lock()
@@ -139,6 +153,35 @@ func (r *Repository) ListManagedDevices(_ context.Context, tenant string) ([]mod
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt > out[j].UpdatedAt })
 	return out, nil
+}
+func (r *Repository) ListManagedDevicesPage(ctx context.Context, tenant string, limit, offset int) ([]model.ManagedDevice, int, error) {
+	items, err := r.ListManagedDevices(ctx, tenant)
+	if err != nil {
+		return nil, 0, err
+	}
+	return page(items, offset, limit), len(items), nil
+}
+func (r *Repository) CountManagedDeviceChildren(_ context.Context, tenant string, ids []string) (map[string]int, error) {
+	counts := make(map[string]int, len(ids))
+	if len(ids) == 0 {
+		return counts, nil
+	}
+	wanted := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id != "" {
+			wanted[id] = struct{}{}
+		}
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, device := range r.devices {
+		if device.TenantID == tenant && device.GatewayID != "" {
+			if _, ok := wanted[device.GatewayID]; ok {
+				counts[device.GatewayID]++
+			}
+		}
+	}
+	return counts, nil
 }
 
 func (r *Repository) SaveRawIndex(_ context.Context, v model.RawArchiveIndex) (bool, error) {
@@ -199,6 +242,18 @@ func (r *Repository) ListRawIndexes(_ context.Context, f ports.RawFilter) ([]mod
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ReceivedAt > out[j].ReceivedAt })
 	return page(out, f.Offset, f.Limit), nil
+}
+func (r *Repository) CountRawIndexes(_ context.Context, f ports.RawFilter) (int, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	count := 0
+	for _, v := range r.raw {
+		if f.TenantID != "" && v.TenantID != f.TenantID || f.ProductID != "" && v.ProductID != f.ProductID || f.DeviceID != "" && v.DeviceID != f.DeviceID || f.Start > 0 && v.ReceivedAt < f.Start || f.End > 0 && v.ReceivedAt > f.End {
+			continue
+		}
+		count++
+	}
+	return count, nil
 }
 func page[T any](v []T, offset, limit int) []T {
 	if offset < 0 {
@@ -297,6 +352,28 @@ func (r *Repository) PropertyHistory(_ context.Context, tenant, device, property
 	}
 	return out, nil
 }
+func (r *Repository) PropertyHistoryPage(ctx context.Context, tenant, device, property string, start, end int64, limit, offset int) ([]map[string]any, int, error) {
+	items, err := r.PropertyHistory(ctx, tenant, device, property, start, end, 0)
+	if err != nil {
+		return nil, 0, err
+	}
+	total := len(items)
+	if limit <= 0 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	endIndex := total - offset
+	if endIndex <= 0 {
+		return []map[string]any{}, total, nil
+	}
+	startIndex := endIndex - limit
+	if startIndex < 0 {
+		startIndex = 0
+	}
+	return items[startIndex:endIndex], total, nil
+}
 func (r *Repository) UpsertDeviceState(_ context.Context, v model.DeviceState) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -323,6 +400,64 @@ func (r *Repository) ListDeviceStates(_ context.Context, tenant string) ([]model
 	}
 	return out, nil
 }
+func (r *Repository) ListDeviceStatesPage(ctx context.Context, tenant string, limit, offset int) ([]model.DeviceState, int, error) {
+	items, err := r.ListDeviceStates(ctx, tenant)
+	if err != nil {
+		return nil, 0, err
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].LastSeenAt > items[j].LastSeenAt })
+	return page(items, offset, limit), len(items), nil
+}
+func (r *Repository) ListUnregisteredDeviceStatesPage(ctx context.Context, tenant string, limit, offset int) ([]model.DeviceState, int, error) {
+	items, err := r.ListDeviceStates(ctx, tenant)
+	if err != nil {
+		return nil, 0, err
+	}
+	r.mu.RLock()
+	registered := make(map[string]struct{})
+	for _, device := range r.devices {
+		if device.TenantID == tenant {
+			registered[device.ID] = struct{}{}
+		}
+	}
+	r.mu.RUnlock()
+	unregistered := make([]model.DeviceState, 0, len(items))
+	for _, item := range items {
+		if _, ok := registered[item.DeviceID]; !ok {
+			unregistered = append(unregistered, item)
+		}
+	}
+	sort.Slice(unregistered, func(i, j int) bool { return unregistered[i].LastSeenAt > unregistered[j].LastSeenAt })
+	return page(unregistered, offset, limit), len(unregistered), nil
+}
+func (r *Repository) CountDeviceStates(_ context.Context, tenant string, unregisteredOnly bool) (int, int, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	registered := make(map[string]struct{})
+	if unregisteredOnly {
+		for _, device := range r.devices {
+			if device.TenantID == tenant {
+				registered[device.ID] = struct{}{}
+			}
+		}
+	}
+	total, online := 0, 0
+	for _, state := range r.states {
+		if state.TenantID != tenant {
+			continue
+		}
+		if unregisteredOnly {
+			if _, ok := registered[state.DeviceID]; ok {
+				continue
+			}
+		}
+		total++
+		if state.BusinessStatus == "ONLINE" {
+			online++
+		}
+	}
+	return total, online, nil
+}
 func (r *Repository) SaveDeviceStateEvent(_ context.Context, v model.DeviceState) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -345,6 +480,13 @@ func (r *Repository) ListRules(_ context.Context, tenant string) ([]model.AlarmR
 		}
 	}
 	return out, nil
+}
+func (r *Repository) ListRulesPage(ctx context.Context, tenant string, limit, offset int) ([]model.AlarmRule, int, error) {
+	items, err := r.ListRules(ctx, tenant)
+	if err != nil {
+		return nil, 0, err
+	}
+	return page(items, offset, limit), len(items), nil
 }
 func (r *Repository) DeleteRule(_ context.Context, tenant, id string) error {
 	r.mu.Lock()
@@ -431,6 +573,18 @@ func (r *Repository) ListAlarms(_ context.Context, f ports.AlarmFilter) ([]model
 	sort.Slice(out, func(i, j int) bool { return out[i].LastTriggeredAt > out[j].LastTriggeredAt })
 	return page(out, f.Offset, f.Limit), nil
 }
+func (r *Repository) CountAlarms(_ context.Context, f ports.AlarmFilter) (int, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	count := 0
+	for _, v := range r.alarms {
+		if f.TenantID != "" && v.TenantID != f.TenantID || f.DeviceID != "" && v.DeviceID != f.DeviceID || f.Status != "" && v.Status != f.Status || f.Level != "" && v.AlarmLevel != f.Level || f.Source != "" && v.Source != f.Source || f.Start > 0 && v.LastTriggeredAt < f.Start || f.End > 0 && v.LastTriggeredAt > f.End {
+			continue
+		}
+		count++
+	}
+	return count, nil
+}
 func (r *Repository) UpdateAlarm(_ context.Context, v model.Alarm) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -497,6 +651,13 @@ func (r *Repository) ListVideoCameraMappings(_ context.Context, tenant string) (
 	sort.Slice(out, func(i, j int) bool { return out[i].CameraID < out[j].CameraID })
 	return out, nil
 }
+func (r *Repository) ListVideoCameraMappingsPage(ctx context.Context, tenant string, limit, offset int) ([]model.VideoCameraMapping, int, error) {
+	items, err := r.ListVideoCameraMappings(ctx, tenant)
+	if err != nil {
+		return nil, 0, err
+	}
+	return page(items, offset, limit), len(items), nil
+}
 func (r *Repository) SaveAIAnalysis(_ context.Context, v model.AIAnalysis) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -534,6 +695,13 @@ func (r *Repository) ListKnowledgeDocs(_ context.Context, tenant string) ([]mode
 		return out[i].CreatedAt > out[j].CreatedAt
 	})
 	return out, nil
+}
+func (r *Repository) ListKnowledgeDocsPage(ctx context.Context, tenant string, limit, offset int) ([]model.KnowledgeDoc, int, error) {
+	items, err := r.ListKnowledgeDocs(ctx, tenant)
+	if err != nil {
+		return nil, 0, err
+	}
+	return page(items, offset, limit), len(items), nil
 }
 
 func (r *Repository) SaveWorkflowKnowledgeBinding(_ context.Context, v model.WorkflowKnowledgeBinding) error {

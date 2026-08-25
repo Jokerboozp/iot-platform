@@ -198,12 +198,13 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 	write(w, status, map[string]any{"status": map[bool]string{true: "ok", false: "degraded"}[status == 200], "checks": checks})
 }
 func (s *Server) products(w http.ResponseWriter, r *http.Request) {
-	items, err := s.engine.Repo.ListProducts(r.Context(), claims(r).TenantID)
+	pagination := parseListPagination(r)
+	items, total, err := s.engine.Repo.ListProductsPage(r.Context(), claims(r).TenantID, pagination.PageSize, pagination.Offset)
 	if err != nil {
 		problem(w, 500, err.Error())
 		return
 	}
-	write(w, 200, map[string]any{"items": items, "count": len(items)})
+	writeList(w, 200, items, total, pagination, nil)
 }
 func (s *Server) saveProduct(w http.ResponseWriter, r *http.Request) {
 	var v model.Product
@@ -252,12 +253,13 @@ func (s *Server) saveProduct(w http.ResponseWriter, r *http.Request) {
 	write(w, 201, v)
 }
 func (s *Server) protocolPackages(w http.ResponseWriter, r *http.Request) {
-	items, err := s.engine.Repo.ListProtocolPackages(r.Context(), claims(r).TenantID)
+	pagination := parseListPagination(r)
+	items, total, err := s.engine.Repo.ListProtocolPackagesPage(r.Context(), claims(r).TenantID, pagination.PageSize, pagination.Offset)
 	if err != nil {
 		problem(w, 500, err.Error())
 		return
 	}
-	write(w, 200, map[string]any{"items": items, "count": len(items), "parserTypes": []string{"custom_json_parser", "configurable_json_parser", "configurable_hex_parser", parser.ModbusCoilParserName, "javascript_sandbox_parser", parser.GoProtocolParserName, "gb26875_dahua_parser", "fire_smoke_parser", "modbus_parser"}})
+	writeList(w, 200, items, total, pagination, map[string]any{"parserTypes": []string{"custom_json_parser", "configurable_json_parser", "configurable_hex_parser", parser.ModbusCoilParserName, "javascript_sandbox_parser", parser.GoProtocolParserName, "gb26875_dahua_parser", "fire_smoke_parser", "modbus_parser"}})
 }
 func (s *Server) saveProtocolPackage(w http.ResponseWriter, r *http.Request) {
 	var v model.ProtocolPackage
@@ -489,16 +491,20 @@ func (s *Server) testProtocolPackage(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) deviceRegistry(w http.ResponseWriter, r *http.Request) {
 	tenantID := claims(r).TenantID
-	items, err := s.engine.Repo.ListManagedDevices(r.Context(), tenantID)
+	pagination := parseListPagination(r)
+	items, total, err := s.engine.Repo.ListManagedDevicesPage(r.Context(), tenantID, pagination.PageSize, pagination.Offset)
 	if err != nil {
 		problem(w, 500, err.Error())
 		return
 	}
-	childCounts := make(map[string]int)
-	for _, v := range items {
-		if v.GatewayID != "" {
-			childCounts[v.GatewayID]++
-		}
+	deviceIDs := make([]string, 0, len(items))
+	for _, item := range items {
+		deviceIDs = append(deviceIDs, item.ID)
+	}
+	childCounts, err := s.engine.Repo.CountManagedDeviceChildren(r.Context(), tenantID, deviceIDs)
+	if err != nil {
+		problem(w, 500, err.Error())
+		return
 	}
 	out := make([]map[string]any, 0, len(items))
 	for _, v := range items {
@@ -508,7 +514,7 @@ func (s *Server) deviceRegistry(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, row)
 	}
-	write(w, 200, map[string]any{"items": out, "count": len(out)})
+	writeList(w, 200, out, total, pagination, nil)
 }
 func (s *Server) saveManagedDevice(w http.ResponseWriter, r *http.Request) {
 	var v model.ManagedDevice
@@ -761,7 +767,14 @@ func (s *Server) ingestRaw(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listRaw(w http.ResponseWriter, r *http.Request) {
 	c := claims(r)
 	q := r.URL.Query()
-	items, err := s.engine.Repo.ListRawIndexes(r.Context(), ports.RawFilter{TenantID: c.TenantID, ProductID: q.Get("productId"), DeviceID: q.Get("deviceId"), Start: i64(q.Get("start")), End: i64(q.Get("end")), Limit: intval(q.Get("limit"), 100), Offset: intval(q.Get("offset"), 0)})
+	pagination := parseListPagination(r)
+	filter := ports.RawFilter{TenantID: c.TenantID, ProductID: q.Get("productId"), DeviceID: q.Get("deviceId"), Start: i64(q.Get("start")), End: i64(q.Get("end")), Limit: pagination.PageSize, Offset: pagination.Offset}
+	items, err := s.engine.Repo.ListRawIndexes(r.Context(), filter)
+	if err != nil {
+		problem(w, 500, err.Error())
+		return
+	}
+	total, err := s.engine.Repo.CountRawIndexes(r.Context(), filter)
 	if err != nil {
 		problem(w, 500, err.Error())
 		return
@@ -773,7 +786,7 @@ func (s *Server) listRaw(w http.ResponseWriter, r *http.Request) {
 			items[i].Parser = message.Parser
 		}
 	}
-	write(w, 200, map[string]any{"items": items, "count": len(items)})
+	writeList(w, 200, items, total, pagination, nil)
 }
 func (s *Server) rawDetail(w http.ResponseWriter, r *http.Request) {
 	idx, err := s.engine.Repo.GetRawIndex(r.Context(), claims(r).TenantID, r.PathValue("id"))
@@ -954,18 +967,27 @@ func (s *Server) getReplay(w http.ResponseWriter, r *http.Request) {
 	write(w, 200, v)
 }
 func (s *Server) devices(w http.ResponseWriter, r *http.Request) {
-	items, err := s.engine.Repo.ListDeviceStates(r.Context(), claims(r).TenantID)
+	pagination := parseListPagination(r)
+	tenantID := claims(r).TenantID
+	unregisteredOnly := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("unregistered")), "true")
+	var items []model.DeviceState
+	var total int
+	var err error
+	if unregisteredOnly {
+		items, total, err = s.engine.Repo.ListUnregisteredDeviceStatesPage(r.Context(), tenantID, pagination.PageSize, pagination.Offset)
+	} else {
+		items, total, err = s.engine.Repo.ListDeviceStatesPage(r.Context(), tenantID, pagination.PageSize, pagination.Offset)
+	}
 	if err != nil {
 		problem(w, 500, err.Error())
 		return
 	}
-	online := 0
-	for _, v := range items {
-		if v.BusinessStatus == "ONLINE" {
-			online++
-		}
+	_, online, err := s.engine.Repo.CountDeviceStates(r.Context(), tenantID, unregisteredOnly)
+	if err != nil {
+		problem(w, 500, err.Error())
+		return
 	}
-	write(w, 200, map[string]any{"items": items, "total": len(items), "online": online, "offline": len(items) - online})
+	writeList(w, 200, items, total, pagination, map[string]any{"online": online, "offline": total - online, "unregistered": unregisteredOnly})
 }
 func (s *Server) deviceLatest(w http.ResponseWriter, r *http.Request) {
 	tenant, device := claims(r).TenantID, r.PathValue("deviceId")
@@ -989,12 +1011,13 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "property is required")
 		return
 	}
-	items, err := s.engine.Repo.PropertyHistory(r.Context(), claims(r).TenantID, r.PathValue("deviceId"), property, i64(q.Get("start")), i64(q.Get("end")), intval(q.Get("limit"), 1000))
+	pagination := parseListPagination(r)
+	items, total, err := s.engine.Repo.PropertyHistoryPage(r.Context(), claims(r).TenantID, r.PathValue("deviceId"), property, i64(q.Get("start")), i64(q.Get("end")), pagination.PageSize, pagination.Offset)
 	if err != nil {
 		problem(w, 500, err.Error())
 		return
 	}
-	write(w, 200, map[string]any{"items": items})
+	writeList(w, 200, items, total, pagination, nil)
 }
 func (s *Server) stateEvent(w http.ResponseWriter, r *http.Request) {
 	var v model.DeviceState
@@ -1009,12 +1032,13 @@ func (s *Server) stateEvent(w http.ResponseWriter, r *http.Request) {
 	write(w, 202, v)
 }
 func (s *Server) rules(w http.ResponseWriter, r *http.Request) {
-	v, err := s.engine.Repo.ListRules(r.Context(), claims(r).TenantID)
+	pagination := parseListPagination(r)
+	v, total, err := s.engine.Repo.ListRulesPage(r.Context(), claims(r).TenantID, pagination.PageSize, pagination.Offset)
 	if err != nil {
 		problem(w, 500, err.Error())
 		return
 	}
-	write(w, 200, map[string]any{"items": v})
+	writeList(w, 200, v, total, pagination, nil)
 }
 func (s *Server) saveRule(w http.ResponseWriter, r *http.Request) {
 	var v model.AlarmRule
@@ -1101,12 +1125,19 @@ func (s *Server) deleteRule(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) alarms(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	items, err := s.engine.Repo.ListAlarms(r.Context(), ports.AlarmFilter{TenantID: claims(r).TenantID, DeviceID: q.Get("deviceId"), Status: q.Get("status"), Level: q.Get("level"), Source: q.Get("source"), Start: i64(q.Get("start")), End: i64(q.Get("end")), Limit: intval(q.Get("limit"), 100), Offset: intval(q.Get("offset"), 0)})
+	pagination := parseListPagination(r)
+	filter := ports.AlarmFilter{TenantID: claims(r).TenantID, DeviceID: q.Get("deviceId"), Status: q.Get("status"), Level: q.Get("level"), Source: q.Get("source"), Start: i64(q.Get("start")), End: i64(q.Get("end")), Limit: pagination.PageSize, Offset: pagination.Offset}
+	items, err := s.engine.Repo.ListAlarms(r.Context(), filter)
 	if err != nil {
 		problem(w, 500, err.Error())
 		return
 	}
-	write(w, 200, map[string]any{"items": items, "count": len(items)})
+	total, err := s.engine.Repo.CountAlarms(r.Context(), filter)
+	if err != nil {
+		problem(w, 500, err.Error())
+		return
+	}
+	writeList(w, 200, items, total, pagination, nil)
 }
 func (s *Server) alarm(w http.ResponseWriter, r *http.Request) {
 	v, err := s.engine.Repo.GetAlarm(r.Context(), claims(r).TenantID, r.PathValue("id"))
@@ -1139,6 +1170,7 @@ func (s *Server) aiAnalysis(w http.ResponseWriter, r *http.Request) {
 	write(w, 200, v)
 }
 func (s *Server) aiProviders(w http.ResponseWriter, r *http.Request) {
+	pagination := parseListPagination(r)
 	items := []ports.AIPluginInfo{}
 	if s.engine.AIPlugins != nil {
 		items = s.engine.AIPlugins.List()
@@ -1170,7 +1202,8 @@ func (s *Server) aiProviders(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	active.DefaultBaseURL = ""
-	write(w, 200, map[string]any{"items": items, "active": active, "healthy": healthy, "healthMessage": healthMessage, "mode": "plugin-harness"})
+	items, total := pageItems(items, pagination)
+	writeList(w, 200, items, total, pagination, map[string]any{"active": active, "healthy": healthy, "healthMessage": healthMessage, "mode": "plugin-harness"})
 }
 func (s *Server) testAIProvider(w http.ResponseWriter, r *http.Request) {
 	var in struct {
@@ -1322,8 +1355,9 @@ func (s *Server) aiChat(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) aiWorkflows(w http.ResponseWriter, r *http.Request) {
+	pagination := parseListPagination(r)
 	if s.engine.AIWorkflows == nil {
-		write(w, 200, map[string]any{"items": []ports.AIWorkflowPlugin{}, "count": 0, "configured": false, "mode": "local", "healthy": false, "healthMessage": "AI workflow harness is not configured"})
+		writeList(w, 200, []ports.AIWorkflowPlugin{}, 0, pagination, map[string]any{"configured": false, "mode": "local", "healthy": false, "healthMessage": "AI workflow harness is not configured"})
 		return
 	}
 	items, err := s.engine.AIWorkflows.ListWorkflows(r.Context())
@@ -1331,13 +1365,15 @@ func (s *Server) aiWorkflows(w http.ResponseWriter, r *http.Request) {
 		if s.log != nil {
 			s.log.Warn("list AI workflows failed", "error", err)
 		}
-		write(w, 200, map[string]any{"items": []ports.AIWorkflowPlugin{}, "count": 0, "configured": true, "mode": "harness", "healthy": false, "healthMessage": "AI workflow harness is unavailable"})
+		writeList(w, 200, []ports.AIWorkflowPlugin{}, 0, pagination, map[string]any{"configured": true, "mode": "harness", "healthy": false, "healthMessage": "AI workflow harness is unavailable"})
 		return
 	}
-	write(w, 200, map[string]any{"items": items, "count": len(items), "configured": true, "mode": "harness", "healthy": true, "healthMessage": "AI workflow harness is reachable"})
+	items, total := pageItems(items, pagination)
+	writeList(w, 200, items, total, pagination, map[string]any{"configured": true, "mode": "harness", "healthy": true, "healthMessage": "AI workflow harness is reachable"})
 }
 
 func (s *Server) aiWorkflowManifests(w http.ResponseWriter, r *http.Request) {
+	pagination := parseListPagination(r)
 	manager, ok := s.engine.AIWorkflows.(ports.AIWorkflowAdminManager)
 	if !ok {
 		problem(w, http.StatusServiceUnavailable, "AI workflow harness does not support plugin management")
@@ -1351,9 +1387,8 @@ func (s *Server) aiWorkflowManifests(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusBadGateway, "AI workflow harness plugin catalog is unavailable")
 		return
 	}
-	write(w, http.StatusOK, map[string]any{
-		"items":         items,
-		"count":         len(items),
+	items, total := pageItems(items, pagination)
+	writeList(w, http.StatusOK, items, total, pagination, map[string]any{
 		"configured":    true,
 		"mode":          "harness",
 		"healthy":       true,
@@ -1883,7 +1918,8 @@ func (s *Server) aiReport(w http.ResponseWriter, r *http.Request) {
 	write(w, 200, map[string]any{"period": in.Period, "start": in.Start, "end": in.End, "report": report})
 }
 func (s *Server) knowledgeDocs(w http.ResponseWriter, r *http.Request) {
-	items, err := s.engine.Repo.ListKnowledgeDocs(r.Context(), claims(r).TenantID)
+	pagination := parseListPagination(r)
+	items, total, err := s.engine.Repo.ListKnowledgeDocsPage(r.Context(), claims(r).TenantID, pagination.PageSize, pagination.Offset)
 	if err != nil {
 		problem(w, 500, err.Error())
 		return
@@ -1893,7 +1929,7 @@ func (s *Server) knowledgeDocs(w http.ResponseWriter, r *http.Request) {
 	if persistent {
 		indexMode = "weaviate"
 	}
-	write(w, 200, map[string]any{"items": items, "count": len(items), "indexMode": indexMode, "persistentIndex": persistent})
+	writeList(w, 200, items, total, pagination, map[string]any{"indexMode": indexMode, "persistentIndex": persistent})
 }
 func (s *Server) knowledgeUpload(w http.ResponseWriter, r *http.Request) {
 	const maxDocumentBytes = 32 << 20
@@ -2107,7 +2143,8 @@ func (s *Server) videoWebhook(w http.ResponseWriter, r *http.Request) {
 	write(w, map[bool]int{true: 201, false: 200}[created], map[string]any{"created": created, "alarm": a})
 }
 func (s *Server) videoCameras(w http.ResponseWriter, r *http.Request) {
-	items, err := s.engine.Repo.ListVideoCameraMappings(r.Context(), claims(r).TenantID)
+	pagination := parseListPagination(r)
+	items, total, err := s.engine.Repo.ListVideoCameraMappingsPage(r.Context(), claims(r).TenantID, pagination.PageSize, pagination.Offset)
 	if err != nil {
 		problem(w, 500, err.Error())
 		return
@@ -2122,7 +2159,7 @@ func (s *Server) videoCameras(w http.ResponseWriter, r *http.Request) {
 			items[index].StreamURL = ""
 		}
 	}
-	write(w, 200, map[string]any{"items": items, "count": len(items)})
+	writeList(w, 200, items, total, pagination, nil)
 }
 func (s *Server) saveVideoCamera(w http.ResponseWriter, r *http.Request) {
 	var v model.VideoCameraMapping

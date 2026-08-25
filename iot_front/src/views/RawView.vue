@@ -10,19 +10,41 @@ const selection = ref([])
 const loading = ref(false)
 const detail = ref(null)
 const detailVisible = ref(false)
+const page = ref(1)
+const pageSize = ref(20)
+const total = ref(0)
 const selectedIds = computed(() => selection.value.map(item => item.messageId))
 
 async function load() {
   loading.value = true
   try {
-    const data = await api('/api/v1/raw-messages?limit=100' + (query.value ? `&deviceId=${encodeURIComponent(query.value)}` : ''))
+    const params = new URLSearchParams({ page: String(page.value), pageSize: String(pageSize.value) })
+    if (query.value) params.set('deviceId', query.value)
+    const data = await api(`/api/v1/raw-messages?${params.toString()}`)
     items.value = data.items || []
+    total.value = Number(data.total ?? data.count ?? items.value.length)
     selection.value = []
   } catch (error) {
     notifyError(error)
   } finally {
     loading.value = false
   }
+}
+
+async function search() {
+  page.value = 1
+  await load()
+}
+
+function changePage(value) {
+  page.value = value
+  load()
+}
+
+function changePageSize(value) {
+  pageSize.value = value
+  page.value = 1
+  load()
 }
 
 async function show(id) {
@@ -70,13 +92,16 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="page-toolbar"><el-input v-model="query" clearable placeholder="设备 ID" @keyup.enter="load" /><el-button type="primary" @click="load">查询</el-button><el-button :disabled="!selectedIds.length" @click="downloadBatch">批量下载（{{ selectedIds.length }}）</el-button><span>原始报文保留证据链，详情同时展示标准解析结果</span></div>
+  <div class="page-toolbar"><el-input v-model="query" clearable placeholder="设备 ID" @keyup.enter="search" /><el-button type="primary" @click="search">查询</el-button><el-button :disabled="!selectedIds.length" @click="downloadBatch">批量下载（{{ selectedIds.length }}）</el-button><span>共 {{ total }} 条原始报文，保留证据链，详情同时展示标准解析结果</span></div>
   <el-card shadow="never" class="surface-card table-card">
     <el-table v-loading="loading" :data="items" stripe @selection-change="selection = $event">
       <el-table-column type="selection" width="48" /><el-table-column label="接收时间" min-width="170"><template #default="{ row }">{{ formatTime(row.receivedAt) }}</template></el-table-column><el-table-column prop="messageId" label="消息 ID" min-width="220" /><el-table-column prop="productId" label="产品" min-width="150" /><el-table-column prop="deviceId" label="设备" min-width="170" /><el-table-column prop="protocol" label="协议" width="100" />
       <el-table-column label="解析状态" width="145"><template #default="{ row }"><el-tag :type="row.parsed ? 'success' : 'info'" round>{{ row.parsed ? `已解析 · ${messageTypeLabel(row.parsedMessageType)}` : '待解析/未匹配' }}</el-tag></template></el-table-column><el-table-column label="大小" width="90"><template #default="{ row }">{{ row.payloadSize }} B</template></el-table-column><el-table-column label="校验摘要" min-width="140"><template #default="{ row }"><el-tooltip :content="row.payloadHash"><code>{{ row.payloadHash?.slice(0, 12) }}…</code></el-tooltip></template></el-table-column>
       <el-table-column label="操作" fixed="right" width="180" align="center"><template #default="{ row }"><div class="table-actions"><el-button plain type="primary" @click="show(row.messageId)">详情</el-button><el-button plain @click="downloadOne(row.messageId)">下载</el-button></div></template></el-table-column>
     </el-table>
+    <div class="list-pagination">
+      <el-pagination v-model:current-page="page" v-model:page-size="pageSize" :total="total" :page-sizes="[20, 50, 100]" layout="total, sizes, prev, pager, next, jumper" @current-change="changePage" @size-change="changePageSize" />
+    </div>
   </el-card>
   <el-dialog v-model="detailVisible" title="报文详情与解析结果" width="min(900px, 94vw)">
     <el-descriptions v-if="detail" :column="2" border><el-descriptions-item label="消息 ID">{{ detail.message?.messageId }}</el-descriptions-item><el-descriptions-item label="解析状态"><el-tag :type="detail.parseStatus === 'PARSED' ? 'success' : 'info'" round>{{ detail.parseStatus === 'PARSED' ? '已解析' : '待解析/未匹配' }}</el-tag></el-descriptions-item><el-descriptions-item label="设备 / 产品">{{ detail.message?.deviceId }} / {{ detail.message?.productId }}</el-descriptions-item><el-descriptions-item label="接收时间">{{ formatTime(detail.message?.receivedAt) }}</el-descriptions-item><el-descriptions-item label="协议 / 格式">{{ detail.message?.protocol }} / {{ detail.message?.payloadFormat }}</el-descriptions-item><el-descriptions-item label="解析器">{{ detail.standardMessage?.parser || '—' }} {{ detail.standardMessage?.parserVersion || '' }}</el-descriptions-item><el-descriptions-item label="SHA-256" :span="2"><code class="break-all">{{ detail.archive?.payloadHash }}</code></el-descriptions-item></el-descriptions>

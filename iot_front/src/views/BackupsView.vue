@@ -13,6 +13,11 @@ const detailVisible = ref(false)
 const detailLoading = ref(false)
 const detail = ref(null)
 const manifest = ref(null)
+const manifestPage = ref(1)
+const manifestPageSize = ref(20)
+const manifestTotal = ref(0)
+const page = ref(1)
+const pageSize = ref(20)
 
 const isAdmin = computed(() => session.role === 'admin')
 const runningCount = computed(() => records.value.filter(item => item.status === 'RUNNING').length)
@@ -43,10 +48,11 @@ function idPath(value) {
   return encodeURIComponent(String(value || ''))
 }
 
-async function load() {
+async function load(resetPage = false) {
+  if (resetPage) page.value = 1
   loading.value = true
   try {
-    const query = new URLSearchParams({ limit: '100' })
+    const query = new URLSearchParams({ page: String(page.value), pageSize: String(pageSize.value) })
     if (filters.type) query.set('type', filters.type)
     if (filters.status) query.set('status', filters.status)
     const data = await api(`/api/v1/backups?${query.toString()}`)
@@ -59,21 +65,51 @@ async function load() {
   }
 }
 
+function changePage(value) {
+  page.value = value
+  load()
+}
+
+function changePageSize(value) {
+  pageSize.value = value
+  page.value = 1
+  load()
+}
+
 async function showDetail(row) {
   detailVisible.value = true
   detailLoading.value = true
   detail.value = null
   manifest.value = null
+  manifestPage.value = 1
+  manifestTotal.value = 0
   try {
     detail.value = await api(`/api/v1/backups/${idPath(row.id)}`)
     if (row.status === 'COMPLETED' && ['FULL', 'INCREMENTAL'].includes(row.type)) {
-      manifest.value = await api(`/api/v1/backups/${idPath(row.id)}/files`)
+      await loadManifest(row.id)
     }
   } catch (error) {
     notifyError(error)
   } finally {
     detailLoading.value = false
   }
+}
+
+async function loadManifest(id) {
+  const query = new URLSearchParams({ page: String(manifestPage.value), pageSize: String(manifestPageSize.value) })
+  manifest.value = await api(`/api/v1/backups/${idPath(id)}/files?${query.toString()}`)
+  manifestTotal.value = Number(manifest.value.total ?? manifest.value.artifacts?.length ?? 0)
+}
+
+function changeManifestPage(value) {
+  manifestPage.value = value
+  if (detail.value?.id) loadManifest(detail.value.id).catch(notifyError)
+}
+
+function changeManifestPageSize(value) {
+  manifestPageSize.value = value
+  manifestPage.value = 1
+  if (detail.value?.id) loadManifest(detail.value.id).catch(notifyError)
 }
 
 async function runBackup(type) {
@@ -125,10 +161,10 @@ onMounted(load)
 
 <template>
   <div class="page-toolbar backups-toolbar">
-    <el-select v-model="filters.type" clearable placeholder="备份类型" @change="load">
+    <el-select v-model="filters.type" clearable placeholder="备份类型" @change="load(true)">
       <el-option v-for="(text, value) in backupTypes" :key="value" :label="text" :value="value" />
     </el-select>
-    <el-select v-model="filters.status" clearable placeholder="执行状态" @change="load">
+    <el-select v-model="filters.status" clearable placeholder="执行状态" @change="load(true)">
       <el-option v-for="(text, value) in backupStatuses" :key="value" :label="text" :value="value" />
     </el-select>
     <el-button @click="load">刷新记录</el-button>
@@ -157,6 +193,9 @@ onMounted(load)
       <el-table-column label="操作" fixed="right" min-width="210" align="center"><template #default="{ row }"><div class="table-actions"><el-button link type="primary" @click="showDetail(row)">详情 / 文件</el-button><el-button v-if="isAdmin && row.status === 'COMPLETED' && ['FULL', 'INCREMENTAL'].includes(row.type)" link type="warning" :loading="actionLoading === `drill:${row.id}`" @click="restoreDrill(row)">恢复演练</el-button></div></template></el-table-column>
     </el-table>
     <el-empty v-if="!loading && !records.length" description="还没有备份记录；定时任务执行后会自动出现在这里" />
+    <div class="list-pagination">
+      <el-pagination v-model:current-page="page" v-model:page-size="pageSize" :total="total" :page-sizes="[20, 50, 100]" layout="total, sizes, prev, pager, next, jumper" @current-change="changePage" @size-change="changePageSize" />
+    </div>
   </el-card>
 
   <el-dialog v-model="detailVisible" :title="detail ? `${label(backupTypes, detail.type)} · ${detail.id}` : '备份详情'" width="min(1080px, 94vw)">
@@ -172,7 +211,7 @@ onMounted(load)
       </el-descriptions>
       <el-alert v-if="detail.status === 'FAILED'" class="top-gap" type="error" title="备份任务失败" :description="detail.details?.error || '请查看 backup-service 日志'" :closable="false" show-icon />
       <template v-if="manifest">
-        <div class="section-heading top-gap"><div><strong>备份文件</strong><span>清单中的每个文件都可以查看；文件下载和恢复演练仅管理员可用</span></div><el-button v-if="isAdmin" link type="primary" :loading="actionLoading === `download:${detail.id}:manifest.json`" @click="downloadArtifact(detail, manifest.artifacts.find(item => item.filename === 'manifest.json'))">下载 manifest.json</el-button></div>
+        <div class="section-heading top-gap"><div><strong>备份文件</strong><span>清单中的每个文件都可以查看；文件下载和恢复演练仅管理员可用</span></div><el-button v-if="isAdmin" link type="primary" :loading="actionLoading === `download:${detail.id}:manifest.json`" @click="downloadArtifact(detail, { filename: 'manifest.json' })">下载 manifest.json</el-button></div>
         <el-table :data="manifest.artifacts" stripe>
           <el-table-column prop="component" label="组件" width="160" />
           <el-table-column prop="filename" label="文件名" min-width="240"><template #default="{ row }"><code>{{ row.filename }}</code></template></el-table-column>
@@ -180,6 +219,9 @@ onMounted(load)
           <el-table-column label="SHA-256" min-width="190"><template #default="{ row }"><el-tooltip :content="row.sha256"><code>{{ row.sha256?.slice(0, 12) }}…</code></el-tooltip></template></el-table-column>
           <el-table-column label="操作" width="100" align="center"><template #default="{ row }"><el-button v-if="isAdmin" link type="primary" :loading="actionLoading === `download:${detail.id}:${row.filename}`" @click="downloadArtifact(detail, row)">下载</el-button><span v-else class="muted-text">管理员可下载</span></template></el-table-column>
         </el-table>
+        <div class="list-pagination">
+          <el-pagination v-model:current-page="manifestPage" v-model:page-size="manifestPageSize" :total="manifestTotal" :page-sizes="[20, 50, 100]" layout="total, sizes, prev, pager, next, jumper" @current-change="changeManifestPage" @size-change="changeManifestPageSize" />
+        </div>
         <div class="section-heading top-gap"><div><strong>组件说明</strong><span>由备份任务写入 manifest，用于确认本次备份覆盖范围</span></div></div>
         <pre>{{ pretty(manifest.components) }}</pre>
       </template>

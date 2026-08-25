@@ -14,6 +14,9 @@ const debugDialog = ref(false)
 const navigationRequested = ref(false)
 const debugResult = ref('等待发送。')
 const debugPayload = ref(pretty({ payload:{ properties:{ temperature:88.5, smoke:true, battery:92 }, tags:{ cityCode:'city_001', districtCode:'district_01', buildingId:'A', deviceType:'smoke' } } }))
+const page = ref(1)
+const pageSize = ref(20)
+const total = ref(0)
 
 function deviceName(id) {
   return registry.value.find(row => row.device.id === id)?.device.name || id || '未设置'
@@ -22,8 +25,9 @@ function deviceName(id) {
 async function load() {
   loading.value = true
   try {
-    const data = await api('/api/v1/device-registry')
+    const data = await api(`/api/v1/device-registry?page=${page.value}&pageSize=${pageSize.value}`)
     registry.value = data.items || []
+    total.value = Number(data.total ?? data.count ?? registry.value.length)
     const raw = sessionStorage.getItem('iot:navigation-detail')
     if (raw) {
       const navigation = JSON.parse(raw)
@@ -38,6 +42,17 @@ async function load() {
   } finally {
     loading.value = false
   }
+}
+
+function changePage(value) {
+  page.value = value
+  load()
+}
+
+function changePageSize(value) {
+  pageSize.value = value
+  page.value = 1
+  load()
 }
 
 async function loadGuide() {
@@ -102,7 +117,7 @@ onMounted(async () => {
   <div class="page-toolbar">
     <el-button plain type="primary" @click="emit('navigate','devices')">管理设备</el-button>
     <el-button :loading="loading" @click="load">刷新</el-button>
-    <span>共 {{ registry.length }} 台已注册设备，连接指南和数据联调入口位于列表右侧。</span>
+    <span>共 {{ total }} 台已注册设备，连接指南和数据联调入口位于列表右侧。</span>
   </div>
 
   <el-card shadow="never" class="surface-card table-card">
@@ -115,6 +130,9 @@ onMounted(async () => {
       <el-table-column label="操作" width="250" fixed="right" align="center"><template #default="{ row }"><div class="table-actions"><el-button plain type="primary" @click="openGuide(row.device.id)">连接指南</el-button><el-button plain type="primary" @click="openDebug(row.device.id)">数据联调</el-button></div></template></el-table-column>
       <template #empty><el-empty description="还没有注册设备，请先到设备管理创建" /></template>
     </el-table>
+    <div class="list-pagination">
+      <el-pagination v-model:current-page="page" v-model:page-size="pageSize" :total="total" :page-sizes="[20, 50, 100]" layout="total, sizes, prev, pager, next, jumper" @current-change="changePage" @size-change="changePageSize" />
+    </div>
   </el-card>
 
   <el-dialog v-model="guideDialog" :title="`设备连接指南 · ${deviceName(selected)}`" width="min(780px, 94vw)">

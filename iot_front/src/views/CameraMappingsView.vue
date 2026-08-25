@@ -11,6 +11,9 @@ const editing = ref('')
 const previewVisible = ref(false)
 const previewLoading = ref(false)
 const preview = ref(null)
+const page = ref(1)
+const pageSize = ref(20)
+const total = ref(0)
 const blank = () => ({
   cameraId: '', cameraName: '', videoPlatformId: '', projectId: '',
   cityCode: '', districtCode: '', building: '', floor: '', areaId: '',
@@ -21,8 +24,9 @@ const camera = reactive(blank())
 async function load() {
   loading.value = true
   try {
-    const data = await api('/api/v1/integrations/video/cameras')
+    const data = await api(`/api/v1/integrations/video/cameras?page=${page.value}&pageSize=${pageSize.value}`)
     cameras.value = data.items || []
+    total.value = Number(data.total ?? data.count ?? cameras.value.length)
   } catch (error) {
     notifyError(error)
   } finally {
@@ -87,6 +91,17 @@ async function consumeNavigationAction() {
   } catch { /* ignore invalid navigation detail */ }
 }
 
+function changePage(value) {
+  page.value = value
+  load()
+}
+
+function changePageSize(value) {
+  pageSize.value = value
+  page.value = 1
+  load()
+}
+
 onMounted(async()=>{await load();await consumeNavigationAction()})
 </script>
 
@@ -94,7 +109,7 @@ onMounted(async()=>{await load();await consumeNavigationAction()})
   <div class="page-toolbar">
     <el-button type="primary" @click="open()">新增映射</el-button>
     <el-button @click="load">刷新</el-button>
-    <span>维护摄像头与城市、建筑、区域及物联设备的关联关系</span>
+    <span>共 {{ total }} 个映射，维护摄像头与城市、建筑、区域及物联设备的关联关系</span>
   </div>
 
   <el-card shadow="never" class="surface-card table-card">
@@ -122,6 +137,9 @@ onMounted(async()=>{await load();await consumeNavigationAction()})
       </el-table-column>
       <template #empty><el-empty description="暂无摄像头映射" /></template>
     </el-table>
+    <div class="list-pagination">
+      <el-pagination v-model:current-page="page" v-model:page-size="pageSize" :total="total" :page-sizes="[20, 50, 100]" layout="total, sizes, prev, pager, next, jumper" @current-change="changePage" @size-change="changePageSize" />
+    </div>
   </el-card>
 
   <el-dialog v-model="dialogVisible" :title="editing ? '编辑摄像头映射' : '新增摄像头映射'" width="min(720px, 94vw)">

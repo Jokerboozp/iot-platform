@@ -9,6 +9,9 @@ const testing = ref(false)
 const loading = ref(false)
 const dialog = ref(false)
 const readonly = ref(false)
+const page = ref(1)
+const pageSize = ref(20)
+const total = ref(0)
 const result = ref('选择或保存一个协议包后可进行调试。')
 const blank = () => ({ id:'', name:'', version:'1.0.0', protocol:'json', transport:'MQTT', payloadFormat:'json', parserType:'custom_json_parser', status:'DRAFT', config:'{}', description:'' })
 const form = reactive(blank())
@@ -19,13 +22,25 @@ const scriptSource = ref(defaultScript())
 async function load() {
   loading.value = true
   try {
-    const data = await api('/api/v1/protocol-packages')
+    const data = await api(`/api/v1/protocol-packages?page=${page.value}&pageSize=${pageSize.value}`)
     items.value = data.items || []
+    total.value = Number(data.total ?? data.count ?? items.value.length)
   } catch (error) {
     notifyError(error)
   } finally {
     loading.value = false
   }
+}
+
+function changePage(value) {
+  page.value = value
+  load()
+}
+
+function changePageSize(value) {
+  pageSize.value = value
+  page.value = 1
+  load()
 }
 
 function reset() {
@@ -171,7 +186,7 @@ onMounted(load)
     <el-button type="primary" @click="openCreate">新建协议包</el-button>
     <el-button :loading="loading" @click="load">刷新</el-button>
     <el-tag type="success" round>可配置解析</el-tag>
-    <span>共 {{ items.length }} 个协议包，解析配置和调试入口位于列表右侧。</span>
+    <span>共 {{ total }} 个协议包，解析配置和调试入口位于列表右侧。</span>
   </div>
 
   <el-card shadow="never" class="surface-card table-card">
@@ -199,6 +214,9 @@ onMounted(load)
       </el-table-column>
       <template #empty><el-empty description="暂无协议包" /></template>
     </el-table>
+    <div class="list-pagination">
+      <el-pagination v-model:current-page="page" v-model:page-size="pageSize" :total="total" :page-sizes="[20, 50, 100]" layout="total, sizes, prev, pager, next, jumper" @current-change="changePage" @size-change="changePageSize" />
+    </div>
   </el-card>
 
   <el-dialog v-model="dialog" :title="readonly ? `协议包详情 · ${form.name || form.id}` : (form.id ? `编辑协议包 · ${form.name}` : '新建协议包')" width="min(980px, 96vw)">

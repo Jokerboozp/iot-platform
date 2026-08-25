@@ -109,6 +109,49 @@ func (r *Repository) PropertyHistory(ctx context.Context, tenant, device, proper
 	}
 	return out, nil
 }
+func (r *Repository) PropertyHistoryPage(ctx context.Context, tenant, device, property string, start, end int64, limit, offset int) ([]map[string]any, int, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if end <= 0 {
+		end = time.Now().UnixMilli()
+	}
+	if !propertyCodePattern.MatchString(property) {
+		return r.Repository.PropertyHistoryPage(ctx, tenant, device, property, start, end, limit, offset)
+	}
+	where := fmt.Sprintf(`tenant_id=%s AND device_id=%s AND ts >= fromUnixTimestamp64Milli(%d) AND ts <= fromUnixTimestamp64Milli(%d)`, quote(tenant), quote(device), start, end)
+	countBody, err := r.query(ctx, fmt.Sprintf(`SELECT count() AS total FROM iot_telemetry WHERE %s FORMAT JSONEachRow`, where), nil)
+	if err != nil {
+		return r.Repository.PropertyHistoryPage(ctx, tenant, device, property, start, end, limit, offset)
+	}
+	var countRow struct {
+		Total int `json:"total"`
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(countBody)), "\n") {
+		if line != "" && json.Unmarshal([]byte(line), &countRow) == nil {
+			break
+		}
+	}
+	data, err := r.query(ctx, fmt.Sprintf(`SELECT toUnixTimestamp64Milli(ts) AS timestamp, properties.%s AS value, message_id AS messageId FROM iot_telemetry WHERE %s ORDER BY ts DESC, message_id DESC LIMIT %d OFFSET %d FORMAT JSONEachRow`, property, where, limit, offset), nil)
+	if err != nil {
+		return r.Repository.PropertyHistoryPage(ctx, tenant, device, property, start, end, limit, offset)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	items := make([]map[string]any, 0, limit)
+	for i := len(lines) - 1; i >= 0; i-- {
+		var item map[string]any
+		if lines[i] != "" && json.Unmarshal([]byte(lines[i]), &item) == nil {
+			items = append(items, item)
+		}
+	}
+	return items, countRow.Total, nil
+}
 func (r *Repository) query(ctx context.Context, q string, body []byte) ([]byte, error) {
 	u, err := url.Parse(r.base)
 	if err != nil {

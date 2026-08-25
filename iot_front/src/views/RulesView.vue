@@ -14,20 +14,38 @@ const prompt = ref('')
 const draft = ref(null)
 const drafting = ref(false)
 const draftError = ref('')
+const page = ref(1)
+const pageSize = ref(20)
+const total = ref(0)
 const blank = () => ({ id:'', name:'', alarmType:'FIRE_RISK', level:'HIGH', productId:'', match:'all', expression:'', conditions:pretty([{ field:'temperature', operator:'>', value:80 }]), recovery:'[]', actions:'[]', durationSeconds:0, enabled:true })
 const form = reactive(blank())
 
 async function load() {
   loading.value = true
   try {
-    const [rulesData, productData] = await Promise.all([api('/api/v1/rules'), api('/api/v1/products')])
+    const [rulesData, productData] = await Promise.all([
+      api(`/api/v1/rules?page=${page.value}&pageSize=${pageSize.value}`),
+      api('/api/v1/products?page=1&pageSize=100')
+    ])
     rules.value = rulesData.items || []
+    total.value = Number(rulesData.total ?? rulesData.count ?? rules.value.length)
     products.value = productData.items || []
   } catch (error) {
     notifyError(error)
   } finally {
     loading.value = false
   }
+}
+
+function changePage(value) {
+  page.value = value
+  load()
+}
+
+function changePageSize(value) {
+  pageSize.value = value
+  page.value = 1
+  load()
 }
 
 function open(value) {
@@ -133,7 +151,7 @@ onMounted(async () => {
     <el-button type="primary" @click="open()">手动添加规则</el-button>
     <el-button @click="openDraft">AI 生成规则草稿</el-button>
     <el-button :loading="loading" @click="load">刷新</el-button>
-    <span>共 {{ rules.length }} 条规则，详情、编辑和删除操作位于列表右侧。</span>
+    <span>共 {{ total }} 条规则，详情、编辑和删除操作位于列表右侧。</span>
   </div>
 
   <el-card shadow="never" class="surface-card table-card">
@@ -151,6 +169,9 @@ onMounted(async () => {
       </el-table-column>
       <template #empty><el-empty description="暂无规则，可手动添加或使用 AI 生成草稿" /></template>
     </el-table>
+    <div class="list-pagination">
+      <el-pagination v-model:current-page="page" v-model:page-size="pageSize" :total="total" :page-sizes="[20, 50, 100]" layout="total, sizes, prev, pager, next, jumper" @current-change="changePage" @size-change="changePageSize" />
+    </div>
   </el-card>
 
   <el-dialog v-model="draftDialog" title="AI 规则草稿" width="min(720px, 94vw)">

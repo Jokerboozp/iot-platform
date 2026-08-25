@@ -19,6 +19,9 @@ const productId = ref('')
 const category = ref('manual')
 const tags = ref([])
 const runtime = ref({ indexMode:'', persistentIndex:false })
+const page = ref(1)
+const pageSize = ref(20)
+const total = ref(0)
 
 const canUpload = computed(() => session.role === 'admin' || session.role === 'operator')
 const indexedCount = computed(() => documents.value.filter(item => item.status === 'INDEXED').length)
@@ -35,8 +38,12 @@ function formatBytes(value) {
 async function load() {
   loading.value = true
   try {
-    const [data, productData] = await Promise.all([api('/api/v1/knowledge/documents'), api('/api/v1/products')])
+    const [data, productData] = await Promise.all([
+      api(`/api/v1/knowledge/documents?page=${page.value}&pageSize=${pageSize.value}`),
+      api('/api/v1/products?page=1&pageSize=100')
+    ])
     documents.value = Array.isArray(data.items) ? data.items : []
+    total.value = Number(data.total ?? data.count ?? documents.value.length)
     products.value = Array.isArray(productData.items) ? productData.items : []
     runtime.value = { indexMode:data.indexMode || '', persistentIndex:Boolean(data.persistentIndex) }
   } catch (error) {
@@ -44,6 +51,17 @@ async function load() {
   } finally {
     loading.value = false
   }
+}
+
+function changePage(value) {
+  page.value = value
+  load()
+}
+
+function changePageSize(value) {
+  pageSize.value = value
+  page.value = 1
+  load()
 }
 
 function openUpload() {
@@ -121,7 +139,7 @@ onMounted(load)
   <el-alert v-if="!runtime.persistentIndex" title="当前使用本地内存索引：文档原文和记录会保存，但 API 重启后检索索引需要重新建立。生产环境请启用 Weaviate。" type="warning" :closable="false" show-icon />
 
   <div class="knowledge-stats">
-    <el-card shadow="never" class="surface-card"><span>知识文档</span><strong>{{ documents.length }}</strong><small>当前租户</small></el-card>
+    <el-card shadow="never" class="surface-card"><span>知识文档</span><strong>{{ total }}</strong><small>当前租户</small></el-card>
     <el-card shadow="never" class="surface-card"><span>已完成索引</span><strong>{{ indexedCount }}</strong><small>可供 AI 检索</small></el-card>
     <el-card shadow="never" class="surface-card"><span>内容分片</span><strong>{{ totalChunks }}</strong><small>{{ formatBytes(totalSize) }}</small></el-card>
   </div>
@@ -129,7 +147,7 @@ onMounted(load)
   <div class="page-toolbar knowledge-toolbar">
     <el-button type="primary" :disabled="!canUpload" @click="openUpload">上传知识文档</el-button>
     <el-button :loading="loading" @click="load">刷新</el-button>
-    <span>共 {{ documents.length }} 份文档，详情操作位于列表右侧。</span>
+    <span>共 {{ total }} 份文档，详情操作位于列表右侧。</span>
   </div>
 
   <el-card shadow="never" class="surface-card table-card documents-card">
@@ -145,6 +163,9 @@ onMounted(load)
       <el-table-column label="操作" width="110" fixed="right" align="center"><template #default="{ row }"><div class="table-actions"><el-button plain type="primary" @click="showDocument(row)">详情</el-button></div></template></el-table-column>
       <template #empty><el-empty description="暂无知识库文档" /></template>
     </el-table>
+    <div class="list-pagination">
+      <el-pagination v-model:current-page="page" v-model:page-size="pageSize" :total="total" :page-sizes="[20, 50, 100]" layout="total, sizes, prev, pager, next, jumper" @current-change="changePage" @size-change="changePageSize" />
+    </div>
   </el-card>
 
   <el-dialog v-model="uploadDialog" title="上传知识文档" width="min(650px, 94vw)">

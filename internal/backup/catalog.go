@@ -28,10 +28,21 @@ type Task struct {
 }
 
 type TaskPage struct {
-	Items  []Task `json:"items"`
-	Total  int    `json:"total"`
-	Limit  int    `json:"limit"`
-	Offset int    `json:"offset"`
+	Items    []Task `json:"items"`
+	Total    int    `json:"total"`
+	Limit    int    `json:"limit"`
+	Offset   int    `json:"offset"`
+	Page     int    `json:"page"`
+	PageSize int    `json:"pageSize"`
+}
+
+type ArtifactPage struct {
+	Manifest
+	Total    int `json:"total"`
+	Limit    int `json:"limit"`
+	Offset   int `json:"offset"`
+	Page     int `json:"page"`
+	PageSize int `json:"pageSize"`
 }
 
 // ListTasks returns system-level backup and restore-drill history. Backup
@@ -47,10 +58,10 @@ func (s *Service) ListTasks(ctx context.Context, backupType, status string, limi
 		return TaskPage{}, fmt.Errorf("unsupported backup status: %s", status)
 	}
 	if limit <= 0 {
-		limit = 50
+		limit = 20
 	}
-	if limit > 200 {
-		limit = 200
+	if limit > 100 {
+		limit = 100
 	}
 	if offset < 0 {
 		offset = 0
@@ -81,7 +92,7 @@ func (s *Service) ListTasks(ctx context.Context, backupType, status string, limi
 	if err = rows.Err(); err != nil {
 		return TaskPage{}, err
 	}
-	return TaskPage{Items: items, Total: total, Limit: limit, Offset: offset}, nil
+	return TaskPage{Items: items, Total: total, Limit: limit, Offset: offset, Page: offset/limit + 1, PageSize: limit}, nil
 }
 
 func (s *Service) GetTask(ctx context.Context, id string) (Task, error) {
@@ -142,6 +153,33 @@ func (s *Service) ListArtifacts(ctx context.Context, id string) (Manifest, error
 		Size:      manifestInfo.Size,
 	})
 	return manifest, nil
+}
+
+func (s *Service) ListArtifactsPage(ctx context.Context, id string, limit, offset int) (ArtifactPage, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	manifest, err := s.ListArtifacts(ctx, id)
+	if err != nil {
+		return ArtifactPage{}, err
+	}
+	total := len(manifest.Artifacts)
+	if offset >= total {
+		manifest.Artifacts = []Artifact{}
+	} else {
+		end := offset + limit
+		if end > total {
+			end = total
+		}
+		manifest.Artifacts = manifest.Artifacts[offset:end]
+	}
+	return ArtifactPage{Manifest: manifest, Total: total, Limit: limit, Offset: offset, Page: offset/limit + 1, PageSize: limit}, nil
 }
 
 // OpenArtifact opens a file after checking that it belongs to the selected

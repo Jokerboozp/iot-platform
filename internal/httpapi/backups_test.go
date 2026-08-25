@@ -106,7 +106,7 @@ func TestBackupEndpointsProxyRecordsFilesAndAdminActions(t *testing.T) {
 	for _, call := range calls {
 		joined += call + "\n"
 	}
-	if !bytes.Contains([]byte(joined), []byte("GET /backups?type=FULL")) || !bytes.Contains([]byte(joined), []byte("POST /backup?type=INCREMENTAL")) || !bytes.Contains([]byte(joined), []byte("POST /restore/drill?backupId=backup_full_1")) {
+	if !bytes.Contains([]byte(joined), []byte("GET /backups?limit=20&offset=0&type=FULL")) || !bytes.Contains([]byte(joined), []byte("GET /backups/backup_full_1/files?limit=20&offset=0")) || !bytes.Contains([]byte(joined), []byte("POST /backup?type=INCREMENTAL")) || !bytes.Contains([]byte(joined), []byte("POST /restore/drill?backupId=backup_full_1")) {
 		t.Fatalf("unexpected backup-service calls: %s", joined)
 	}
 }

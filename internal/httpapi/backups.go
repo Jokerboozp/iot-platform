@@ -7,17 +7,21 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
 
 func (s *Server) listBackups(w http.ResponseWriter, r *http.Request) {
+	pagination := parseListPagination(r)
 	query := url.Values{}
-	for _, name := range []string{"type", "status", "limit", "offset"} {
+	for _, name := range []string{"type", "status"} {
 		if value := strings.TrimSpace(r.URL.Query().Get(name)); value != "" {
 			query.Set(name, value)
 		}
 	}
+	query.Set("limit", strconv.Itoa(pagination.PageSize))
+	query.Set("offset", strconv.Itoa(pagination.Offset))
 	s.proxyBackupJSON(w, r, http.MethodGet, "/backups", query, nil, 30*time.Second)
 }
 
@@ -36,7 +40,11 @@ func (s *Server) backupFiles(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.proxyBackupJSON(w, r, http.MethodGet, "/backups/"+id+"/files", nil, nil, 30*time.Second)
+	pagination := parseListPagination(r)
+	query := url.Values{}
+	query.Set("limit", strconv.Itoa(pagination.PageSize))
+	query.Set("offset", strconv.Itoa(pagination.Offset))
+	s.proxyBackupJSON(w, r, http.MethodGet, "/backups/"+id+"/files", query, nil, 30*time.Second)
 }
 
 func (s *Server) downloadBackupFile(w http.ResponseWriter, r *http.Request) {

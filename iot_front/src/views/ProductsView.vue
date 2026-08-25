@@ -10,6 +10,9 @@ const saving = ref(false)
 const loading = ref(false)
 const dialog = ref(false)
 const readonly = ref(false)
+const productPage = ref(1)
+const productPageSize = ref(20)
+const productTotal = ref(0)
 
 const blank = () => ({ id:'', code:'', name:'', category:'smoke', protocolPackageId:'', transport:'MQTT', payloadFormat:'json', status:'ENABLED', description:'' })
 const form = reactive(blank())
@@ -17,14 +20,29 @@ const form = reactive(blank())
 async function load() {
   loading.value = true
   try {
-    const [p, pk] = await Promise.all([api('/api/v1/products'), api('/api/v1/protocol-packages')])
+    const [p, pk] = await Promise.all([
+      api(`/api/v1/products?page=${productPage.value}&pageSize=${productPageSize.value}`),
+      api('/api/v1/protocol-packages?page=1&pageSize=100')
+    ])
     products.value = p.items || []
+    productTotal.value = Number(p.total ?? p.count ?? products.value.length)
     protocols.value = pk.items || []
   } catch (error) {
     notifyError(error)
   } finally {
     loading.value = false
   }
+}
+
+function changePage(value) {
+  productPage.value = value
+  load()
+}
+
+function changePageSize(value) {
+  productPageSize.value = value
+  productPage.value = 1
+  load()
 }
 
 function reset() {
@@ -58,7 +76,7 @@ async function save() {
   try {
     const value = { ...form, id:form.id || form.code }
     delete value.code
-    const editing = products.value.some(item => item.id === value.id)
+    const editing = Boolean(value.id)
     await api(editing ? `/api/v1/products/${encodeURIComponent(value.id)}` : '/api/v1/products', {
       method: editing ? 'PUT' : 'POST',
       body: JSON.stringify(value)
@@ -81,7 +99,7 @@ onMounted(load)
   <div class="page-toolbar">
     <el-button type="primary" @click="openCreate">新建产品</el-button>
     <el-button :loading="loading" @click="load">刷新</el-button>
-    <span>共 {{ products.length }} 个产品，详情和编辑操作位于列表右侧。</span>
+    <span>共 {{ productTotal }} 个产品，详情和编辑操作位于列表右侧。</span>
   </div>
 
   <el-card shadow="never" class="surface-card table-card">
@@ -117,6 +135,9 @@ onMounted(load)
       </el-table-column>
       <template #empty><el-empty description="暂无产品" /></template>
     </el-table>
+    <div class="list-pagination">
+      <el-pagination v-model:current-page="productPage" v-model:page-size="productPageSize" :total="productTotal" :page-sizes="[20, 50, 100]" layout="total, sizes, prev, pager, next, jumper" @current-change="changePage" @size-change="changePageSize" />
+    </div>
   </el-card>
 
   <el-dialog v-model="dialog" :title="readonly ? `产品详情 · ${form.name || form.id}` : (form.id ? `编辑产品 · ${form.name}` : '新建产品')" width="min(760px, 94vw)">

@@ -44,7 +44,7 @@ function restoreConversation() {
 async function refreshRuleDraftStatuses() {
   if (!messages.value.some(message => message?.ruleDraftPersisted === true && message?.ruleDraft?.id)) return
   try {
-    const response = await api('/api/v1/rules')
+    const response = await api('/api/v1/rules?page=1&pageSize=100')
     reconcileRuleDraftMessages(messages.value, response?.items || [])
     persistConversation()
   } catch { /* keep the last known card state when rule status cannot be loaded */ }
@@ -70,6 +70,9 @@ const editingAgentId = ref('')
 const workflowManageLoading = ref(false)
 const workflowManageError = ref('')
 const workflowManageItems = ref([])
+const workflowManagePage = ref(1)
+const workflowManagePageSize = ref(20)
+const workflowManageTotal = ref(0)
 let workflowManageRequestSequence = 0
 const agentFieldDocs = [
   { name:'schemaVersion', type:'整数', note:'清单格式版本，当前固定填写 1。' },
@@ -281,8 +284,8 @@ async function loadRuntime() {
   workflowError.value = ''
   try {
     const [providerResult, workflowResult] = await Promise.allSettled([
-      api('/api/v1/ai/providers'),
-      api('/api/v1/ai/workflows')
+      api('/api/v1/ai/providers?page=1&pageSize=100'),
+      api('/api/v1/ai/workflows?page=1&pageSize=100')
     ])
     // A delete/create/update can start a newer refresh while this request is
     // still in flight. Never let the older response put a removed Agent back
@@ -312,7 +315,7 @@ async function loadRuntime() {
 }
 
 async function loadKnowledgeCatalog() {
-  const [productResult, documentResult] = await Promise.allSettled([api('/api/v1/products'), api('/api/v1/knowledge/documents')])
+  const [productResult, documentResult] = await Promise.allSettled([api('/api/v1/products?page=1&pageSize=100'), api('/api/v1/knowledge/documents?page=1&pageSize=100')])
   if (productResult.status === 'fulfilled') products.value = productResult.value?.items || productResult.value || []
   if (documentResult.status === 'fulfilled') knowledgeDocuments.value = documentResult.value?.items || []
 }
@@ -353,14 +356,26 @@ async function loadWorkflowManagement(force = false) {
   workflowManageLoading.value = true
   workflowManageError.value = ''
   try {
-    const value = await api('/api/v1/ai/workflows/admin')
+    const value = await api(`/api/v1/ai/workflows/admin?page=${workflowManagePage.value}&pageSize=${workflowManagePageSize.value}`)
     if (requestSequence !== workflowManageRequestSequence) return
     workflowManageItems.value = Array.isArray(value?.items) ? value.items : []
+    workflowManageTotal.value = Number(value?.total ?? value?.count ?? workflowManageItems.value.length)
   } catch (error) {
     if (requestSequence === workflowManageRequestSequence) workflowManageError.value = error.message || '工作流插件清单读取失败'
   } finally {
     if (requestSequence === workflowManageRequestSequence) workflowManageLoading.value = false
   }
+}
+
+function changeWorkflowManagePage(value) {
+  workflowManagePage.value = value
+  loadWorkflowManagement()
+}
+
+function changeWorkflowManagePageSize(value) {
+  workflowManagePageSize.value = value
+  workflowManagePage.value = 1
+  loadWorkflowManagement()
 }
 
 function selectManagementTab(tab) {
@@ -683,7 +698,7 @@ onBeforeUnmount(() => { abortController?.abort(); if (scrollFrame) cancelAnimati
         <div class="manager-intro"><span>AGENT MANIFEST</span><div><h3>通过 JSON 创建 Agent</h3><el-tag size="small" type="primary" effect="plain">{{ editingAgentId ? 'EDIT' : 'ADMIN' }}</el-tag></div><p>先在下方清单选择插件进行编辑、启用/禁用或删除；也可以提交新的 Agent Manifest，保存后立即进入工作流列表。</p></div>
         <el-alert v-if="!isAdmin" title="工作流插件管理仅限管理员。" type="warning" :closable="false" show-icon />
         <div v-else class="workflow-admin-panel">
-          <div class="workflow-admin-toolbar"><div><strong>已配置的工作流插件</strong><small>{{ workflowManageItems.length }} 个插件 · 内置插件只读，动态插件可管理</small></div><div><el-button size="small" :loading="workflowManageLoading" @click="loadWorkflowManagement">刷新清单</el-button><el-button size="small" type="primary" plain @click="resetAgentJson">新建 Agent</el-button></div></div>
+          <div class="workflow-admin-toolbar"><div><strong>已配置的工作流插件</strong><small>{{ workflowManageTotal }} 个插件 · 内置插件只读，动态插件可管理</small></div><div><el-button size="small" :loading="workflowManageLoading" @click="loadWorkflowManagement">刷新清单</el-button><el-button size="small" type="primary" plain @click="resetAgentJson">新建 Agent</el-button></div></div>
           <el-alert v-if="workflowManageError" :title="workflowManageError" type="error" :closable="false" show-icon />
           <el-skeleton v-if="workflowManageLoading && !workflowManageItems.length" :rows="4" animated />
           <el-empty v-else-if="!workflowManageItems.length" description="暂无工作流插件" :image-size="56" />
@@ -692,6 +707,9 @@ onBeforeUnmount(() => { abortController?.abort(); if (scrollFrame) cancelAnimati
               <div class="workflow-admin-main"><div><strong>{{ workflowName(item) }}</strong><el-tag size="small" :type="item.enabled === false ? 'info' : 'success'" effect="plain">{{ item.enabled === false ? '已禁用' : '已启用' }}</el-tag><el-tag v-if="isBuiltinWorkflow(item)" size="small" effect="plain">内置只读</el-tag></div><small>{{ workflowKey(item) }} · {{ item.version ? `v${item.version}` : '无版本' }}</small><p>{{ item.description || '未填写插件说明' }}</p></div>
               <div class="workflow-admin-actions"><el-button size="small" :disabled="isBuiltinWorkflow(item)" @click="editAgent(item)">编辑</el-button><el-button size="small" :disabled="isBuiltinWorkflow(item)" @click="toggleWorkflow(item)">{{ item.enabled === false ? '启用' : '禁用' }}</el-button><el-button size="small" type="danger" plain :disabled="isBuiltinWorkflow(item)" @click="deleteWorkflow(item)">删除</el-button></div>
             </div>
+          </div>
+          <div v-if="workflowManageTotal" class="list-pagination">
+            <el-pagination v-model:current-page="workflowManagePage" v-model:page-size="workflowManagePageSize" :total="workflowManageTotal" :page-sizes="[20, 50, 100]" layout="total, sizes, prev, pager, next, jumper" @current-change="changeWorkflowManagePage" @size-change="changeWorkflowManagePageSize" />
           </div>
         </div>
         <el-form class="drawer-form" label-position="top" :disabled="!isAdmin || creatingAgent">

@@ -47,11 +47,11 @@ test('knowledge management uploads files and lists tenant documents', async () =
   for (const label of ['知识库管理', '上传知识文档', '上传并建立索引', '已上传文档', '打开 AI 工作流']) {
     assert.match(`${app}\n${view}`, new RegExp(label), `missing knowledge UI label: ${label}`)
   }
-  assert.match(view, /api\('\/api\/v1\/knowledge\/documents'\)/)
+  assert.match(view, /api\((?:'|`)[^'`]*\/api\/v1\/knowledge\/documents(?:\?|['`])/)
   assert.match(view, /method:'POST', body:form/)
   assert.match(view, /new FormData\(\)/)
   assert.match(view, /persistentIndex/)
-  assert.match(view, /api\('\/api\/v1\/products'\)/)
+  assert.match(view, /api\((?:'|`)[^'`]*\/api\/v1\/products(?:\?|['`])/)
   assert.match(view, /<el-select v-model="productId" filterable clearable/)
   for (const label of ['知识分类', '知识标签', '告警处置 SOP']) assert.match(view, new RegExp(label), `missing knowledge metadata UI: ${label}`)
 })
@@ -61,7 +61,7 @@ test('AI workbench uses cancellable SSE workflows and stable message keys', asyn
   const apiSource = await readFile(new URL('src/api.js', root), 'utf8')
   const sseSource = await readFile(new URL('src/sse.js', root), 'utf8')
 
-  assert.match(aiView, /api\('\/api\/v1\/ai\/workflows'\)/)
+  assert.match(aiView, /api\((?:'|`)[^'`]*\/api\/v1\/ai\/workflows(?:\?|['`])/)
   assert.match(aiView, /runtimeRequestSequence/)
   assert.match(aiView, /requestSequence !== runtimeRequestSequence/)
   assert.match(aiView, /workflowManageRequestSequence/)

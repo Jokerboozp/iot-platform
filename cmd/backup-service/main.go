@@ -69,7 +69,13 @@ func main() {
 		respond(w, result, getErr)
 	}))
 	mux.HandleFunc("GET /backups/{id}/files", protected(adminToken, func(w http.ResponseWriter, r *http.Request) {
-		result, listErr := service.ListArtifacts(r.Context(), r.PathValue("id"))
+		query := r.URL.Query()
+		limit := intQuery(query.Get("pageSize"), intQuery(query.Get("limit"), 20))
+		offset := intQuery(query.Get("offset"), 0)
+		if page := intQuery(query.Get("page"), 0); page > 0 {
+			offset = (page - 1) * limit
+		}
+		result, listErr := service.ListArtifactsPage(r.Context(), r.PathValue("id"), limit, offset)
 		respond(w, result, listErr)
 	}))
 	mux.HandleFunc("GET /backups/{id}/files/{filename}", protected(adminToken, func(w http.ResponseWriter, r *http.Request) {

@@ -22,6 +22,21 @@ var ErrNotFound = errors.New("not found")
 
 type Repository struct{ pool *pgxpool.Pool }
 
+const countManagedDeviceChildrenSQL = `SELECT body->>'gatewayId' AS gateway_id,count(*) FROM device_registry WHERE tenant_id=$1 AND body->>'gatewayId' = ANY($2::text[]) GROUP BY body->>'gatewayId'`
+
+func normalizePage(limit, offset int) (int, int) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return limit, offset
+}
+
 func New(ctx context.Context, dsn string) (*Repository, error) {
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
@@ -79,6 +94,31 @@ func (r *Repository) ListProducts(ctx context.Context, tenant string) ([]model.P
 	}
 	return out, rows.Err()
 }
+func (r *Repository) ListProductsPage(ctx context.Context, tenant string, limit, offset int) ([]model.Product, int, error) {
+	limit, offset = normalizePage(limit, offset)
+	var total int
+	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM iot_product WHERE tenant_id=$1`, tenant).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := r.pool.Query(ctx, `SELECT body FROM iot_product WHERE tenant_id=$1 ORDER BY updated_at DESC,id DESC LIMIT $2 OFFSET $3`, tenant, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	items := make([]model.Product, 0, limit)
+	for rows.Next() {
+		var body []byte
+		var item model.Product
+		if err = rows.Scan(&body); err != nil {
+			return nil, 0, err
+		}
+		if err = json.Unmarshal(body, &item); err != nil {
+			return nil, 0, err
+		}
+		items = append(items, item)
+	}
+	return items, total, rows.Err()
+}
 func (r *Repository) SaveProtocolPackage(ctx context.Context, v model.ProtocolPackage) error {
 	b, _ := json.Marshal(v)
 	_, err := r.pool.Exec(ctx, `INSERT INTO protocol_package(tenant_id,id,status,parser_type,body) VALUES($1,$2,$3,$4,$5) ON CONFLICT(tenant_id,id) DO UPDATE SET status=excluded.status,parser_type=excluded.parser_type,body=excluded.body,updated_at=now()`, v.TenantID, v.ID, v.Status, v.ParserType, b)
@@ -115,6 +155,31 @@ func (r *Repository) ListProtocolPackages(ctx context.Context, tenant string) ([
 		out = append(out, v)
 	}
 	return out, rows.Err()
+}
+func (r *Repository) ListProtocolPackagesPage(ctx context.Context, tenant string, limit, offset int) ([]model.ProtocolPackage, int, error) {
+	limit, offset = normalizePage(limit, offset)
+	var total int
+	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM protocol_package WHERE tenant_id=$1`, tenant).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := r.pool.Query(ctx, `SELECT body FROM protocol_package WHERE tenant_id=$1 ORDER BY updated_at DESC,id DESC LIMIT $2 OFFSET $3`, tenant, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	items := make([]model.ProtocolPackage, 0, limit)
+	for rows.Next() {
+		var body []byte
+		var item model.ProtocolPackage
+		if err = rows.Scan(&body); err != nil {
+			return nil, 0, err
+		}
+		if err = json.Unmarshal(body, &item); err != nil {
+			return nil, 0, err
+		}
+		items = append(items, item)
+	}
+	return items, total, rows.Err()
 }
 func (r *Repository) SaveManagedDevice(ctx context.Context, v model.ManagedDevice) error {
 	b, _ := json.Marshal(v)
@@ -161,6 +226,51 @@ func (r *Repository) ListManagedDevices(ctx context.Context, tenant string) ([]m
 		out = append(out, v)
 	}
 	return out, rows.Err()
+}
+func (r *Repository) ListManagedDevicesPage(ctx context.Context, tenant string, limit, offset int) ([]model.ManagedDevice, int, error) {
+	limit, offset = normalizePage(limit, offset)
+	var total int
+	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM device_registry WHERE tenant_id=$1`, tenant).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := r.pool.Query(ctx, `SELECT body,secret_hash FROM device_registry WHERE tenant_id=$1 ORDER BY updated_at DESC,id DESC LIMIT $2 OFFSET $3`, tenant, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	items := make([]model.ManagedDevice, 0, limit)
+	for rows.Next() {
+		var item model.ManagedDevice
+		var body []byte
+		if err = rows.Scan(&body, &item.SecretHash); err != nil {
+			return nil, 0, err
+		}
+		if err = json.Unmarshal(body, &item); err != nil {
+			return nil, 0, err
+		}
+		items = append(items, item)
+	}
+	return items, total, rows.Err()
+}
+func (r *Repository) CountManagedDeviceChildren(ctx context.Context, tenant string, ids []string) (map[string]int, error) {
+	counts := make(map[string]int, len(ids))
+	if len(ids) == 0 {
+		return counts, nil
+	}
+	rows, err := r.pool.Query(ctx, countManagedDeviceChildrenSQL, tenant, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var gatewayID string
+		var count int
+		if err = rows.Scan(&gatewayID, &count); err != nil {
+			return nil, err
+		}
+		counts[gatewayID] = count
+	}
+	return counts, rows.Err()
 }
 func (r *Repository) SaveRawIndex(ctx context.Context, v model.RawArchiveIndex) (bool, error) {
 	tag, err := r.pool.Exec(ctx, `INSERT INTO raw_archive_index(tenant_id,product_id,device_id,message_id,protocol,payload_format,object_bucket,object_key,object_offset,payload_hash,payload_size,received_at,archived_at,published_at,publish_attempts,last_publish_error) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) ON CONFLICT DO NOTHING`, v.TenantID, v.ProductID, v.DeviceID, v.MessageID, v.Protocol, v.PayloadFormat, v.ObjectBucket, v.ObjectKey, v.ObjectOffset, v.PayloadHash, v.PayloadSize, v.ReceivedAt, v.ArchivedAt, v.PublishedAt, v.PublishAttempts, v.LastPublishError)
@@ -223,6 +333,11 @@ func (r *Repository) ListRawIndexes(ctx context.Context, f ports.RawFilter) ([]m
 		out = append(out, v)
 	}
 	return out, rows.Err()
+}
+func (r *Repository) CountRawIndexes(ctx context.Context, f ports.RawFilter) (int, error) {
+	var total int
+	err := r.pool.QueryRow(ctx, `SELECT count(*) FROM raw_archive_index WHERE ($1='' OR tenant_id=$1) AND ($2='' OR product_id=$2) AND ($3='' OR device_id=$3) AND ($4::bigint=0 OR received_at >= $4) AND ($5::bigint=0 OR received_at <= $5)`, f.TenantID, f.ProductID, f.DeviceID, f.Start, f.End).Scan(&total)
+	return total, err
 }
 func (r *Repository) SaveStandardMessage(ctx context.Context, v model.StandardMessage) error {
 	_, err := r.SaveStandardMessageIfAbsent(ctx, v)
@@ -299,6 +414,38 @@ func (r *Repository) PropertyHistory(ctx context.Context, tenant, device, proper
 	}
 	return out, rows.Err()
 }
+func (r *Repository) PropertyHistoryPage(ctx context.Context, tenant, device, property string, start, end int64, limit, offset int) ([]map[string]any, int, error) {
+	limit, offset = normalizePage(limit, offset)
+	where := `WHERE tenant_id=$1 AND device_id=$2 AND properties ? $3 AND ts >= $4::bigint AND ($5::bigint=0 OR ts <= $5)`
+	var total int
+	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM standard_message `+where, tenant, device, property, start, end).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := r.pool.Query(ctx, `SELECT ts, properties -> $3, message_id FROM standard_message `+where+` ORDER BY ts DESC, message_id DESC LIMIT $6 OFFSET $7`, tenant, device, property, start, end, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	items := make([]map[string]any, 0, limit)
+	for rows.Next() {
+		var ts int64
+		var raw []byte
+		var id string
+		if err := rows.Scan(&ts, &raw, &id); err != nil {
+			return nil, 0, err
+		}
+		var value any
+		_ = json.Unmarshal(raw, &value)
+		items = append(items, map[string]any{"timestamp": ts, "value": value, "messageId": id})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	for i, j := 0, len(items)-1; i < j; i, j = i+1, j-1 {
+		items[i], items[j] = items[j], items[i]
+	}
+	return items, total, nil
+}
 func (r *Repository) UpsertDeviceState(ctx context.Context, v model.DeviceState) error {
 	b, _ := json.Marshal(v)
 	_, err := r.pool.Exec(ctx, `INSERT INTO device_state(tenant_id,device_id,product_id,business_status,last_seen_at,body) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(tenant_id,device_id) DO UPDATE SET product_id=excluded.product_id,business_status=excluded.business_status,last_seen_at=excluded.last_seen_at,body=excluded.body,updated_at=now()`, v.TenantID, v.DeviceID, v.ProductID, v.BusinessStatus, v.LastSeenAt, b)
@@ -336,6 +483,68 @@ func (r *Repository) ListDeviceStates(ctx context.Context, tenant string) ([]mod
 	}
 	return out, rows.Err()
 }
+func (r *Repository) ListDeviceStatesPage(ctx context.Context, tenant string, limit, offset int) ([]model.DeviceState, int, error) {
+	limit, offset = normalizePage(limit, offset)
+	var total int
+	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM device_state WHERE ($1='' OR tenant_id=$1)`, tenant).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := r.pool.Query(ctx, `SELECT body FROM device_state WHERE ($1='' OR tenant_id=$1) ORDER BY last_seen_at DESC,device_id LIMIT $2 OFFSET $3`, tenant, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	items := make([]model.DeviceState, 0, limit)
+	for rows.Next() {
+		var body []byte
+		var item model.DeviceState
+		if err = rows.Scan(&body); err != nil {
+			return nil, 0, err
+		}
+		if err = json.Unmarshal(body, &item); err != nil {
+			return nil, 0, err
+		}
+		items = append(items, item)
+	}
+	return items, total, rows.Err()
+}
+func (r *Repository) ListUnregisteredDeviceStatesPage(ctx context.Context, tenant string, limit, offset int) ([]model.DeviceState, int, error) {
+	limit, offset = normalizePage(limit, offset)
+	where := `WHERE ds.tenant_id=$1 AND NOT EXISTS (SELECT 1 FROM device_registry dr WHERE dr.tenant_id=ds.tenant_id AND dr.id=ds.device_id)`
+	var total int
+	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM device_state ds `+where, tenant).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := r.pool.Query(ctx, `SELECT ds.body FROM device_state ds `+where+` ORDER BY ds.last_seen_at DESC,ds.device_id LIMIT $2 OFFSET $3`, tenant, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	items := make([]model.DeviceState, 0, limit)
+	for rows.Next() {
+		var body []byte
+		var item model.DeviceState
+		if err = rows.Scan(&body); err != nil {
+			return nil, 0, err
+		}
+		if err = json.Unmarshal(body, &item); err != nil {
+			return nil, 0, err
+		}
+		items = append(items, item)
+	}
+	return items, total, rows.Err()
+}
+func (r *Repository) CountDeviceStates(ctx context.Context, tenant string, unregisteredOnly bool) (int, int, error) {
+	where := `WHERE ds.tenant_id=$1`
+	if unregisteredOnly {
+		where += ` AND NOT EXISTS (SELECT 1 FROM device_registry dr WHERE dr.tenant_id=ds.tenant_id AND dr.id=ds.device_id)`
+	}
+	var total, online int
+	if err := r.pool.QueryRow(ctx, `SELECT count(*),count(*) FILTER (WHERE ds.business_status='ONLINE') FROM device_state ds `+where, tenant).Scan(&total, &online); err != nil {
+		return 0, 0, err
+	}
+	return total, online, nil
+}
 func (r *Repository) SaveDeviceStateEvent(ctx context.Context, v model.DeviceState) error {
 	b, _ := json.Marshal(v)
 	_, err := r.pool.Exec(ctx, `INSERT INTO device_state_event(tenant_id,device_id,business_status,body) VALUES($1,$2,$3,$4)`, v.TenantID, v.DeviceID, v.BusinessStatus, b)
@@ -365,6 +574,31 @@ func (r *Repository) ListRules(ctx context.Context, tenant string) ([]model.Alar
 		out = append(out, v)
 	}
 	return out, rows.Err()
+}
+func (r *Repository) ListRulesPage(ctx context.Context, tenant string, limit, offset int) ([]model.AlarmRule, int, error) {
+	limit, offset = normalizePage(limit, offset)
+	var total int
+	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM alarm_rule WHERE ($1='' OR tenant_id=$1)`, tenant).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := r.pool.Query(ctx, `SELECT body FROM alarm_rule WHERE ($1='' OR tenant_id=$1) ORDER BY updated_at DESC,id DESC LIMIT $2 OFFSET $3`, tenant, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	items := make([]model.AlarmRule, 0, limit)
+	for rows.Next() {
+		var body []byte
+		var item model.AlarmRule
+		if err = rows.Scan(&body); err != nil {
+			return nil, 0, err
+		}
+		if err = json.Unmarshal(body, &item); err != nil {
+			return nil, 0, err
+		}
+		items = append(items, item)
+	}
+	return items, total, rows.Err()
 }
 func (r *Repository) DeleteRule(ctx context.Context, tenant, id string) error {
 	tag, err := r.pool.Exec(ctx, `DELETE FROM alarm_rule WHERE tenant_id=$1 AND id=$2`, tenant, id)
@@ -476,6 +710,11 @@ func (r *Repository) ListAlarms(ctx context.Context, f ports.AlarmFilter) ([]mod
 	}
 	return out, rows.Err()
 }
+func (r *Repository) CountAlarms(ctx context.Context, f ports.AlarmFilter) (int, error) {
+	var total int
+	err := r.pool.QueryRow(ctx, `SELECT count(*) FROM alarm_record WHERE ($1='' OR tenant_id=$1) AND ($2='' OR device_id=$2) AND ($3='' OR status=$3) AND ($4='' OR level=$4) AND ($5='' OR source=$5) AND ($6::bigint=0 OR last_triggered_at >= $6) AND ($7::bigint=0 OR last_triggered_at <= $7)`, f.TenantID, f.DeviceID, f.Status, f.Level, f.Source, f.Start, f.End).Scan(&total)
+	return total, err
+}
 func (r *Repository) UpdateAlarm(ctx context.Context, v model.Alarm) error {
 	b, _ := json.Marshal(v)
 	tag, err := r.pool.Exec(ctx, `UPDATE alarm_record SET status=$3,level=$4,last_triggered_at=$5,body=$6 WHERE tenant_id=$1 AND id=$2`, v.TenantID, v.ID, v.Status, v.AlarmLevel, v.LastTriggeredAt, b)
@@ -551,6 +790,27 @@ func (r *Repository) ListVideoCameraMappings(ctx context.Context, tenant string)
 	}
 	return out, rows.Err()
 }
+func (r *Repository) ListVideoCameraMappingsPage(ctx context.Context, tenant string, limit, offset int) ([]model.VideoCameraMapping, int, error) {
+	limit, offset = normalizePage(limit, offset)
+	var total int
+	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM video_camera_mapping WHERE tenant_id=$1`, tenant).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := r.pool.Query(ctx, `SELECT tenant_id,camera_id,coalesce(camera_name,''),coalesce(project_id,''),coalesce(city_code,''),coalesce(district_code,''),coalesce(building,''),coalesce(floor,''),coalesce(area_id,''),related_device_ids,coalesce(video_platform_id,''),coalesce(stream_url,''),coalesce(stream_type,''),enabled FROM video_camera_mapping WHERE tenant_id=$1 ORDER BY camera_id LIMIT $2 OFFSET $3`, tenant, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	items := make([]model.VideoCameraMapping, 0, limit)
+	for rows.Next() {
+		item, scanErr := r.scanVideoMapping(rows)
+		if scanErr != nil {
+			return nil, 0, scanErr
+		}
+		items = append(items, item)
+	}
+	return items, total, rows.Err()
+}
 func (r *Repository) SaveAIAnalysis(ctx context.Context, v model.AIAnalysis) error {
 	b, _ := json.Marshal(v)
 	_, err := r.pool.Exec(ctx, `INSERT INTO alarm_ai_analysis(tenant_id,alarm_id,body) VALUES($1,$2,$3) ON CONFLICT(tenant_id,alarm_id) DO UPDATE SET body=excluded.body,created_at=now()`, v.TenantID, v.AlarmID, b)
@@ -594,6 +854,33 @@ func (r *Repository) ListKnowledgeDocs(ctx context.Context, tenant string) ([]mo
 		out = append(out, v)
 	}
 	return out, rows.Err()
+}
+func (r *Repository) ListKnowledgeDocsPage(ctx context.Context, tenant string, limit, offset int) ([]model.KnowledgeDoc, int, error) {
+	limit, offset = normalizePage(limit, offset)
+	var total int
+	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM ai_knowledge_doc WHERE tenant_id=$1`, tenant).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := r.pool.Query(ctx, `SELECT id,tenant_id,coalesce(product_id,''),coalesce(category,''),coalesce(tags,'{}'),object_bucket,object_key,filename,status,metadata,(extract(epoch from created_at)*1000)::bigint FROM ai_knowledge_doc WHERE tenant_id=$1 ORDER BY created_at DESC,id DESC LIMIT $2 OFFSET $3`, tenant, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	items := make([]model.KnowledgeDoc, 0, limit)
+	for rows.Next() {
+		var item model.KnowledgeDoc
+		var metadata []byte
+		if err = rows.Scan(&item.ID, &item.TenantID, &item.ProductID, &item.Category, &item.Tags, &item.ObjectBucket, &item.ObjectKey, &item.Filename, &item.Status, &metadata, &item.CreatedAt); err != nil {
+			return nil, 0, err
+		}
+		if len(metadata) > 0 {
+			if err = json.Unmarshal(metadata, &item.Metadata); err != nil {
+				return nil, 0, err
+			}
+		}
+		items = append(items, item)
+	}
+	return items, total, rows.Err()
 }
 
 func (r *Repository) SaveWorkflowKnowledgeBinding(ctx context.Context, v model.WorkflowKnowledgeBinding) error {
