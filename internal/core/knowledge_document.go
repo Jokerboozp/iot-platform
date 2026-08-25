@@ -3,12 +3,15 @@ package core
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/xml"
+	"errors"
 	"fmt"
 	"html"
 	"io"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -34,7 +37,9 @@ func ExtractKnowledgeText(filename string, data []byte) (string, error) {
 			return "", err
 		}
 		return cleanText(string(b)), nil
-	case ".docx", ".pptx", ".xlsx", ".odt", ".odp", ".ods":
+	case ".xlsx":
+		return extractSpreadsheetXML(data)
+	case ".docx", ".pptx", ".odt", ".odp", ".ods":
 		return extractOfficeXML(data)
 	case ".html", ".htm", ".xml":
 		return cleanText(string(data)), nil
@@ -44,6 +49,212 @@ func ExtractKnowledgeText(filename string, data []byte) (string, error) {
 		}
 		return cleanText(string(data)), nil
 	}
+}
+
+// spreadsheetRows reads the displayed cell values from an OOXML workbook.
+// Excel commonly stores text in xl/sharedStrings.xml and leaves only an index
+// in the worksheet; treating the index as text loses the point-table meaning.
+// The returned rows preserve empty cells so column positions remain stable.
+func spreadsheetRows(data []byte) ([][]string, error) {
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil, fmt.Errorf("open spreadsheet: %w", err)
+	}
+	shared := []string{}
+	for _, f := range zr.File {
+		if strings.EqualFold(f.Name, "xl/sharedStrings.xml") {
+			content, readErr := readZipEntry(f, 32<<20)
+			if readErr != nil {
+				return nil, readErr
+			}
+			var document spreadsheetSharedStrings
+			if unmarshalErr := xml.Unmarshal(content, &document); unmarshalErr != nil {
+				return nil, fmt.Errorf("parse spreadsheet shared strings: %w", unmarshalErr)
+			}
+			for _, item := range document.Items {
+				shared = append(shared, item.Text())
+			}
+			break
+		}
+	}
+	var files []*zip.File
+	for _, f := range zr.File {
+		name := strings.ToLower(f.Name)
+		if strings.HasPrefix(name, "xl/worksheets/") && strings.HasSuffix(name, ".xml") {
+			files = append(files, f)
+		}
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
+	var rows [][]string
+	for _, f := range files {
+		content, readErr := readZipEntry(f, 32<<20)
+		if readErr != nil {
+			return nil, readErr
+		}
+		var sheet spreadsheetWorksheet
+		if unmarshalErr := xml.Unmarshal(content, &sheet); unmarshalErr != nil {
+			return nil, fmt.Errorf("parse spreadsheet worksheet %s: %w", f.Name, unmarshalErr)
+		}
+		for _, row := range sheet.Rows {
+			values := make([]string, 0, len(row.Cells))
+			positions := make([]int, 0, len(row.Cells))
+			maxColumn := -1
+			for index, cell := range row.Cells {
+				column := spreadsheetColumnIndex(cell.Ref)
+				if column < 0 {
+					column = index
+				}
+				positions = append(positions, column)
+				if column > maxColumn {
+					maxColumn = column
+				}
+			}
+			if maxColumn < 0 {
+				continue
+			}
+			values = make([]string, maxColumn+1)
+			for index, cell := range row.Cells {
+				value, valueErr := spreadsheetCellText(cell, shared)
+				if valueErr != nil {
+					return nil, valueErr
+				}
+				values[positions[index]] = value
+			}
+			rows = append(rows, values)
+		}
+	}
+	if len(rows) == 0 {
+		return nil, errors.New("spreadsheet contains no worksheet rows")
+	}
+	return rows, nil
+}
+
+func extractSpreadsheetXML(data []byte) (string, error) {
+	rows, err := spreadsheetRows(data)
+	if err != nil {
+		return "", err
+	}
+	var lines []string
+	for _, row := range rows {
+		values := make([]string, len(row))
+		hasValue := false
+		for index, value := range row {
+			values[index] = strings.TrimSpace(value)
+			if values[index] != "" {
+				hasValue = true
+			}
+		}
+		if hasValue {
+			lines = append(lines, strings.TrimSpace(strings.Join(values, "\t")))
+		}
+	}
+	text := strings.TrimSpace(strings.Join(lines, "\n"))
+	if text == "" {
+		return "", errors.New("document contains no extractable text")
+	}
+	return cleanText(text), nil
+}
+
+type spreadsheetSharedStrings struct {
+	Items []spreadsheetStringItem `xml:"si"`
+}
+
+type spreadsheetStringItem struct {
+	Plain string                 `xml:"t"`
+	Runs  []spreadsheetStringRun `xml:"r"`
+}
+
+type spreadsheetStringRun struct {
+	Text string `xml:"t"`
+}
+
+func (item spreadsheetStringItem) Text() string {
+	if item.Plain != "" {
+		return item.Plain
+	}
+	var b strings.Builder
+	for _, run := range item.Runs {
+		b.WriteString(run.Text)
+	}
+	return b.String()
+}
+
+type spreadsheetWorksheet struct {
+	Rows []spreadsheetRow `xml:"sheetData>row"`
+}
+
+type spreadsheetRow struct {
+	Cells []spreadsheetCell `xml:"c"`
+}
+
+type spreadsheetCell struct {
+	Ref    string                  `xml:"r,attr"`
+	Type   string                  `xml:"t,attr"`
+	Value  string                  `xml:"v"`
+	Inline spreadsheetInlineString `xml:"is"`
+}
+
+type spreadsheetInlineString struct {
+	Plain string                 `xml:"t"`
+	Runs  []spreadsheetStringRun `xml:"r"`
+}
+
+func (value spreadsheetInlineString) Text() string {
+	if value.Plain != "" {
+		return value.Plain
+	}
+	var b strings.Builder
+	for _, run := range value.Runs {
+		b.WriteString(run.Text)
+	}
+	return b.String()
+}
+
+func spreadsheetCellText(cell spreadsheetCell, shared []string) (string, error) {
+	if strings.EqualFold(cell.Type, "s") {
+		index, err := strconv.Atoi(strings.TrimSpace(cell.Value))
+		if err != nil || index < 0 || index >= len(shared) {
+			return "", fmt.Errorf("spreadsheet shared-string index %q is invalid", cell.Value)
+		}
+		return shared[index], nil
+	}
+	if strings.EqualFold(cell.Type, "inlineStr") {
+		return cell.Inline.Text(), nil
+	}
+	return cell.Value, nil
+}
+
+func spreadsheetColumnIndex(ref string) int {
+	ref = strings.TrimSpace(ref)
+	index := 0
+	found := false
+	for _, character := range ref {
+		if character < 'A' || character > 'Z' {
+			break
+		}
+		found = true
+		index = index*26 + int(character-'A'+1)
+	}
+	if !found {
+		return -1
+	}
+	return index - 1
+}
+
+func readZipEntry(file *zip.File, maximum int64) ([]byte, error) {
+	reader, err := file.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(io.LimitReader(reader, maximum+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maximum {
+		return nil, fmt.Errorf("spreadsheet entry %s exceeds %d bytes", file.Name, maximum)
+	}
+	return data, nil
 }
 
 func extractOfficeXML(data []byte) (string, error) {

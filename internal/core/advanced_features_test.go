@@ -107,6 +107,23 @@ func TestSpreadsheetKnowledgeExtractionKeepsCells(t *testing.T) {
 	}
 }
 
+func TestSpreadsheetKnowledgeExtractionResolvesSharedStringRows(t *testing.T) {
+	var data bytes.Buffer
+	zw := zip.NewWriter(&data)
+	shared, _ := zw.Create("xl/sharedStrings.xml")
+	_, _ = shared.Write([]byte(`<sst><si><t>变量名称</t></si><si><t>PLC 线圈地址</t></si><si><t>通讯心跳测试</t></si><si><t>M100</t></si></sst>`))
+	sheet, _ := zw.Create("xl/worksheets/sheet1.xml")
+	_, _ = sheet.Write([]byte(`<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row><row r="2"><c r="A2" t="s"><v>2</v></c><c r="B2" t="s"><v>3</v></c></row></sheetData></worksheet>`))
+	_ = zw.Close()
+	text, err := ExtractKnowledgeText("point-table.xlsx", data.Bytes())
+	if err != nil || !strings.Contains(text, "变量名称") || !strings.Contains(text, "通讯心跳测试") || !strings.Contains(text, "M100") {
+		t.Fatalf("spreadsheet text=%q err=%v", text, err)
+	}
+	if strings.Contains(text, "<sst>") || strings.Contains(text, "0\n1") {
+		t.Fatalf("spreadsheet text still contains raw shared-string indexes: %q", text)
+	}
+}
+
 func TestReplayDiffAndVideoFusion(t *testing.T) {
 	ctx := context.Background()
 	repo := memory.NewRepository()

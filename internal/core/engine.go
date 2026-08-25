@@ -328,6 +328,11 @@ func (e *Engine) raiseRuleAlarm(ctx context.Context, rule model.AlarmRule, msg m
 		payload, _ := json.Marshal(saved)
 		_ = e.Bus.Publish(ctx, model.TopicAlarmRaised, saved.ID, payload)
 		_ = e.Realtime.Publish(ctx, saved.MQTTTopic("raised"), payload, 1, false)
+	}
+	// Alarm records are deduplicated while ACTIVE/ACKED, but a new matching
+	// message must still execute the rule actions. Exact duplicate messages
+	// keep the original trigger ID and must not execute actions twice.
+	if created || saved.TriggerID != msg.MessageID {
 		for _, action := range rule.Actions {
 			event := model.UIActionEvent{ID: id("ui_action"), TenantID: msg.TenantID, RuleID: rule.ID, AlarmID: saved.ID, DeviceID: msg.DeviceID, Action: action, TriggeredAt: now}
 			actionPayload, _ := json.Marshal(event)
@@ -676,6 +681,9 @@ func (e *Engine) SetAlarmStatus(ctx context.Context, tenant, alarmID, status, ac
 	now := e.Clock.Now().UnixMilli()
 	switch status {
 	case "ACKED":
+		if a.Status != "ACTIVE" {
+			return a, fmt.Errorf("only active alarms can be acknowledged")
+		}
 		a.Status = status
 		a.AckedAt = now
 	case "CLOSED":

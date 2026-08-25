@@ -42,6 +42,8 @@ type Config struct {
 	AITestOrigins        []string
 	AITestOllamaURL      string
 	WeaviateURL          string
+	BackupURL            string
+	BackupToken          string
 	VideoSecrets         map[string]string
 	VideoPlatformTenants map[string]string
 	VideoMediaHosts      []string
@@ -99,6 +101,8 @@ func Load() Config {
 		AITestOrigins:        split(get("IOT_AI_PROVIDER_TEST_ALLOWED_ORIGINS", "https://api.deepseek.com,http://localhost:11434,http://127.0.0.1:11434,http://[::1]:11434,http://ollama:11434")),
 		AITestOllamaURL:      get("IOT_AI_OLLAMA_URL", get("IOT_OLLAMA_URL", "http://localhost:11434")),
 		WeaviateURL:          os.Getenv("IOT_WEAVIATE_URL"),
+		BackupURL:            strings.TrimRight(strings.TrimSpace(os.Getenv("IOT_BACKUP_URL")), "/"),
+		BackupToken:          strings.TrimSpace(os.Getenv("IOT_BACKUP_ADMIN_TOKEN")),
 		VideoSecrets:         parsePairs(os.Getenv("IOT_VIDEO_PLATFORM_SECRETS")),
 		VideoPlatformTenants: parsePairs(os.Getenv("IOT_VIDEO_PLATFORM_TENANTS")),
 		VideoMediaHosts:      split(os.Getenv("IOT_VIDEO_MEDIA_ALLOWED_HOSTS")),

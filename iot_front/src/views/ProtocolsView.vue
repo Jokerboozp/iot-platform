@@ -73,6 +73,12 @@ function parserChanged(value) {
     form.payloadFormat = 'hex'
     form.config = pretty({ startHex:'AA', endHex:'55', checksum:'sum8', checksumStartOffset:1, fields:[{ name:'temperature', offset:1, length:2, type:'int16', endian:'little', scale:0.1 }] })
     sample.value = 'AA 20 03 00 23 55'
+  } else if (value === 'modbus_coil_parser') {
+    form.protocol = 'modbus'
+    form.transport = 'MODBUS_RTU'
+    form.payloadFormat = 'hex'
+    form.config = pretty({ frame:'rtu', startAddress:0, functionCode:1, messageType:'PROPERTY_REPORT', fields:[{ name:'通讯心跳测试', coilAddress:100, dataType:'BOOL' }] })
+    sample.value = '01 01 01 01'
   } else if (value === 'javascript_sandbox_parser') {
     form.protocol = 'javascript'
     form.config = ''
@@ -202,7 +208,7 @@ onMounted(load)
         <el-form-item label="名称"><el-input v-model="form.name" /></el-form-item>
         <el-form-item label="版本"><el-input v-model="form.version" /></el-form-item>
         <el-form-item label="协议标识"><el-input v-model="form.protocol" /></el-form-item>
-        <el-form-item label="传输方式"><el-select v-model="form.transport"><el-option v-for="x in ['MQTT','HTTP','TCP','MODBUS_TCP']" :key="x" :label="x" :value="x" /></el-select></el-form-item>
+        <el-form-item label="传输方式"><el-select v-model="form.transport"><el-option v-for="x in ['MQTT','HTTP','TCP','MODBUS_RTU','MODBUS_TCP']" :key="x" :label="x" :value="x" /></el-select></el-form-item>
         <el-form-item label="载荷格式"><el-select v-model="form.payloadFormat"><el-option label="结构化文本" value="json" /><el-option label="十六进制" value="hex" /></el-select></el-form-item>
         <el-form-item label="解析器"><el-select v-model="form.parserType" @change="parserChanged"><el-option v-for="(text,key) in parsers" :key="key" :label="text" :value="key" /></el-select></el-form-item>
       </div>
@@ -218,7 +224,7 @@ onMounted(load)
         <el-input v-model="form.config" class="top-gap" type="textarea" :rows="4" />
         <small class="subline">上传后这里会显示 artifact 路径、SHA-256 和 timeoutMs；不要手工修改 artifact.path。</small>
       </el-form-item>
-      <el-form-item v-else label="配置 JSON"><el-input v-model="form.config" type="textarea" :rows="8" /><small class="subline">JSON 映射示例：`$.data.temperature`；十六进制字段使用 offset、length、type、endian、scale。</small></el-form-item>
+      <el-form-item v-else label="配置 JSON"><el-input v-model="form.config" type="textarea" :rows="8" /><small class="subline">Go 映射配置：JSON 映射使用路径；十六进制字段使用 offset、length、type、endian、scale；Modbus 线圈使用 coilAddress。</small></el-form-item>
       <el-form-item label="说明"><el-input v-model="form.description" type="textarea" :rows="2" /></el-form-item>
     </el-form>
     <el-divider content-position="left">解析调试</el-divider>

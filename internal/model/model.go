@@ -189,16 +189,22 @@ type ProtocolPackage struct {
 	UpdatedAt     int64          `json:"updatedAt"`
 }
 
-// ProtocolAssistantField is the editable contract between the AI protocol
-// assistant and the form-based protocol designer. Expression is evaluated by
-// the JavaScript parser sandbox with raw (and, for hex payloads, bytes) in
-// scope.
+// ProtocolAssistantField is the editable address/mapping contract between the
+// protocol assistant and the form-based protocol designer. Expression remains
+// optional for backwards-compatible drafts, but the assistant no longer
+// generates or executes JavaScript.
 type ProtocolAssistantField struct {
-	Name        string `json:"name"`
-	Label       string `json:"label,omitempty"`
-	Type        string `json:"type,omitempty"`
-	Expression  string `json:"expression"`
-	Description string `json:"description,omitempty"`
+	Name          string `json:"name"`
+	Label         string `json:"label,omitempty"`
+	Type          string `json:"type,omitempty"`
+	Expression    string `json:"expression,omitempty"`
+	Address       string `json:"address,omitempty"`
+	CoilAddress   int    `json:"coilAddress"`
+	ModbusAddress int    `json:"modbusAddress"`
+	DataType      string `json:"dataType,omitempty"`
+	NormalValue   string `json:"normalValue,omitempty"`
+	ReportValue   string `json:"reportValue,omitempty"`
+	Description   string `json:"description,omitempty"`
 }
 
 type ProtocolAssistantDraft struct {
@@ -207,9 +213,11 @@ type ProtocolAssistantDraft struct {
 	Protocol       string                   `json:"protocol"`
 	Transport      string                   `json:"transport"`
 	PayloadFormat  string                   `json:"payloadFormat"`
+	ParserType     string                   `json:"parserType"`
 	MessageType    MessageType              `json:"messageType"`
 	Setup          string                   `json:"setup,omitempty"`
-	Source         string                   `json:"source"`
+	Source         string                   `json:"source,omitempty"`
+	Config         map[string]any           `json:"config,omitempty"`
 	Fields         []ProtocolAssistantField `json:"fields"`
 	TagExpressions map[string]string        `json:"tagExpressions,omitempty"`
 	SamplePayload  any                      `json:"samplePayload,omitempty"`

@@ -101,7 +101,7 @@ func main() {
 		registry.Set("mqtt_subscription_count", 4)
 		log.Info("realtime enabled", "adapter", "mqtt")
 	}
-	parsers := parser.NewRegistry(parser.GB26875Parser{}, parser.ConfigurableJSONParser{}, parser.ConfigurableHexParser{}, parser.JavaScriptParser{}, parser.ExternalParser{Root: cfg.DataDir}, parser.FireSmokeHexParser{}, parser.ModbusParser{}, parser.JSONParser{})
+	parsers := parser.NewRegistry(parser.GB26875Parser{}, parser.ConfigurableJSONParser{}, parser.ConfigurableHexParser{}, parser.ModbusCoilParser{}, parser.JavaScriptParser{}, parser.ExternalParser{Root: cfg.DataDir}, parser.FireSmokeHexParser{}, parser.ModbusParser{}, parser.JSONParser{})
 	engine := core.New(repo, archivePort, bus, realtime, parsers, log)
 	engine.VideoMediaAllowedHosts = cfg.VideoMediaHosts
 	engine.RequireVideoCameraMapping = !cfg.DevMode
@@ -164,7 +164,7 @@ func main() {
 		}))
 	}
 	api := httpapi.New(cfg, engine, registry, log)
-	server := &http.Server{Addr: cfg.HTTPAddr, Handler: api.Handler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 2 * time.Minute, IdleTimeout: 2 * time.Minute}
+	server := &http.Server{Addr: cfg.HTTPAddr, Handler: api.Handler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 15 * time.Minute, IdleTimeout: 2 * time.Minute}
 	go func() {
 		ticker := time.NewTicker(cfg.OfflineScan)
 		defer ticker.Stop()

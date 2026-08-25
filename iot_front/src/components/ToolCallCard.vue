@@ -51,4 +51,5 @@ function safeSummary(value) {
 .tool-title { min-width:0; flex:1; display:grid; gap:1px; }.tool-title small { color:#8c8c8c; font-size:9px; letter-spacing:.08em; }.tool-title strong { overflow:hidden; font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
 .tool-meta { min-height:20px; margin-top:7px; padding-left:34px; display:flex; align-items:center; gap:10px; color:#8c8c8c; font-size:10px; }.tool-meta .el-button { margin-left:auto; padding:0; font-size:10px; }
 .tool-details { margin:7px 0 0 34px; display:grid; gap:8px; }.tool-details section { display:grid; gap:4px; }.tool-details strong { color:#646c73; font-size:10px; }.tool-details pre { max-height:180px; margin:0; padding:8px; overflow:auto; color:#3d3d3d; background:#fff; border:1px solid #ededed; border-radius:3px; font:10px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; white-space:pre-wrap; word-break:break-word; }
+.tool-meta .el-button { min-height:24px; height:24px; padding:0 8px; }
 </style>

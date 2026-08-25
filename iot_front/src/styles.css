@@ -156,11 +156,27 @@ pre { max-height: 360px; overflow: auto; padding: 14px; color: #dbeafe; backgrou
 .table-card > .el-card__header { padding-bottom: 16px; }
 .card-header { width: 100%; justify-content: space-between; gap: 14px; }
 .card-header small { color: var(--muted-foreground); font-weight: 400; }
-.el-button { min-height: 32px; height: 32px; padding: 0 13px; border-radius: .5rem; font-size: 12px; font-weight: 600; box-shadow: none; }
+.el-button { min-height: 32px; height: 32px; padding: 0 13px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--el-button-border-color, var(--border)); border-radius: .5rem; font-size: 12px; font-weight: 600; line-height: 1; box-shadow: 0 1px 2px rgba(15,23,42,.04); transition: color .16s ease, background-color .16s ease, border-color .16s ease, box-shadow .16s ease, transform .16s ease; }
+.el-button--small { min-height: 28px; height: 28px; padding: 0 10px; font-size: 11px; }
+.el-button--large { min-height: 40px; height: 40px; padding: 0 16px; }
 .el-button.is-circle { width: 30px; padding: 0; }
-.el-button--primary { --el-button-bg-color: var(--primary); --el-button-border-color: var(--primary); --el-button-hover-bg-color: #1d4ed8; --el-button-hover-border-color: #1d4ed8; }
+.el-button:not(.is-disabled):not(:disabled):hover { box-shadow: 0 2px 5px rgba(15,23,42,.08); }
+.el-button:not(.is-disabled):not(:disabled):active { transform: translateY(1px); }
+.el-button:focus-visible { outline: 2px solid rgba(59,130,246,.35); outline-offset: 2px; }
+.el-button--primary { --el-button-bg-color: var(--primary); --el-button-border-color: var(--primary); --el-button-text-color: #fff; --el-button-hover-bg-color: #1d4ed8; --el-button-hover-border-color: #1d4ed8; }
 .el-button--default, .el-button.is-plain { --el-button-bg-color: #fff; --el-button-border-color: var(--border); --el-button-text-color: #475569; --el-button-hover-bg-color: var(--accent); --el-button-hover-border-color: #bfdbfe; --el-button-hover-text-color: var(--accent-foreground); }
-.el-button.is-link { font-weight: 600; }
+.el-button.is-text, .el-button.is-link { border: 1px solid var(--border) !important; background: #fff !important; color: #475569 !important; text-decoration: none; }
+.el-button.is-text:hover, .el-button.is-link:hover { border-color: #bfdbfe !important; background: var(--accent) !important; color: var(--accent-foreground) !important; }
+.el-button--primary.is-text, .el-button--primary.is-link { border-color: #bfdbfe !important; background: #eff6ff !important; color: #1d4ed8 !important; }
+.el-button--primary.is-text:hover, .el-button--primary.is-link:hover { border-color: #93c5fd !important; background: #dbeafe !important; color: #1e40af !important; }
+.el-button.is-disabled, .el-button:disabled { cursor: not-allowed; }
+
+input[type="file"] { width: 100%; min-height: 32px; padding: 4px 6px; color: var(--muted-foreground); background: var(--card); border: 1px solid var(--input); border-radius: .5rem; font-size: 12px; cursor: pointer; transition: border-color .16s ease, box-shadow .16s ease; }
+input[type="file"]::file-selector-button { min-height: 26px; margin-right: 9px; padding: 0 10px; color: #334155; background: #fff; border: 1px solid var(--border); border-radius: .375rem; font: 600 11px var(--el-font-family); cursor: pointer; transition: color .16s ease, background-color .16s ease, border-color .16s ease; }
+input[type="file"]::file-selector-button:hover { color: var(--accent-foreground); background: var(--accent); border-color: #bfdbfe; }
+input[type="file"]:hover { border-color: #94a3b8; }
+input[type="file"]:focus-visible { outline: 2px solid rgba(59,130,246,.35); outline-offset: 2px; }
+input[type="file"]:disabled { opacity: .6; cursor: not-allowed; }
 .table-actions { display: flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; }
 .table-actions .el-button, .el-table .el-button { min-height: 28px; height: 28px; padding: 0 10px; border-width: 1px; border-style: solid; border-radius: .5rem; font-size: 11px; font-weight: 600; box-shadow: 0 1px 1px rgba(15,23,42,.04); }
 .table-actions .el-button--default, .el-table .el-button--default { --el-button-bg-color: #fff; --el-button-border-color: var(--border); --el-button-text-color: #475569; --el-button-hover-bg-color: var(--muted); --el-button-hover-border-color: #cbd5e1; --el-button-hover-text-color: var(--foreground); }

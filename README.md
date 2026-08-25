@@ -1,14 +1,29 @@
 # 消防 IoT 平台
 
-面向消防物联网场景的一体化管理平台。项目由 Go API、Vue 3 Web、EMQX、PostgreSQL、Redis、ClickHouse、Redpanda、MinIO 以及可选 AI 运行时组成，覆盖设备与数据接入、协议解析、状态管理、告警、视频流预览、原始报文证据链、回放、AI 研判、MCP 和备份恢复。
+面向消防物联网场景的一体化管理平台。项目由 Go API、独立 Vue 3 Web、EMQX、PostgreSQL、Redis、ClickHouse、Redpanda、MinIO 以及可选 AI 运行时组成，覆盖设备与数据接入、协议解析、状态管理、告警、视频流预览、原始报文证据链、回放、AI 研判、MCP 和备份恢复。
 
-当前代码库支持两种运行方式：使用内存适配器快速开发/测试，或使用 Docker Compose 启动前后端与完整基础设施。文档按当前源码、Compose 配置和可重复验证的测试结果编写；生产容量、灾备、TLS/ACL 和第三方平台验收仍需在目标环境单独完成。
+当前代码库支持三种常用运行方式：使用 Docker Compose 启动前后端与基础设施；分开启动 Go API 和 Vue 前端进行本地开发；或只构建前端静态资源并交给现有 Nginx/Ingress 部署。文档按当前源码和部署配置编写；生产容量、灾备、TLS/ACL 和第三方平台验收仍需在目标环境单独完成。
 
-> 说明：JetLinks 上游协议包不属于本项目交付范围；本项目提供独立的协议注册、配置化 JSON/Hex 解析、受限 JavaScript 解析和 GB/T 26875 接入示例。
+> 说明：JetLinks 上游协议包不属于本项目交付范围。协议接入助手使用 Go 解析 Excel/点表并生成 Go 映射，不生成 JavaScript；协议开发页仍保留受限 JavaScript 解析器作为管理员维护的独立扩展点。
 
-## 快速开始
+## 文档导航
 
-### Docker Compose
+建议按以下顺序阅读：
+
+1. [快速选择运行方式](#1-快速选择运行方式)
+2. [离线部署](#2-离线部署)
+3. [本地开发](#3-本地开发)
+4. [前端部署](#4-前端部署)
+5. [功能与使用说明](#5-功能与使用说明)
+6. [协议与设备接入](#协议与设备接入)
+7. [配置、AI 与运维](#10-配置与密钥)
+8. [测试、排障与生产边界](#19-测试)
+
+根 README 只保留启动、部署和边界说明；协议、离线包、Harness 和 ThingsPanel 的细节放在[相关文档](#24-相关文档)中。
+
+## 1. 快速选择运行方式
+
+### Docker Compose（推荐）
 
 环境要求：
 
@@ -64,7 +79,7 @@ docker compose --profile harness logs -f deepseek-harness platform-api
 curl http://127.0.0.1:8091/health
 ```
 
-### 一键离线部署
+## 2. 离线部署
 
 打包分为两个阶段：在有网机器上准备完整离线包，再把离线包传到无网服务器启动。打包机需要已安装并启动 Docker Engine/Desktop；服务器端不会执行镜像构建、依赖安装或镜像拉取。
 
@@ -131,7 +146,7 @@ docker compose --profile gb26875 up -d --build
 
 > `docker compose down -v` 会删除数据库、对象存储等持久化卷。除非确认数据可以丢弃，否则不要执行。
 
-### 本地源码启动
+## 3. 本地开发
 
 后端要求 Go 1.25.5 或更高版本。前端要求 Node.js `^20.19.0` 或 `>=22.12.0`，推荐 Node.js 22 LTS。
 
@@ -168,15 +183,127 @@ npm.cmd run dev
 
 未配置外部存储时，后端使用内存业务仓储和 `./data/objects` 本地归档，适合开发与自动化测试，不用于生产。
 
-## 界面功能
+## 4. 前端部署
+
+前端位于 `iot_front`，是独立的 Vue 3 + Vite 项目。浏览器请求默认使用同源路径 `/api`、`/health` 和 `/mcp`；生产环境应通过 Nginx 或 Ingress 把这些路径转发到 Go API。`VITE_API_PROXY_TARGET` 只用于 Vite 开发服务器代理，不是生产 API 地址配置。
+
+### 4.1 本地开发前端
+
+先启动后端 API。PowerShell：
+
+```powershell
+$env:IOT_HTTP_ADDR=':8081'
+$env:IOT_CORS_ALLOWED_ORIGINS='http://localhost:5173'
+go run ./cmd/iot-platform
+```
+
+另开终端启动前端：
+
+```powershell
+cd iot_front
+npm.cmd ci
+npm.cmd run dev
+```
+
+默认访问 `http://localhost:5173`。Vite 会将 `/api`、`/health` 和 `/mcp` 代理到 `http://localhost:8081`；后端端口改变时设置 `VITE_API_PROXY_TARGET`：
+
+```powershell
+$env:VITE_API_PROXY_TARGET='http://localhost:18081'
+npm.cmd run dev
+```
+
+macOS/Linux 使用同样的 npm 命令，只需把 PowerShell 环境变量写法改为 `VITE_API_PROXY_TARGET=http://localhost:18081 npm run dev`。
+
+### 4.2 构建前端
+
+```bash
+cd iot_front
+npm ci
+npm test
+npm run build
+```
+
+构建产物在 `iot_front/dist`。`npm run preview` 只用于本地预览，不是生产服务。Node.js 要求为 `^20.19.0` 或 `>=22.12.0`，推荐 Node.js 22 LTS；项目启用了 `engine-strict`，版本不符合时安装会直接失败。
+
+### 4.3 Docker Compose 中部署前端（推荐）
+
+根目录 `compose.yaml` 的 `platform-web` 以 `iot_front` 为构建上下文，使用 `iot_front/Dockerfile` 构建 Nginx 镜像。容器内通过 Docker DNS 访问 `platform-api:8080`，并由 Nginx 代理 API、健康检查、MCP 以及 SSE 流式接口。
+
+```bash
+docker compose build platform-api platform-web
+docker compose up -d platform-api platform-web
+docker compose ps
+```
+
+访问 `http://localhost:8080`。如果只修改了前端，重新构建并重建 `platform-web`：
+
+```bash
+docker compose up -d --build --force-recreate platform-web
+```
+
+生产环境使用自定义端口时设置 `IOT_WEB_PORT`；API 对外端口由 `IOT_API_PORT` 控制。容器之间仍然使用 `platform-api:8080`，不需要把 API 容器端口改成宿主机端口。
+
+### 4.4 独立前端 Docker 镜像
+
+`iot_front/Dockerfile` 适合把前端交给独立的镜像仓库或 Kubernetes。默认 Nginx 配置假定 API 服务名为 `platform-api`、容器端口为 `8080`，因此可以直接用于 Compose 和当前 Kubernetes 基线。
+
+```bash
+docker build -t iot-platform-web:local ./iot_front
+```
+
+如果前端容器与 API 不在同一个 Docker 网络，请先复制 `iot_front/nginx.conf` 为部署配置，再把其中 `/api/`、`/health/`、`/mcp` 和 SSE 路由的 `proxy_pass http://platform-api:8080` 改为实际 API 地址，然后挂载该配置启动：
+
+```bash
+docker run -d --name iot-platform-web --restart unless-stopped -p 8080:8080 -e IOT_VIDEO_PREVIEW_CSP_SOURCES= -v "$PWD/nginx.standalone.conf:/etc/nginx/templates/default.conf.template:ro" iot-platform-web:local
+```
+
+Docker Desktop 访问宿主机 API 时可使用 `host.docker.internal`；Linux 需要增加 `--add-host=host.docker.internal:host-gateway`，或直接配置可达的 API 主机名。不要把 API 地址写成容器内的 `127.0.0.1`。
+
+### 4.5 静态文件交给现有 Nginx/Ingress
+
+如果环境已经有统一网关，可以只发布 `iot_front/dist`：
+
+```bash
+cd iot_front
+npm ci
+npm run build
+# 将 dist/ 发布到现有静态文件目录
+```
+
+网关必须同时提供 SPA fallback（未知页面回退到 `index.html`）和以下同源转发：
+
+| 路径 | 转发目标 | 说明 |
+|---|---|---|
+| `/api/` | Go API | REST 与文件上传/下载 |
+| `/api/v1/ai/chat/stream` | Go API | 关闭代理缓冲，保留长连接 |
+| `/health/` | Go API | 前端容器健康检查 |
+| `/mcp` | Go API | MCP 与流式响应，关闭代理缓冲 |
+
+可直接以 `iot_front/nginx.conf` 作为 Nginx 配置模板。视频预览域名还要同步配置 `IOT_VIDEO_PREVIEW_ALLOWED_ORIGINS` 和 `IOT_VIDEO_PREVIEW_CSP_SOURCES`。当前前端 API 调用是相对路径，不能只设置 `VITE_API_PROXY_TARGET` 就把生产前端改成跨域直连。
+
+### 4.6 Kubernetes 前端部署
+
+先构建并推送前端镜像，再替换 `deploy/k8s/platform.yaml` 中的占位镜像和 Secret：
+
+```bash
+docker build -t your-registry/iot-platform-web:1.0.0 ./iot_front
+docker push your-registry/iot-platform-web:1.0.0
+kubectl apply -f deploy/k8s/platform.yaml
+```
+
+该清单包含 API/Web Deployment、Service、健康检查和 NetworkPolicy，但不包含 Ingress；需要在集群中另行配置域名、TLS 和外部入口。Web Pod 通过 Kubernetes Service `platform-api:8080` 访问 API。
+
+## 5. 功能与使用说明
+
+### 协议与设备接入
 
 | 页面 | 功能 |
 |---|---|
 | 运行总览 | 设备、在线率、告警趋势和重点态势 |
 | 设备管理 | 注册、启停、凭证轮换、连接指南和实时状态 |
 | 产品管理 | 产品模型、物模型属性和协议包绑定 |
-| 协议开发 | 协议包版本、JSON/Hex/JavaScript 解析器配置和样本调试 |
-| 协议接入助手 | 上传协议/点表，AI 生成受限 JavaScript，表单修改字段，样本预览并发布 |
+| 协议开发 | 协议包版本、JSON/Hex/JavaScript/Go Worker 解析器配置和样本调试 |
+| 协议接入助手 | 上传协议/点表，生成 Go 字段映射，表单修改字段，样本预览并发布；不生成 JavaScript |
 | 接入指南 | HTTP/MQTT 上报参数、设备凭证、Topic 和数据联调；不是重复的设备注册入口 |
 | 摄像头映射 | 摄像机与设备/空间关联、视频流预览 |
 | 告警中心 | 告警查询、确认、抑制、恢复和关闭 |
@@ -185,6 +312,7 @@ npm.cmd run dev
 | 告警规则 | JSON/Gengine 规则、冲突检测和 AI 草稿 |
 | 知识库管理 | 上传消防规范、设备手册和处置 SOP，查看索引状态 |
 | AI 工作流 | DeepSeek Harness 插件、Provider 测试、流式对话和工具轨迹 |
+| 测试设备 | 自动准备绑定产品、协议和默认报文，可发送数据、事件、报警和恢复报文 |
 
 “AI 告警研判”是业务工作流，不是独立菜单。进入“AI 工作流”后，在左侧“运行工作流”卡片的“工作流插件”下拉框中选择：
 
@@ -194,16 +322,29 @@ npm.cmd run dev
 - AI 设备健康巡检
 - AI 协议接入助手
 
-“协议接入助手”支持 PDF、Word、Excel/CSV 点表和直接粘贴文本。AI 只负责提出字段映射草稿；发布前必须由操作员在字段表单中确认字段名、解析表达式、消息类型和样本结果。发布内容是 `javascript_sandbox_parser` 协议包，代码在 Goja 受限沙箱中运行（无网络、文件、环境变量和平台 API），因此新增协议不需要重新编译或部署 API 镜像。发布后到“产品管理”把协议包绑定到产品，设备原始报文即可走同一解析链路。
+“协议接入助手”支持 PDF、Word、Excel/CSV 点表和直接粘贴文本。XLSX 点表由 Go 直接还原共享字符串和行列关系，生成 `modbus_coil_parser` 地址映射，不调用 AI，也不生成 JavaScript；其他资料在配置了 AI Provider 时生成 Go 字段映射草稿。发布前必须由操作员在字段表单中确认字段名、地址、数据类型、正常值、报出值、消息类型和样本结果。发布内容是 Go 映射协议包，发布后到“产品管理”把协议包绑定到产品，设备原始报文即可走同一解析链路。
 
-对于不属于常见 JSON 或固定字段十六进制格式的新设备，不需要重新部署平台：
+对于不属于常见 JSON 或固定字段十六进制格式的新设备，按复杂度选择解析路径：
 
 1. 在“协议开发”中使用配置化 JSON/Hex 映射，适合字段偏移、类型、缩放和枚举规则稳定的设备。
-2. 在“协议接入助手”上传协议文件或点表，让 AI 生成解析 JavaScript 草稿。
-3. 在字段表单中修改字段名、类型、表达式和消息类型，使用样本报文预览标准消息。
-4. 确认发布后，解析代码以协议包配置保存并由受限 JavaScript 沙箱执行；再到产品管理绑定协议包。
+2. 在“协议接入助手”上传协议文件或点表；XLSX 由 Go 生成 Modbus 映射，其他资料由 AI 生成 Go 映射草稿。
+3. 在字段表单中修改字段名、地址、数据类型、正常值、报出值和消息类型，使用样本报文预览标准消息。
+4. 确认发布后，解析映射以 Go 协议包配置保存；变长、TLV、状态机或请求/应答协议先选择 `go_protocol_parser` 并上传已编译 Go Worker，再到产品管理绑定协议包。
 
-如需在其他地方编写代码，也可以直接提交符合沙箱约束的 `javascript_sandbox_parser` 协议包。解析脚本不能访问网络、文件、环境变量、平台 API 或设备控制能力。
+受限 JavaScript 仅是“协议开发”页面的独立扩展点，不属于“协议接入助手”的生成或发布链路。如确需使用，脚本不能访问网络、文件、环境变量、平台 API 或设备控制能力。
+
+消息类型在界面显示中文名称，接口和 Go Worker 使用稳定代码：
+
+| 中文名称 | 稳定代码 | 用途 |
+|---|---|---|
+| 属性上报 | `PROPERTY_REPORT` | 测点、开关量和当前状态值 |
+| 事件上报 | `EVENT_REPORT` | 一次性发生的复位、心跳或测试事件 |
+| 告警上报 | `ALARM_REPORT` | 设备明确上报的告警事件，是否生成平台告警仍由告警规则决定 |
+| 状态变化 | `STATE_CHANGE` | 在线、离线或业务状态变化 |
+| 指令应答 | `COMMAND_REPLY` | 设备对平台指令的响应 |
+| 日志上报 | `LOG_REPORT` | 运行日志或诊断信息 |
+
+字段映射、Excel 处理和编译 Go Worker 的完整约定见 [配置驱动协议](docs/CONFIGURABLE_PROTOCOLS.md) 和 [Go 协议包接入](docs/GO_PROTOCOL_PACKAGES.md)。
 
 ### 智能巡检操作约定
 
@@ -215,7 +356,7 @@ npm.cmd run dev
 
 “接入指南”用于查看真实设备上报所需的 HTTP/MQTT 地址、认证和 Topic，并提供数据联调入口；设备是否已经注册、启用和绑定协议，以“设备管理”和“产品管理”中的状态为准。
 
-## 核心能力
+## 6. 核心能力
 
 | 领域 | 实现 |
 |---|---|
@@ -235,7 +376,7 @@ npm.cmd run dev
 | 备份 | PostgreSQL/WAL、ClickHouse、Redis、MinIO-DR、校验与恢复演练 |
 | 运维 | 健康检查、JSON 日志、Prometheus、Grafana、Loki、K8s 和压测器 |
 
-## 系统架构
+## 7. 系统架构
 
 ```text
 设备 / 网关 / 视频平台
@@ -264,7 +405,7 @@ EMQX/REST
   -> EMQX 实时 Topic + AI/RAG 旁路分析
 ```
 
-## 项目目录
+## 8. 项目目录
 
 ```text
 cmd/iot-platform              平台 API 主服务
@@ -286,7 +427,7 @@ docs                          AI Harness、ThingsPanel 和覆盖说明
 
 设备协议的选择、发布和运行时链路见 [设备协议接入流程](docs/设备协议接入流程.md)；复杂协议的 Go Worker 契约见 [Go 协议包接入](docs/GO_PROTOCOL_PACKAGES.md)。
 
-## Docker 服务与端口
+## 9. 服务、端口与健康检查
 
 | 服务 | 默认地址 |
 |---|---|
@@ -333,9 +474,9 @@ go run ./cmd/gb26875-virtual-device --help
 
 网关接收设备报文后调用平台设备接入接口；平台侧仍按“设备管理 → 产品协议绑定 → 原始报文 → 标准消息”的链路处理。协议字段和示例报文见 [GB/T 26875 对接说明](docs/GB26875_DAHUA_V103.md)。
 
-协议开发现在按复杂度提供三条路径：JSON/固定字段十六进制直接配置；受限 JavaScript 适用于纯转换；变长、TLV、状态机或请求/应答协议可选择 `go_protocol_parser`，上传受 SHA-256、路径、超时和输出大小限制的已编译 Go Worker。Go 源码不能在 API 进程内直接编译执行，完整契约见 [Go 协议包接入](docs/GO_PROTOCOL_PACKAGES.md)。
+协议开发现在按复杂度提供四条路径：JSON/固定字段十六进制直接配置；Excel/点表通过协议接入助手生成 Go Modbus 映射；受限 JavaScript 仅适用于管理员维护的纯转换；变长、TLV、状态机或请求/应答协议选择 `go_protocol_parser` 并上传受 SHA-256、路径、超时和输出大小限制的已编译 Go Worker。Go 源码不能在 API 进程内直接编译执行，完整契约见 [配置驱动协议](docs/CONFIGURABLE_PROTOCOLS.md) 和 [Go 协议包接入](docs/GO_PROTOCOL_PACKAGES.md)。
 
-## 配置与密钥
+## 10. 配置与密钥
 
 基础平台本地开发不要求创建 `.env`，Compose 已提供本地默认值。
 
@@ -368,7 +509,7 @@ openssl rand -hex 32
 
 `IOT_AI_HARNESS_TOKEN` 只用于 Go API 与 Harness 侧车之间的内部认证，不是 DeepSeek API Key。
 
-## DeepSeek Harness 插件工作流
+## 11. DeepSeek Harness 工作流
 
 平台把模型 Provider 与业务 AI 插件分成两层：
 
@@ -488,7 +629,7 @@ mcp__iot__create_rule_draft
 - reasoning、完整工具参数和原始工具结果不会返回前端。
 - 所有 MCP 工具调用进入平台审计。
 
-## 其他 AI Provider
+## 12. 其他 AI Provider
 
 不使用 Harness 时，也可以启用 Eino Provider 链路，用于告警分析、规则草稿、报表和 Provider 在线测试。
 
@@ -518,7 +659,7 @@ docker compose restart platform-api
 
 AI 页面“管理中心 → Provider 测试与配置”支持 DeepSeek、Ollama 和 OpenAI-compatible 连接测试。管理员可以添加自定义 OpenAI-compatible Provider，保存名称、Provider ID、Base URL 和模型配置到当前浏览器/租户的配置中；API Key 只在本次测试使用，不写入浏览器配置、数据库或审计日志。自定义 Provider 的 Base URL 来源必须加入 `IOT_AI_PROVIDER_TEST_ALLOWED_ORIGINS` 白名单，平台不会为了测试关闭 SSRF 防护。
 
-## 知识库管理
+## 13. 知识库管理
 
 进入左侧“知识库管理”页面可以：
 
@@ -533,7 +674,7 @@ AI 页面“管理中心 → Provider 测试与配置”支持 DeepSeek、Ollama
 
 未配置 `IOT_WEAVIATE_URL` 时使用本地内存索引：原文件和文档记录会持久保存，但 API 重启后检索索引需要重新建立。页面会显示相应警告；生产环境应启用 Weaviate 持久索引。
 
-## 摄像头映射与视频流预览
+## 14. 摄像头映射与视频流预览
 
 摄像头映射用于把视频平台的 `cameraId` 与平台设备、建筑、区域等空间信息关联。视频告警到达后，平台可以结合附近传感器状态、设备属性和当前告警完成跨源研判。
 
@@ -573,7 +714,7 @@ IOT_VIDEO_PLATFORM_TENANTS=video-platform-1:tenant_001
 
 平台绑定不匹配的 `tenantId` 会被拒绝；生产 Webhook 的 `cameraId` 还必须属于该租户且处于启用状态。MQTT 视频和设备状态消息同样以租户范围 Topic 为准，不信任 Payload 中的租户字段。
 
-## API 快速验证
+## 15. API 快速验证
 
 登录：
 
@@ -647,7 +788,7 @@ GET/POST/DELETE /mcp
 POST         /mcp/harness
 ```
 
-## Topic
+## 16. 消息主题
 
 Redpanda/Kafka：
 
@@ -672,7 +813,7 @@ EMQX：
 
 EMQX 使用 HS256 JWT、内嵌 ACL 和默认拒绝策略，匿名连接会被拒绝。生产安全基线见 [EMQX 生产安全配置](ops/emqx/PRODUCTION_SECURITY.md)。
 
-## MCP
+## 17. MCP
 
 平台 MCP 端点为 `/mcp`，使用平台 Bearer JWT。工具包括：
 
@@ -690,9 +831,13 @@ create_rule_draft
 
 Harness 使用独立的 `/mcp/harness`，仅接受平台签发的短期内部令牌和只读 scopes。
 
-## 备份与恢复
+## 18. 备份与恢复
 
 `backup-service` 默认每天全量备份、每 15 分钟执行增量任务，覆盖 PostgreSQL/WAL、ClickHouse、Redis、MinIO、Redpanda/EMQX 配置和可选 Weaviate 快照。
+
+登录前端后进入“运行中心 → 备份中心”，可以查看全量、增量和恢复演练记录，打开任务详情查看 manifest 中的制品清单与 SHA-256。管理员可以在页面触发全量/增量备份、下载制品和执行非破坏性恢复演练；普通查看账号只能查看记录和文件元数据。页面通过 `platform-api` 代理访问 `backup-service`，浏览器不会接触备份管理令牌。
+
+Compose 默认使用 `IOT_BACKUP_URL=http://backup-service:8090`，并将同一个 `IOT_BACKUP_ADMIN_TOKEN` 注入 API 和备份服务。若拆分部署，请让 Go API 能访问 `IOT_BACKUP_URL`，并保证两个服务的令牌一致；备份文件以 MinIO 中的 manifest 为准，不依赖浏览器访问 backup-service 的 8090 端口。
 
 手动备份与非破坏性恢复演练：
 
@@ -704,7 +849,7 @@ Invoke-RestMethod -Method Post 'http://localhost:8090/restore/drill?backupId=lat
 
 恢复演练只读取制品、校验哈希并记录结果，不覆盖当前数据。生产恢复必须先在隔离环境验证。
 
-## 测试
+## 19. 测试
 
 后端：
 
@@ -739,7 +884,7 @@ docker compose --profile harness config --quiet
 go test ./internal/deploycheck
 ```
 
-## 压测
+## 20. 压测
 
 ```powershell
 go run ./cmd/loadgen -url http://localhost:8080 -token $login.accessToken `
@@ -753,7 +898,7 @@ go run ./cmd/loadgen -url http://localhost:8080 -token $login.accessToken `
 
 单机开发烟测不能替代生产容量验收。30k/50k 吞吐、长时间稳定性、HA 切换与 RPO/RTO 必须在目标集群验证。
 
-## 常见问题
+## 21. 常见问题
 
 ### 看不到“AI 告警研判”或工作流下拉框
 
@@ -812,7 +957,7 @@ docker compose --profile harness up -d --build --force-recreate platform-web
 - 检查模型和 Base URL 是否匹配。
 - `MODEL_ERROR` 与插件加载失败不同；先查看 Harness 健康接口的 `pluginCount`。
 
-## ThingsPanel
+## 22. ThingsPanel
 
 ```bash
 docker compose --profile thingspanel up -d --build
@@ -822,7 +967,7 @@ ThingsPanel Web 默认为 `http://localhost:8088`，API 默认为 `http://localh
 
 详细边界和目录同步说明见 [ThingsPanel 二开集成](docs/THINGSPANEL_INTEGRATION.md)。
 
-## 生产部署检查
+## 23. 生产部署检查
 
 - 替换所有示例密码、JWT 密钥、Harness Token 和视频平台 Secret。
 - 使用 HTTPS、受限管理网络、TLS/mTLS 和企业身份源。
@@ -835,7 +980,7 @@ ThingsPanel Web 默认为 `http://localhost:8088`，API 默认为 `http://localh
 
 Kubernetes 基线位于 `deploy/k8s`。
 
-## 相关文档
+## 24. 相关文档
 
 - [DeepSeek Harness 业务插件运行时](docs/AI_PLUGIN_HARNESS.md)
 - [ThingsPanel 二开集成边界](docs/THINGSPANEL_INTEGRATION.md)

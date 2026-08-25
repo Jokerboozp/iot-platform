@@ -51,30 +51,36 @@ func (s *Server) generateProtocolAssistant(w http.ResponseWriter, r *http.Reques
 	if r.MultipartForm != nil {
 		defer r.MultipartForm.RemoveAll()
 	}
-	documentText, err := readProtocolAssistantDocument(r, maxDocumentBytes)
+	document, err := readProtocolAssistantDocument(r, maxDocumentBytes)
 	if err != nil {
 		problem(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
 	pointTable := strings.TrimSpace(r.FormValue("pointTable"))
-	if documentText == "" && pointTable == "" {
+	if document.Text == "" && pointTable == "" {
 		problem(w, http.StatusUnprocessableEntity, "protocol document or point table is required")
 		return
 	}
 	input := core.ProtocolAssistantInput{
-		Name:          strings.TrimSpace(r.FormValue("name")),
-		Protocol:      strings.TrimSpace(r.FormValue("protocol")),
-		Transport:     strings.TrimSpace(r.FormValue("transport")),
-		PayloadFormat: strings.TrimSpace(r.FormValue("payloadFormat")),
-		DocumentText:  documentText,
-		PointTable:    pointTable,
-		SamplePayload: strings.TrimSpace(r.FormValue("samplePayload")),
+		Name:             strings.TrimSpace(r.FormValue("name")),
+		Protocol:         strings.TrimSpace(r.FormValue("protocol")),
+		Transport:        strings.TrimSpace(r.FormValue("transport")),
+		PayloadFormat:    strings.TrimSpace(r.FormValue("payloadFormat")),
+		DocumentText:     document.Text,
+		PointTable:       pointTable,
+		SamplePayload:    strings.TrimSpace(r.FormValue("samplePayload")),
+		DocumentFilename: document.Filename,
+		DocumentData:     document.Data,
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
 	draft, err := s.engine.GenerateProtocolAssistant(ctx, claims(r).TenantID, input)
 	if err != nil {
-		problem(w, http.StatusBadGateway, err.Error())
+		status := http.StatusBadGateway
+		if errors.Is(err, context.DeadlineExceeded) {
+			status = http.StatusGatewayTimeout
+		}
+		problem(w, status, err.Error())
 		return
 	}
 	s.audit(r, "ai.protocol-assistant.generate", "protocol-draft", "draft", map[string]any{"filename": protocolAssistantFilename(r), "fields": len(draft.Fields), "payloadFormat": draft.PayloadFormat})
@@ -116,7 +122,6 @@ func (s *Server) publishProtocolAssistant(w http.ResponseWriter, r *http.Request
 		ID            string                       `json:"id"`
 		Version       string                       `json:"version"`
 		Status        string                       `json:"status"`
-		Source        string                       `json:"source"`
 		Payload       json.RawMessage              `json:"payload"`
 		PayloadFormat string                       `json:"payloadFormat"`
 		Draft         model.ProtocolAssistantDraft `json:"draft"`
@@ -125,33 +130,8 @@ func (s *Server) publishProtocolAssistant(w http.ResponseWriter, r *http.Request
 		return
 	}
 	draft := in.Draft
-	if strings.TrimSpace(in.Source) != "" {
-		draft.Source = in.Source
-	}
 	if strings.TrimSpace(in.PayloadFormat) != "" {
 		draft.PayloadFormat = strings.TrimSpace(in.PayloadFormat)
-	}
-	payload, err := assistantPayloadText(in.Payload, draft.PayloadFormat)
-	if err != nil {
-		problem(w, http.StatusUnprocessableEntity, err.Error())
-		return
-	}
-	message, err := core.PreviewProtocolAssistant(draft, claims(r).TenantID, payload)
-	if err != nil {
-		problem(w, http.StatusUnprocessableEntity, "发布前解析校验失败："+err.Error())
-		return
-	}
-	source := strings.TrimSpace(draft.Source)
-	if source == "" {
-		source, err = core.BuildProtocolJavaScriptSource(draft)
-		if err != nil {
-			problem(w, http.StatusUnprocessableEntity, err.Error())
-			return
-		}
-	}
-	if _, err = parser.JavaScriptSource(map[string]any{"source": source}); err != nil {
-		problem(w, http.StatusUnprocessableEntity, err.Error())
-		return
 	}
 	id := strings.TrimSpace(in.ID)
 	if id == "" {
@@ -169,8 +149,47 @@ func (s *Server) publishProtocolAssistant(w http.ResponseWriter, r *http.Request
 		problem(w, http.StatusUnprocessableEntity, "status must be DRAFT or PUBLISHED")
 		return
 	}
+	parserType := strings.TrimSpace(draft.ParserType)
+	if parserType != parser.ModbusCoilParserName && parserType != parser.GoProtocolParserName {
+		problem(w, http.StatusUnprocessableEntity, "协议助手只支持 Go 解析映射或已编译 Go Worker")
+		return
+	}
+	if draft.Config == nil {
+		draft.Config = map[string]any{}
+	}
+	if parserType == parser.ModbusCoilParserName {
+		if draft.MessageType == "" {
+			draft.MessageType = model.PropertyReport
+		}
+		draft.Config["messageType"] = string(draft.MessageType)
+		if err := parser.ValidateModbusCoilConfig(draft.Config); err != nil {
+			problem(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+	} else if status == "PUBLISHED" {
+		if _, ok := draft.Config["artifact"]; !ok {
+			problem(w, http.StatusUnprocessableEntity, "发布 Go 协议包前请先上传已编译的 Worker；可先保存草稿")
+			return
+		}
+	}
+	var message *model.StandardMessage
+	var err error
+	if len(in.Payload) > 0 && string(in.Payload) != "null" {
+		payload, payloadErr := assistantPayloadText(in.Payload, draft.PayloadFormat)
+		if payloadErr != nil {
+			problem(w, http.StatusUnprocessableEntity, payloadErr.Error())
+			return
+		}
+		if parserType == parser.ModbusCoilParserName {
+			message, err = core.PreviewProtocolAssistant(draft, claims(r).TenantID, payload)
+			if err != nil {
+				problem(w, http.StatusUnprocessableEntity, "发布前解析校验失败："+err.Error())
+				return
+			}
+		}
+	}
 	now := time.Now().UnixMilli()
-	pkg := model.ProtocolPackage{ID: id, TenantID: claims(r).TenantID, Name: draft.Name, Version: in.Version, Protocol: draft.Protocol, Transport: draft.Transport, PayloadFormat: draft.PayloadFormat, ParserType: parser.JavaScriptParserName, Status: status, Description: draft.Description, Config: map[string]any{"source": source}, CreatedAt: now, UpdatedAt: now}
+	pkg := model.ProtocolPackage{ID: id, TenantID: claims(r).TenantID, Name: draft.Name, Version: in.Version, Protocol: draft.Protocol, Transport: draft.Transport, PayloadFormat: draft.PayloadFormat, ParserType: parserType, Status: status, Description: draft.Description, Config: draft.Config, CreatedAt: now, UpdatedAt: now}
 	if pkg.Name == "" {
 		pkg.Name = "AI 协议解析包"
 	}
@@ -178,7 +197,7 @@ func (s *Server) publishProtocolAssistant(w http.ResponseWriter, r *http.Request
 		pkg.Version = "1.0.0"
 	}
 	if pkg.Protocol == "" {
-		pkg.Protocol = "custom-javascript"
+		pkg.Protocol = "custom-go-worker"
 	}
 	if pkg.Transport == "" {
 		pkg.Transport = "MQTT"
@@ -194,30 +213,40 @@ func (s *Server) publishProtocolAssistant(w http.ResponseWriter, r *http.Request
 		return
 	}
 	s.audit(r, "ai.protocol-assistant.publish", "protocolPackage", pkg.ID, map[string]any{"version": pkg.Version, "status": pkg.Status, "fields": len(draft.Fields)})
-	write(w, http.StatusCreated, map[string]any{"package": pkg, "standardMessage": message})
+	response := map[string]any{"package": pkg}
+	if message != nil {
+		response["standardMessage"] = message
+	}
+	write(w, http.StatusCreated, response)
 }
 
-func readProtocolAssistantDocument(r *http.Request, maximum int) (string, error) {
+type protocolAssistantDocument struct {
+	Filename string
+	Data     []byte
+	Text     string
+}
+
+func readProtocolAssistantDocument(r *http.Request, maximum int) (protocolAssistantDocument, error) {
 	f, header, err := r.FormFile("file")
 	if err != nil {
 		if errors.Is(err, http.ErrMissingFile) {
-			return "", nil
+			return protocolAssistantDocument{}, nil
 		}
-		return "", fmt.Errorf("read protocol document: %w", err)
+		return protocolAssistantDocument{}, fmt.Errorf("read protocol document: %w", err)
 	}
 	defer f.Close()
 	data, err := io.ReadAll(io.LimitReader(f, int64(maximum)+1))
 	if err != nil {
-		return "", err
+		return protocolAssistantDocument{}, err
 	}
 	if len(data) > maximum {
-		return "", errors.New("protocol document exceeds 32 MiB")
+		return protocolAssistantDocument{}, errors.New("protocol document exceeds 32 MiB")
 	}
 	text, err := core.ExtractKnowledgeText(header.Filename, data)
 	if err != nil {
-		return "", fmt.Errorf("extract protocol document: %w", err)
+		return protocolAssistantDocument{}, fmt.Errorf("extract protocol document: %w", err)
 	}
-	return text, nil
+	return protocolAssistantDocument{Filename: header.Filename, Data: data, Text: text}, nil
 }
 
 func protocolAssistantFilename(r *http.Request) string {

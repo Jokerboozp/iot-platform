@@ -158,6 +158,7 @@ CREATE TABLE IF NOT EXISTS backup_task (
   id text PRIMARY KEY, backup_type text NOT NULL, status text NOT NULL, object_key text,
   checksum text, details jsonb NOT NULL DEFAULT '{}', started_at timestamptz, completed_at timestamptz
 );
+CREATE INDEX IF NOT EXISTS backup_task_history_idx ON backup_task (completed_at DESC NULLS LAST, started_at DESC);
 CREATE TABLE IF NOT EXISTS audit_log (
   id text PRIMARY KEY, tenant_id text NOT NULL, actor text NOT NULL, action text NOT NULL,
   target_type text NOT NULL, target_id text NOT NULL, details jsonb NOT NULL DEFAULT '{}',

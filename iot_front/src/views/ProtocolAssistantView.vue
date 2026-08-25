@@ -2,40 +2,173 @@
 import { reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api, notifyError, parseJSON, pretty } from '../api'
+import { messageTypes, parsers } from '../labels'
 
-const file=ref(null), draft=ref(null), fields=ref([]), source=ref(''), preview=ref(null), generating=ref(false), testing=ref(false), publishing=ref(false), published=ref(null)
-const form=reactive({name:'',protocol:'',transport:'MQTT',payloadFormat:'hex',pointTable:'',samplePayload:'',id:'',version:'1.0.0'})
+const file = ref(null)
+const draft = ref(null)
+const fields = ref([])
+const preview = ref(null)
+const generating = ref(false)
+const testing = ref(false)
+const publishing = ref(false)
+const published = ref(null)
+const form = reactive({ name: '', protocol: '', transport: 'MODBUS_RTU', payloadFormat: 'hex', pointTable: '', samplePayload: '', id: '', version: '1.0.0' })
+const transports = ['MODBUS_RTU', 'MODBUS_TCP', 'HTTP', 'MQTT', 'TCP']
 
-function chooseFile(event){file.value=event.target.files?.[0]||null}
-function sourceFromFields(){
-  if(!draft.value)return ''
-  const setup=(draft.value.setup||'').trim()||(form.payloadFormat==='hex'?'const bytes = hexToBytes(raw.payload)':'const body = raw.payload')
-  const props=fields.value.filter(item=>item.name&&item.expression).map(item=>`      ${JSON.stringify(item.name)}: (${item.expression})`).join(',\n')
-  const tags=Object.entries(draft.value.tagExpressions||{}).filter(([,expr])=>String(expr||'').trim()).map(([name,expr])=>`      ${JSON.stringify(name)}: String(${expr})`).join(',\n')
-  return `function parse(raw) {\n${setup.split('\n').map(line=>`  ${line.trim()}`).join('\n')}\n  return {\n    messageType: ${JSON.stringify(draft.value.messageType||'PROPERTY_REPORT')},\n    properties: {\n${props}\n    }${tags?`,\n    tags: {\n${tags}\n    }`:''}\n  }\n}\n`
+function chooseFile(event) {
+  file.value = event.target.files?.[0] || null
 }
-function rebuild(){source.value=sourceFromFields();preview.value=null}
-function addField(){fields.value.push({name:'newField',label:'新字段',type:'value',expression:'0',description:''});rebuild()}
-function removeField(index){fields.value.splice(index,1);rebuild()}
-function sampleValue(){return form.payloadFormat==='hex'?form.samplePayload:parseJSON(form.samplePayload,'样本 JSON')}
-async function generate(){
-  if(!file.value&&!form.pointTable.trim())return ElMessage.warning('请上传协议文件或填写点表')
-  generating.value=true;published.value=null
-  try{
-    const body=new FormData();if(file.value)body.append('file',file.value);for(const [key,value] of Object.entries(form))body.append(key,String(value??''))
-    const result=await api('/api/v1/ai/protocol-assistant/generate',{method:'POST',body});draft.value=result;fields.value=(result.fields||[]).map(item=>({...item}));source.value=result.source||sourceFromFields();preview.value=result.preview||null;ElMessage.success('协议解析草稿已生成')
-  }catch(e){notifyError(e)}finally{generating.value=false}
+
+function typeInfo(value) {
+  return messageTypes[value] || { label: value || '未设置', description: '请确认标准消息用途' }
 }
-async function runPreview(){
-  if(!draft.value)return ElMessage.warning('请先生成协议草稿');if(!form.samplePayload.trim())return ElMessage.warning('请填写样本报文')
-  testing.value=true
-  try{const payload=sampleValue();const result=await api('/api/v1/ai/protocol-assistant/preview',{method:'POST',body:JSON.stringify({draft:{...draft.value,fields:fields.value,source:source.value},source:source.value,payload,payloadFormat:form.payloadFormat})});if(result.success===false)throw new Error(result.error||'解析失败');preview.value=result.standardMessage;ElMessage.success('样本解析成功')}catch(e){preview.value=null;notifyError(e)}finally{testing.value=false}
+
+function mappingConfig() {
+  return {
+    ...(draft.value?.config || {}),
+    messageType: draft.value?.messageType || 'PROPERTY_REPORT',
+    fields: fields.value.map(item => ({ ...item }))
+  }
 }
-async function publish(){
-  if(!draft.value)return ElMessage.warning('请先生成协议草稿');if(!source.value.trim())return ElMessage.warning('解析代码不能为空');if(!form.samplePayload.trim())return ElMessage.warning('发布前必须提供样本报文')
-  publishing.value=true
-  try{const result=await api('/api/v1/ai/protocol-assistant/publish',{method:'POST',body:JSON.stringify({id:form.id,version:form.version,status:'PUBLISHED',draft:{...draft.value,fields:fields.value,source:source.value},source:source.value,payload:sampleValue(),payloadFormat:form.payloadFormat})});published.value=result.package;preview.value=result.standardMessage;ElMessage.success('协议包已发布，可到产品管理绑定产品')}catch(e){notifyError(e)}finally{publishing.value=false}
+
+function rebuild() {
+  if (!draft.value) return
+  draft.value.fields = fields.value.map(item => ({ ...item }))
+  draft.value.config = mappingConfig()
+  preview.value = null
+}
+
+function addField() {
+  fields.value.push({ name: 'new_field', label: '新字段', type: 'boolean', address: 'M0', coilAddress: 0, dataType: 'BOOL', normalValue: '0', reportValue: '1', description: '' })
+  rebuild()
+}
+
+function removeField(index) {
+  fields.value.splice(index, 1)
+  rebuild()
+}
+
+function sampleValue() {
+  return form.payloadFormat === 'hex' ? form.samplePayload.trim() : parseJSON(form.samplePayload, '样本 JSON')
+}
+
+async function generate() {
+  if (!file.value && !form.pointTable.trim()) return ElMessage.warning('请上传协议文件或填写点表')
+  generating.value = true
+  published.value = null
+  try {
+    const body = new FormData()
+    if (file.value) body.append('file', file.value)
+    for (const [key, value] of Object.entries(form)) body.append(key, String(value ?? ''))
+    const result = await api('/api/v1/ai/protocol-assistant/generate', { method: 'POST', body })
+    draft.value = result
+    fields.value = (result.fields || []).map(item => ({ ...item }))
+    Object.assign(form, { name: result.name || form.name, protocol: result.protocol || form.protocol, transport: result.transport || form.transport, payloadFormat: result.payloadFormat || form.payloadFormat })
+    preview.value = result.preview || null
+    ElMessage.success('Go 协议映射草稿已生成')
+  } catch (error) {
+    notifyError(error)
+  } finally {
+    generating.value = false
+  }
+}
+
+async function runPreview() {
+  if (!draft.value) return ElMessage.warning('请先生成协议草稿')
+  if (!form.samplePayload.trim()) return ElMessage.warning('请填写真实样本报文后再预览')
+  rebuild()
+  testing.value = true
+  try {
+    const result = await api('/api/v1/ai/protocol-assistant/preview', {
+      method: 'POST',
+      body: JSON.stringify({ draft: { ...draft.value, fields: fields.value, config: mappingConfig() }, payload: sampleValue(), payloadFormat: form.payloadFormat })
+    })
+    if (result.success === false) throw new Error(result.error || '解析失败')
+    preview.value = result.standardMessage
+    ElMessage.success('样本解析成功')
+  } catch (error) {
+    preview.value = null
+    notifyError(error)
+  } finally {
+    testing.value = false
+  }
+}
+
+async function publish() {
+  if (!draft.value) return ElMessage.warning('请先生成协议草稿')
+  rebuild()
+  publishing.value = true
+  try {
+    const body = { id: form.id, version: form.version, status: draft.value.parserType === 'go_protocol_parser' ? 'DRAFT' : 'PUBLISHED', draft: { ...draft.value, fields: fields.value, config: mappingConfig() }, payloadFormat: form.payloadFormat }
+    if (form.samplePayload.trim()) body.payload = sampleValue()
+    const result = await api('/api/v1/ai/protocol-assistant/publish', { method: 'POST', body: JSON.stringify(body) })
+    published.value = result.package
+    preview.value = result.standardMessage || preview.value
+    ElMessage.success(result.package.status === 'PUBLISHED' ? 'Go 协议包已发布，可到产品管理绑定产品' : 'Go 协议包草稿已保存，请到协议开发上传编译后的 Worker')
+  } catch (error) {
+    notifyError(error)
+  } finally {
+    publishing.value = false
+  }
 }
 </script>
 
-<template><div class="protocol-assistant-page"><el-alert title="AI 协议接入助手" description="上传协议文件或点表，AI 生成受限 JavaScript 解析器；你可以在字段表单中调整名称和表达式，运行样本预览后再发布。发布后无需重新部署 API。" type="info" :closable="false" show-icon /><div class="assistant-grid top-gap"><el-card shadow="never" class="surface-card"><template #header><div class="card-header"><strong>1. 提供协议资料</strong><el-tag type="warning" round>人工确认后发布</el-tag></div></template><el-form :model="form" label-position="top"><el-form-item label="协议文件"><input type="file" accept=".pdf,.docx,.pptx,.xlsx,.odt,.odp,.ods,.csv,.txt,.md,.json,.html,.htm,.xml" @change="chooseFile" /><small class="subline">{{file?.name||'支持 PDF、Word/Excel 新格式、CSV 和文本，最大 32 MiB'}}</small></el-form-item><el-form-item label="点表 / 协议片段"><el-input v-model="form.pointTable" type="textarea" :rows="8" placeholder="可直接粘贴点号、偏移、长度、类型、单位、枚举值等信息" /></el-form-item><div class="form-grid"><el-form-item label="协议名称"><el-input v-model="form.name" placeholder="例如：某品牌烟感 TCP 协议" /></el-form-item><el-form-item label="协议标识"><el-input v-model="form.protocol" placeholder="例如：vendor-smoke-v1" /></el-form-item><el-form-item label="传输方式"><el-select v-model="form.transport"><el-option v-for="item in ['HTTP','MQTT','TCP','MODBUS_TCP']" :key="item" :label="item" :value="item" /></el-select></el-form-item><el-form-item label="载荷格式"><el-select v-model="form.payloadFormat"><el-option label="十六进制" value="hex" /><el-option label="JSON" value="json" /></el-select></el-form-item></div><el-form-item label="样本报文"><el-input v-model="form.samplePayload" type="textarea" :rows="6" :placeholder="form.payloadFormat==='hex' ? '例如：AA 01 2A 00 55' : '例如：{&quot;temperature&quot;:25.5,&quot;smoke&quot;:false}'" /></el-form-item><el-button type="primary" :loading="generating" @click="generate">AI 生成解析草稿</el-button></el-form></el-card><el-card shadow="never" class="surface-card"><template #header><div class="card-header"><strong>2. 字段映射与代码</strong><el-tag v-if="draft" type="success" round>{{fields.length}} 个字段</el-tag></div></template><el-empty v-if="!draft" description="生成草稿后在这里修改字段并预览" :image-size="70" /><template v-else><el-form label-position="top"><div class="form-grid"><el-form-item label="草稿名称"><el-input v-model="draft.name" /></el-form-item><el-form-item label="消息类型"><el-select v-model="draft.messageType" @change="rebuild"><el-option v-for="item in ['PROPERTY_REPORT','EVENT_REPORT','ALARM_REPORT','STATE_CHANGE','COMMAND_REPLY','LOG_REPORT']" :key="item" :label="item" :value="item" /></el-select></el-form-item></div><el-table :data="fields" border size="small"><el-table-column label="字段名" min-width="130"><template #default="{row}"><el-input v-model="row.name" @change="rebuild" /></template></el-table-column><el-table-column label="解析表达式（可修改）" min-width="220"><template #default="{row}"><el-input v-model="row.expression" @change="rebuild" /></template></el-table-column><el-table-column label="说明" min-width="130"><template #default="{row}"><el-input v-model="row.description" /></template></el-table-column><el-table-column label="操作" width="88"><template #default="{ $index }"><el-button plain type="danger" @click="removeField($index)">删除</el-button></template></el-table-column></el-table><div class="table-actions top-gap"><el-button plain @click="addField">新增字段</el-button><el-button plain @click="rebuild">根据字段重建代码</el-button></div><el-form-item class="top-gap" label="解析 JavaScript"><el-input v-model="source" type="textarea" :rows="13" /><small class="subline">代码在受限沙箱中执行，只能处理 raw、bytes、body 和纯转换函数。</small></el-form-item><div class="form-grid"><el-form-item label="协议包 ID"><el-input v-model="form.id" placeholder="留空自动生成" /></el-form-item><el-form-item label="版本"><el-input v-model="form.version" /></el-form-item></div><div class="table-actions"><el-button :loading="testing" @click="runPreview">运行解析预览</el-button><el-button type="primary" :loading="publishing" @click="publish">确认并发布协议</el-button></div></el-form></template></el-card></div><el-card v-if="draft" shadow="never" class="surface-card top-gap"><template #header><strong>3. 解析结果预览</strong></template><el-alert v-if="draft.warnings?.length" title="AI 提示" type="warning" :closable="false" :description="draft.warnings.join('；')" /><el-empty v-if="!preview" description="运行解析预览后查看标准消息" :image-size="58" /><el-tabs v-else class="top-gap"><el-tab-pane label="标准消息"><pre>{{pretty(preview)}}</pre></el-tab-pane><el-tab-pane label="属性字段"><el-descriptions :column="2" border><el-descriptions-item v-for="(value,key) in preview.properties||{}" :key="key" :label="key">{{value}}</el-descriptions-item></el-descriptions></el-tab-pane></el-tabs><el-alert v-if="published" class="top-gap" type="success" :closable="false" :title="`已发布：${published.name} · ${published.id}`" description="下一步到产品管理把协议包绑定到对应产品。" /></el-card></div></template>
+<template>
+  <div class="protocol-assistant-page">
+    <el-alert title="协议接入助手" description="上传 Excel 点表后由 Go 代码生成地址映射；不会生成或执行 JavaScript。Modbus 点表可直接生成 Go 内置映射，复杂协议请上传符合 JSON Lines 契约的已编译 Go Worker。" type="info" :closable="false" show-icon />
+    <div class="assistant-grid top-gap">
+      <el-card shadow="never" class="surface-card">
+        <template #header><div class="card-header"><strong>1. 提供协议资料</strong><el-tag type="warning" round>人工确认后发布</el-tag></div></template>
+        <el-form :model="form" label-position="top">
+          <el-form-item label="协议文件"><input type="file" accept=".xlsx,.pdf,.docx,.pptx,.odt,.odp,.ods,.csv,.txt,.md,.json,.html,.htm,.xml" @change="chooseFile" /><small class="subline">{{ file?.name || '支持 Excel、PDF、Word、CSV 和文本，最大 32 MiB' }}</small></el-form-item>
+          <el-form-item label="点表 / 协议片段"><el-input v-model="form.pointTable" type="textarea" :rows="8" placeholder="可直接粘贴变量名、线圈/寄存器地址、类型、正常值、报警值、说明" /></el-form-item>
+          <div class="form-grid">
+            <el-form-item label="协议名称"><el-input v-model="form.name" placeholder="例如：库卡火花探测器" /></el-form-item>
+            <el-form-item label="协议标识"><el-input v-model="form.protocol" placeholder="例如：vendor-modbus-v1" /></el-form-item>
+            <el-form-item label="传输方式"><el-select v-model="form.transport"><el-option v-for="item in transports" :key="item" :label="item" :value="item" /></el-select></el-form-item>
+            <el-form-item label="载荷格式"><el-select v-model="form.payloadFormat"><el-option label="十六进制" value="hex" /><el-option label="JSON" value="json" /></el-select></el-form-item>
+          </div>
+          <el-form-item label="样本报文"><el-input v-model="form.samplePayload" type="textarea" :rows="6" :placeholder="form.payloadFormat === 'hex' ? '例如：00 01 00 00 00 05 01 01 02 03 01' : '例如：{&quot;temperature&quot;:25.5}'" /><small class="subline">Excel 只有地址表时可以先不填，但必须在协议调试中用真实响应验证。</small></el-form-item>
+          <el-button type="primary" :loading="generating" @click="generate">生成 Go 协议映射</el-button>
+        </el-form>
+      </el-card>
+
+      <el-card shadow="never" class="surface-card">
+        <template #header><div class="card-header"><div><strong>2. 字段映射</strong><small v-if="draft">{{ parsers[draft.parserType] || draft.parserType }}</small></div><el-tag v-if="draft" type="success" round>{{ fields.length }} 个字段</el-tag></div></template>
+        <el-empty v-if="!draft" description="生成草稿后在这里修改地址、类型和状态定义" :image-size="70" />
+        <template v-else>
+          <el-form label-position="top">
+            <div class="form-grid">
+              <el-form-item label="草稿名称"><el-input v-model="draft.name" /></el-form-item>
+              <el-form-item label="消息类型"><el-select v-model="draft.messageType" @change="rebuild"><el-option v-for="(item, key) in messageTypes" :key="key" :label="`${item.label}（${key}）`" :value="key" /></el-select><small class="subline">{{ typeInfo(draft.messageType).description }} 内部代码：{{ draft.messageType }}</small></el-form-item>
+            </div>
+            <el-table :data="fields" border size="small">
+              <el-table-column label="字段名" min-width="150"><template #default="{ row }"><el-input v-model="row.name" @change="rebuild" /></template></el-table-column>
+              <el-table-column label="线圈地址" width="125"><template #default="{ row }"><el-input v-model="row.coilAddress" @change="rebuild" /></template></el-table-column>
+              <el-table-column label="数据类型" width="120"><template #default="{ row }"><el-input v-model="row.dataType" @change="rebuild" /></template></el-table-column>
+              <el-table-column label="正常值" width="100"><template #default="{ row }"><el-input v-model="row.normalValue" @change="rebuild" /></template></el-table-column>
+              <el-table-column label="报出值" width="100"><template #default="{ row }"><el-input v-model="row.reportValue" @change="rebuild" /></template></el-table-column>
+              <el-table-column label="说明" min-width="180"><template #default="{ row }"><el-input v-model="row.description" @change="rebuild" /></template></el-table-column>
+              <el-table-column label="操作" width="88"><template #default="{ $index }"><el-button plain type="danger" @click="removeField($index)">删除</el-button></template></el-table-column>
+            </el-table>
+            <div class="table-actions top-gap"><el-button plain @click="addField">新增字段</el-button><el-button plain @click="rebuild">保存映射修改</el-button></div>
+            <el-alert v-if="draft.parserType === 'go_protocol_parser'" class="top-gap" title="此草稿需要编译后的 Go Worker" description="先保存草稿，再到“协议开发”选择 Go 协议 Worker 上传对应平台架构的二进制文件；平台不会编译或执行源码。" type="warning" :closable="false" />
+            <div class="form-grid top-gap"><el-form-item label="协议包 ID"><el-input v-model="form.id" placeholder="留空自动生成" /></el-form-item><el-form-item label="版本"><el-input v-model="form.version" /></el-form-item></div>
+            <div class="table-actions"><el-button :loading="testing" @click="runPreview">运行解析预览</el-button><el-button type="primary" :loading="publishing" @click="publish">保存并发布 Go 协议包</el-button></div>
+          </el-form>
+        </template>
+      </el-card>
+    </div>
+
+    <el-card v-if="draft" shadow="never" class="surface-card top-gap">
+      <template #header><strong>3. 解析结果预览</strong></template>
+      <el-alert v-if="draft.warnings?.length" title="需要确认" type="warning" :closable="false" :description="draft.warnings.join('；')" />
+      <el-empty v-if="!preview" description="填入真实样本报文后运行预览" :image-size="58" />
+      <template v-else>
+        <el-descriptions class="top-gap" :column="2" border><el-descriptions-item label="消息类型">{{ typeInfo(preview.messageType).label }}（{{ preview.messageType }}）</el-descriptions-item><el-descriptions-item label="解析器">{{ parsers[preview.parser] || preview.parser }}</el-descriptions-item></el-descriptions>
+        <el-tabs class="top-gap"><el-tab-pane label="标准消息"><pre>{{ pretty(preview) }}</pre></el-tab-pane><el-tab-pane label="属性字段"><el-descriptions :column="2" border><el-descriptions-item v-for="(value, key) in preview.properties || {}" :key="key" :label="key">{{ value }}</el-descriptions-item></el-descriptions></el-tab-pane></el-tabs>
+      </template>
+      <el-alert v-if="published" class="top-gap" type="success" :closable="false" :title="`已保存：${published.name} · ${published.id}`" :description="published.status === 'PUBLISHED' ? '下一步到产品管理把协议包绑定到对应产品。' : '当前为草稿，请到协议开发上传编译后的 Go Worker 后再发布。'" />
+    </el-card>
+  </div>
+</template>

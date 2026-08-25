@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -56,6 +58,36 @@ func main() {
 	mux.HandleFunc("POST /restore/drill", protected(adminToken, func(w http.ResponseWriter, r *http.Request) {
 		result, runErr := service.Verify(r.Context(), r.URL.Query().Get("backupId"))
 		respond(w, result, runErr)
+	}))
+	mux.HandleFunc("GET /backups", protected(adminToken, func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		result, listErr := service.ListTasks(r.Context(), query.Get("type"), query.Get("status"), intQuery(query.Get("limit"), 50), intQuery(query.Get("offset"), 0))
+		respond(w, result, listErr)
+	}))
+	mux.HandleFunc("GET /backups/{id}", protected(adminToken, func(w http.ResponseWriter, r *http.Request) {
+		result, getErr := service.GetTask(r.Context(), r.PathValue("id"))
+		respond(w, result, getErr)
+	}))
+	mux.HandleFunc("GET /backups/{id}/files", protected(adminToken, func(w http.ResponseWriter, r *http.Request) {
+		result, listErr := service.ListArtifacts(r.Context(), r.PathValue("id"))
+		respond(w, result, listErr)
+	}))
+	mux.HandleFunc("GET /backups/{id}/files/{filename}", protected(adminToken, func(w http.ResponseWriter, r *http.Request) {
+		object, artifact, openErr := service.OpenArtifact(r.Context(), r.PathValue("id"), r.PathValue("filename"))
+		if openErr != nil {
+			respond(w, nil, openErr)
+			return
+		}
+		defer object.Close()
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, artifact.Filename))
+		w.Header().Set("X-Checksum-SHA256", artifact.SHA256)
+		if artifact.Size >= 0 {
+			w.Header().Set("Content-Length", strconv.FormatInt(artifact.Size, 10))
+		}
+		if _, copyErr := io.Copy(w, object); copyErr != nil {
+			log.Error("backup artifact download failed", "backupId", r.PathValue("id"), "filename", artifact.Filename, "error", copyErr)
+		}
 	}))
 	server := &http.Server{Addr: env("IOT_BACKUP_HTTP_ADDR", ":8090"), Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
@@ -126,6 +158,15 @@ func duration(name string, fallback time.Duration) time.Duration {
 	}
 	return value
 }
+
+func intQuery(value string, fallback int) int {
+	parsed, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
 func boolean(name string) bool {
 	value, _ := strconv.ParseBool(strings.TrimSpace(os.Getenv(name)))
 	return value

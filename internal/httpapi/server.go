@@ -84,6 +84,7 @@ func (s *Server) routes() {
 	s.router.GET("/api/v1/device-registry", s.authorize("viewer"), s.endpoint(s.deviceRegistry))
 	s.router.POST("/api/v1/device-registry", s.authorize("operator"), s.endpoint(s.saveManagedDevice))
 	s.router.PUT("/api/v1/device-registry/:id", s.authorize("operator"), s.endpoint(s.saveManagedDevice, "id"))
+	s.router.POST("/api/v1/test-devices/provision", s.authorize("operator"), s.endpoint(s.provisionTestDevice))
 	s.router.POST("/api/v1/discovered-devices/:id/register", s.authorize("operator"), s.endpoint(s.registerDiscoveredDevice, "id"))
 	s.router.POST("/api/v1/device-registry/:id/credentials", s.authorize("admin"), s.endpoint(s.rotateDeviceCredential, "id"))
 	s.router.GET("/api/v1/device-registry/:id/connection-guide", s.authorize("viewer"), s.endpoint(s.deviceConnectionGuide, "id"))
@@ -106,6 +107,12 @@ func (s *Server) routes() {
 	s.router.GET("/api/v1/alarms", s.authorize("viewer"), s.endpoint(s.alarms))
 	s.router.GET("/api/v1/alarms/:id", s.authorize("viewer"), s.endpoint(s.alarm, "id"))
 	s.router.POST("/api/v1/alarms/:id/actions", s.authorize("operator"), s.endpoint(s.alarmAction, "id"))
+	s.router.GET("/api/v1/backups/:id/files/:filename", s.authorize("admin"), s.endpoint(s.downloadBackupFile, "id", "filename"))
+	s.router.GET("/api/v1/backups/:id/files", s.authorize("viewer"), s.endpoint(s.backupFiles, "id"))
+	s.router.POST("/api/v1/backups/:id/restore-drill", s.authorize("admin"), s.endpoint(s.restoreBackup, "id"))
+	s.router.GET("/api/v1/backups/:id", s.authorize("viewer"), s.endpoint(s.getBackup, "id"))
+	s.router.GET("/api/v1/backups", s.authorize("viewer"), s.endpoint(s.listBackups))
+	s.router.POST("/api/v1/backups", s.authorize("admin"), s.endpoint(s.runBackup))
 	s.router.GET("/api/v1/ai/alarm-analysis/:alarmId", s.authorize("viewer"), s.endpoint(s.aiAnalysis, "alarmId"))
 	s.router.POST("/api/v1/ai/alarm-analysis/:alarmId/run", s.authorize("operator"), s.endpoint(s.runAIAlarmAnalysis, "alarmId"))
 	s.router.POST("/api/v1/ai/health-inspection", s.authorize("viewer"), s.endpoint(s.healthInspection))
@@ -250,7 +257,7 @@ func (s *Server) protocolPackages(w http.ResponseWriter, r *http.Request) {
 		problem(w, 500, err.Error())
 		return
 	}
-	write(w, 200, map[string]any{"items": items, "count": len(items), "parserTypes": []string{"custom_json_parser", "configurable_json_parser", "configurable_hex_parser", "javascript_sandbox_parser", parser.GoProtocolParserName, "gb26875_dahua_parser", "fire_smoke_parser", "modbus_parser"}})
+	write(w, 200, map[string]any{"items": items, "count": len(items), "parserTypes": []string{"custom_json_parser", "configurable_json_parser", "configurable_hex_parser", parser.ModbusCoilParserName, "javascript_sandbox_parser", parser.GoProtocolParserName, "gb26875_dahua_parser", "fire_smoke_parser", "modbus_parser"}})
 }
 func (s *Server) saveProtocolPackage(w http.ResponseWriter, r *http.Request) {
 	var v model.ProtocolPackage
@@ -269,13 +276,19 @@ func (s *Server) saveProtocolPackage(w http.ResponseWriter, r *http.Request) {
 		problem(w, 422, "name and parserType are required")
 		return
 	}
-	allowed := map[string]bool{"custom_json_parser": true, "configurable_json_parser": true, "configurable_hex_parser": true, "javascript_sandbox_parser": true, parser.GoProtocolParserName: true, "gb26875_dahua_parser": true, "fire_smoke_parser": true, "modbus_parser": true}
+	allowed := map[string]bool{"custom_json_parser": true, "configurable_json_parser": true, "configurable_hex_parser": true, parser.ModbusCoilParserName: true, "javascript_sandbox_parser": true, parser.GoProtocolParserName: true, "gb26875_dahua_parser": true, "fire_smoke_parser": true, "modbus_parser": true}
 	if !allowed[v.ParserType] {
 		problem(w, 422, "unsupported parserType")
 		return
 	}
 	if v.ParserType == parser.JavaScriptParserName {
 		if _, err := parser.JavaScriptSource(v.Config); err != nil {
+			problem(w, 422, err.Error())
+			return
+		}
+	}
+	if v.ParserType == parser.ModbusCoilParserName {
+		if err := parser.ValidateModbusCoilConfig(v.Config); err != nil {
 			problem(w, 422, err.Error())
 			return
 		}

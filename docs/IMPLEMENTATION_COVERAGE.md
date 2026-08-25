@@ -23,7 +23,7 @@ JetLinks 协议包改造（原文第 6 章）按用户要求排除。其余章�
 | 报表 | AI reports API | 已实现日报/周报/月报数据聚合与生成入口 |
 | MCP 工具服务 | `internal/mcpserver`、`ai_tool_call_log` | mcp-go Streamable HTTP、租户隔离、每次工具调用审计 |
 | 回放/补偿 | `internal/core/replay.go` | 三模式、指定版本、限速、真实前后消息差异与审计均已实现 |
-| 备份/恢复 | 多存储 backup-service、MinIO-DR、WAL、manifest/哈希、恢复演练 API | 已完成一次真实全量备份和 7 制品恢复校验 |
+| 备份/恢复 | 多存储 backup-service、MinIO-DR、WAL、manifest/哈希、恢复演练 API、备份中心记录与制品下载 | 已完成一次真实全量备份和 7 制品恢复校验；页面与 API 已接入，目标环境仍需复核定时任务和实际恢复 |
 | 安全 | JWT/RBAC、设备换票、MQTT ACL/HMAC、媒体白名单、AI 工具边界 | 已实现；生产 TLS/企业身份源仍属部署配置 |
 | 监控日志 | 全量核心指标、Prometheus、EMQX/Redpanda scrape、备份告警、Grafana/Loki | 已实现 |
 | Compose/Kubernetes | `compose.yaml`、`deploy/k8s` | 已实现，YAML 有自动解析测试 |

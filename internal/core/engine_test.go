@@ -137,3 +137,36 @@ func TestStateChangeIsStoredAsStandardMessage(t *testing.T) {
 	}
 	t.Fatal("state-change standard message was not stored")
 }
+
+func TestAlarmCannotBeAcknowledgedTwice(t *testing.T) {
+	ctx := context.Background()
+	repo := memory.NewRepository()
+	archive, err := local.NewArchive(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(repo, archive, local.NewBus(), local.NewRealtime(), parser.NewRegistry(parser.JSONParser{}), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	alarm := model.Alarm{ID: "alarm_ack_once", TenantID: "t1", DeviceID: "device_1", AlarmType: "FIRE", AlarmLevel: "HIGH", Status: "ACTIVE", Source: "device"}
+	if _, _, err = repo.UpsertAlarm(ctx, alarm); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := e.SetAlarmStatus(ctx, "t1", alarm.ID, "ACKED", "operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Status != "ACKED" {
+		t.Fatalf("first acknowledgement did not update status: %#v", first)
+	}
+	if _, err = e.SetAlarmStatus(ctx, "t1", alarm.ID, "ACKED", "operator"); err == nil {
+		t.Fatal("second acknowledgement should be rejected")
+	}
+
+	persisted, err := repo.GetAlarm(ctx, "t1", alarm.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Status != "ACKED" || persisted.AckedAt != first.AckedAt {
+		t.Fatalf("second acknowledgement changed the alarm: %#v", persisted)
+	}
+}

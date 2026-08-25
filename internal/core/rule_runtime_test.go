@@ -77,10 +77,11 @@ func TestDurationRuleSurvivesEngineRestart(t *testing.T) {
 func TestDuplicateStandardMessageDoesNotRetriggerAlarm(t *testing.T) {
 	ctx := context.Background()
 	repo := memory.NewRepository()
-	if err := repo.SaveRule(ctx, model.AlarmRule{ID: "rule-duplicate", TenantID: "tenant-a", ProductID: "sensor", Name: "高温", AlarmType: "HIGH_TEMPERATURE", Level: "HIGH", Enabled: true, Conditions: []model.RuleCondition{{Field: "temperature", Operator: ">", Value: 80}}}); err != nil {
+	if err := repo.SaveRule(ctx, model.AlarmRule{ID: "rule-duplicate", TenantID: "tenant-a", ProductID: "sensor", Name: "高温", AlarmType: "HIGH_TEMPERATURE", Level: "HIGH", Enabled: true, Conditions: []model.RuleCondition{{Field: "temperature", Operator: ">", Value: 80}}, Actions: []model.RuleAction{{Type: "OPEN_PAGE", Page: "alarms"}}}); err != nil {
 		t.Fatal(err)
 	}
 	e := newRuleTestEngine(t, repo, &ruleTestClock{now: time.Unix(1000, 0)})
+	realtime := e.Realtime.(*local.Realtime)
 	payload := standardRuleMessage("same-message", 1000000)
 	if err := e.handleStandard(ctx, payload); err != nil {
 		t.Fatal(err)
@@ -91,6 +92,56 @@ func TestDuplicateStandardMessageDoesNotRetriggerAlarm(t *testing.T) {
 	alarms, err := repo.ListAlarms(ctx, ports.AlarmFilter{TenantID: "tenant-a", Status: "ACTIVE"})
 	if err != nil || len(alarms) != 1 || alarms[0].TriggerCount != 1 {
 		t.Fatalf("duplicate retriggered alarm: alarms=%#v err=%v", alarms, err)
+	}
+	var actionCount int
+	for _, published := range realtime.Messages {
+		if published.Topic == "/iot/ui-action/tenant-a" {
+			actionCount++
+		}
+	}
+	if actionCount != 1 {
+		t.Fatalf("duplicate message executed rule action %d times, want 1", actionCount)
+	}
+}
+
+func TestMatchingAlarmRuleActionsRunForEachNewAlarmMessage(t *testing.T) {
+	ctx := context.Background()
+	repo := memory.NewRepository()
+	if err := repo.SaveRule(ctx, model.AlarmRule{
+		ID: "rule-actions", TenantID: "tenant-a", ProductID: "sensor", Name: "高温动作",
+		AlarmType: "HIGH_TEMPERATURE", Level: "HIGH", Enabled: true,
+		Conditions: []model.RuleCondition{{Field: "temperature", Operator: ">", Value: 80}},
+		Actions:    []model.RuleAction{{Type: "OPEN_PAGE", Page: "alarms"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	archive, err := local.NewArchive(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	realtime := local.NewRealtime()
+	e := New(repo, archive, local.NewBus(), realtime, parser.NewRegistry(parser.JSONParser{}), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	e.Clock = &ruleTestClock{now: time.Unix(1000, 0)}
+
+	for _, messageID := range []string{"alarm-message-1", "alarm-message-2"} {
+		if err := e.handleStandard(ctx, standardRuleMessage(messageID, e.Clock.Now().UnixMilli())); err != nil {
+			t.Fatal(err)
+		}
+		e.Clock = &ruleTestClock{now: e.Clock.Now().Add(time.Second)}
+	}
+
+	alarms, err := repo.ListAlarms(ctx, ports.AlarmFilter{TenantID: "tenant-a", DeviceID: "device-a", Status: "ACTIVE"})
+	if err != nil || len(alarms) != 1 || alarms[0].TriggerCount != 2 {
+		t.Fatalf("unexpected deduplicated alarm: alarms=%#v err=%v", alarms, err)
+	}
+	var actionCount int
+	for _, published := range realtime.Messages {
+		if published.Topic == "/iot/ui-action/tenant-a" {
+			actionCount++
+		}
+	}
+	if actionCount != 2 {
+		t.Fatalf("matching alarm rule action count = %d, want 2", actionCount)
 	}
 }
 

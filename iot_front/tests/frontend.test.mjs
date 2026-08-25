@@ -21,6 +21,16 @@ test('management controls and Chinese labels remain available', async () => {
   }
 })
 
+test('shared controls keep file pickers and text actions visibly shaped', async () => {
+  const styles = await readFile(new URL('src/styles.css', root), 'utf8')
+  const assistant = await readFile(new URL('src/views/ProtocolAssistantView.vue', root), 'utf8')
+  const protocols = await readFile(new URL('src/views/ProtocolsView.vue', root), 'utf8')
+  assert.match(styles, /\.el-button\.is-text, \.el-button\.is-link \{[^}]*border: 1px solid var\(--border\)/)
+  assert.match(styles, /input\[type="file"\]::file-selector-button/)
+  assert.match(styles, /\.el-button--small \{[^}]*min-height: 28px/)
+  assert.match(`${assistant}\n${protocols}`, /<input type="file"/)
+})
+
 test('video preview and AI provider playground remain available', async () => {
   const source = await sourceText()
   for (const label of ['视频流预览', '浏览器可直接预览 HLS', 'Provider 测试与配置', '添加自定义 Provider', '保存到当前租户', '连接并测试插件', 'DEEPSEEK HARNESS', 'AI 工作流', '运行轨迹', '工具调用']) {
@@ -113,13 +123,60 @@ test('protocol mappings, parsed raw results and device connection state are visi
   assert.match(devices, /配置接入/)
 })
 
+test('test device workbench provisions a fixture and sends editable data and alarm templates', async () => {
+  const app = await readFile(new URL('src/App.vue', root), 'utf8')
+  const view = await readFile(new URL('src/views/TestDeviceView.vue', root), 'utf8')
+  for (const label of ['测试设备', '发送正常数据', '发送报警数据', '发送恢复数据', '报文模板', '建议测试顺序']) {
+    assert.match(`${app}\n${view}`, new RegExp(label), `missing test device label: ${label}`)
+  }
+  assert.match(app, /testDevice/)
+  assert.match(view, /api\('\/api\/v1\/test-devices\/provision'/)
+  assert.match(view, /device-registry\/\$\{encodeURIComponent\(device\.value\.id\)\}\/debug/)
+  assert.match(view, /messageId.*<unique>/)
+  assert.match(view, /alarm.*true/)
+  assert.match(view, /localStorage/)
+  assert.match(view, /不会自动创建告警规则/)
+  assert.doesNotMatch(view, /系统生成的高温烟雾规则/)
+  assert.match(app, /action\.type === 'OPEN_PAGE'/)
+  assert.match(app, /openPage\(action\.page\)/)
+  assert.match(app, /'devices'/)
+})
+
+test('alarm acknowledgement action is unavailable after the alarm is acknowledged', async () => {
+  const actions = await import('../src/alarmActions.js')
+  const alarms = await readFile(new URL('src/views/AlarmsView.vue', root), 'utf8')
+  assert.equal(actions.canAcknowledgeAlarm('ACTIVE'), true)
+  assert.equal(actions.canAcknowledgeAlarm('ACKED'), false)
+  assert.equal(actions.canAcknowledgeAlarm('CLOSED'), false)
+  assert.equal(actions.canCloseAlarm('ACKED'), true)
+  assert.match(alarms, /canAcknowledgeAlarm\(row\.status\)/)
+  assert.match(alarms, /canCloseAlarm\(row\.status\)/)
+  assert.match(alarms, /actionPending\[row\.alarmId\]/)
+  assert.match(alarms, /await load\(\)/)
+})
+
+test('backup center exposes history, artifact downloads and restore drills', async () => {
+  const app = await readFile(new URL('src/App.vue', root), 'utf8')
+  const view = await readFile(new URL('src/views/BackupsView.vue', root), 'utf8')
+  const labels = await readFile(new URL('src/labels.js', root), 'utf8')
+  for (const marker of ['备份中心', '立即全量备份', '立即增量备份', '详情 / 文件', '恢复演练', '下载 manifest.json', '备份文件']) {
+    assert.match(`${app}\n${view}`, new RegExp(marker), `missing backup center marker: ${marker}`)
+  }
+  assert.match(labels, /backupTypes/)
+  assert.match(labels, /backupStatuses/)
+  for (const route of ['/api/v1/backups', '/restore-drill', '/files']) assert.match(view, new RegExp(route.replaceAll('/', '\\/')))
+  assert.match(view, /download\(/)
+  assert.match(app, /backups/)
+})
+
 test('protocol assistant and health inspection pages expose the review workflow', async () => {
   const assistant = await readFile(new URL('src/views/ProtocolAssistantView.vue', root), 'utf8')
   const inspection = await readFile(new URL('src/views/HealthInspectionView.vue', root), 'utf8')
   const app = await readFile(new URL('src/App.vue', root), 'utf8')
-  for (const label of ['AI 协议接入助手', '协议文件', '点表 / 协议片段', 'AI 生成解析草稿', '字段映射与代码', '解析表达式（可修改）', '运行解析预览', '确认并发布协议']) {
+  for (const label of ['协议接入助手', '协议文件', '点表 / 协议片段', '生成 Go 协议映射', '字段映射', '线圈地址', '运行解析预览', '保存并发布 Go 协议包']) {
     assert.match(assistant, new RegExp(label), `missing protocol assistant label: ${label}`)
   }
+  assert.doesNotMatch(assistant, /解析 JavaScript|解析表达式|function parse/)
   for (const route of ['/api/v1/ai/protocol-assistant/generate', '/api/v1/ai/protocol-assistant/preview', '/api/v1/ai/protocol-assistant/publish']) {
     assert.match(assistant, new RegExp(route.replaceAll('/', '\\/')))
   }

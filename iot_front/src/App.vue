@@ -7,7 +7,9 @@ import {
   Boxes,
   ChartNoAxesCombined,
   Cpu,
+  Database,
   FileText,
+  FlaskConical,
   LayoutDashboard,
   Library,
   LogOut,
@@ -33,6 +35,7 @@ const ProductsView = defineAsyncComponent(() => import('./views/ProductsView.vue
 const ProtocolsView = defineAsyncComponent(() => import('./views/ProtocolsView.vue'))
 const ProtocolAssistantView = defineAsyncComponent(() => import('./views/ProtocolAssistantView.vue'))
 const IntegrationView = defineAsyncComponent(() => import('./views/IntegrationView.vue'))
+const TestDeviceView = defineAsyncComponent(() => import('./views/TestDeviceView.vue'))
 const CameraMappingsView = defineAsyncComponent(() => import('./views/CameraMappingsView.vue'))
 const AlarmsView = defineAsyncComponent(() => import('./views/AlarmsView.vue'))
 const HealthInspectionView = defineAsyncComponent(() => import('./views/HealthInspectionView.vue'))
@@ -40,6 +43,7 @@ const RawView = defineAsyncComponent(() => import('./views/RawView.vue'))
 const RulesView = defineAsyncComponent(() => import('./views/RulesView.vue'))
 const KnowledgeView = defineAsyncComponent(() => import('./views/KnowledgeView.vue'))
 const AiView = defineAsyncComponent(() => import('./views/AiView.vue'))
+const BackupsView = defineAsyncComponent(() => import('./views/BackupsView.vue'))
 
 const authenticated = ref(Boolean(session.token))
 const active = ref('dashboard')
@@ -57,21 +61,23 @@ const pages = {
   devices: { title: '设备管理', sub: '注册、启停、凭证和实时状态统一管理', icon: Cpu, component: DevicesView },
   products: { title: '产品管理', sub: '产品模型与协议包绑定', icon: Boxes, component: ProductsView },
   protocols: { title: '协议开发', sub: '协议包版本、解析器配置与样本调试', icon: Network, component: ProtocolsView },
-  protocolAssistant: { title:'协议接入助手', sub: '上传协议文件，生成并确认解析代码', icon: Network, component: ProtocolAssistantView },
+  protocolAssistant: { title:'协议接入助手', sub: '上传点表，生成并确认 Go 协议映射', icon: Network, component: ProtocolAssistantView },
   integration: { title:'接入指南', sub: '真实设备 HTTP / MQTT 参数与数据联调', icon: Upload, component: IntegrationView },
+  testDevice: { title:'测试设备', sub: '模板化发送数据、事件、报警和恢复报文', icon: FlaskConical, component: TestDeviceView },
   cameras: { title: '摄像头映射', sub: '视频平台摄像头、空间位置与物联设备关联', icon: Video, component: CameraMappingsView },
   alarms: { title: '告警中心', sub: '告警确认、恢复与闭环处置', icon: Bell, component: AlarmsView },
   inspection: { title:'智能巡检', sub: '设备健康、数据新鲜度与活动告警分析', icon: ChartNoAxesCombined, component: HealthInspectionView },
   raw: { title: '原始报文', sub: '证据链检索、审计与回放', icon: FileText, component: RawView },
   rules: { title: '告警规则', sub: '可审计的动态规则与 AI 草稿', icon: Settings2, component: RulesView },
   knowledge: { title: '知识库管理', sub: '消防规范、设备手册与处置 SOP 索引', icon: Library, component: KnowledgeView },
-  ai: { title: 'AI 工作流', sub: 'DeepSeek Harness 插件、受控工具与知识库问答', icon: MessageCircle, component: AiView }
+  ai: { title: 'AI 工作流', sub: 'DeepSeek Harness 插件、受控工具与知识库问答', icon: MessageCircle, component: AiView },
+  backups: { title: '备份中心', sub: '备份记录、文件校验与恢复演练', icon: Database, component: BackupsView }
 }
 const current = computed(() => pages[active.value])
 const menuGroups = [
   { label: '控制中心', items: ['dashboard'] },
-  { label:'设备与数据', items: ['devices', 'products', 'protocols', 'protocolAssistant', 'integration', 'cameras'] },
-  { label: '运行中心', items: ['alarms', 'inspection', 'raw', 'rules', 'knowledge', 'ai'] }
+  { label:'设备与数据', items: ['devices', 'products', 'protocols', 'protocolAssistant', 'integration', 'testDevice', 'cameras'] },
+  { label: '运行中心', items: ['alarms', 'inspection', 'raw', 'rules', 'knowledge', 'ai', 'backups'] }
 ]
 
 async function login() {
@@ -112,7 +118,7 @@ function handleUIAction(payload) {
       ElMessage.warning(`规则联动：打开摄像头 ${action.cameraId}`)
       return
     }
-    const allowedPages = new Set(['dashboard', 'devices', 'products', 'protocols', 'protocolAssistant', 'integration', 'cameras', 'alarms', 'inspection', 'raw', 'rules', 'knowledge', 'ai'])
+    const allowedPages = new Set(['dashboard', 'devices', 'products', 'protocols', 'protocolAssistant', 'integration', 'testDevice', 'cameras', 'alarms', 'inspection', 'raw', 'rules', 'knowledge', 'ai', 'backups'])
     if (action.type === 'OPEN_PAGE' && allowedPages.has(action.page)) {
       openPage(action.page)
       ElMessage.warning('规则联动：已打开相关业务页面')

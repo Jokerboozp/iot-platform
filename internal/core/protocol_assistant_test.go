@@ -26,29 +26,24 @@ func (protocolAssistantAI) RuleDraft(context.Context, string, string) (model.Ala
 }
 func (protocolAssistantAI) Health(context.Context) error { return nil }
 func (protocolAssistantAI) GenerateJSON(context.Context, string, string, string) (string, error) {
-	return `{"name":"测试十六进制协议","protocol":"test-hex","transport":"TCP","payloadFormat":"hex","messageType":"PROPERTY_REPORT","setup":"const bytes = hexToBytes(raw.payload)","fields":[{"name":"temperature","label":"温度","type":"number","expression":"bytes[1] / 10"},{"name":"smoke","label":"烟雾","type":"boolean","expression":"(bytes[0] & 1) === 1"}]}`, nil
+	return `{"name":"测试 Go 协议","protocol":"test-modbus","transport":"MODBUS_TCP","payloadFormat":"hex","parserType":"modbus_coil_parser","messageType":"PROPERTY_REPORT","config":{"frame":"tcp","startAddress":0,"functionCode":1,"fields":[{"name":"smoke","coilAddress":0}]},"fields":[{"name":"smoke","label":"烟雾","type":"boolean","coilAddress":0,"dataType":"BOOL"}]}`, nil
 }
 
 func TestProtocolAssistantBuildAndPreview(t *testing.T) {
-	draft := model.ProtocolAssistantDraft{PayloadFormat: "hex", MessageType: model.PropertyReport, Setup: "const bytes = hexToBytes(raw.payload)", Fields: []model.ProtocolAssistantField{{Name: "temperature", Expression: "bytes[1] / 10"}, {Name: "smoke", Expression: "(bytes[0] & 1) === 1"}}}
-	source, err := BuildProtocolJavaScriptSource(draft)
+	draft := model.ProtocolAssistantDraft{ParserType: parser.ModbusCoilParserName, Protocol: "modbus", Transport: "MODBUS_TCP", PayloadFormat: "hex", MessageType: model.PropertyReport, Config: map[string]any{"frame": "tcp", "startAddress": 0, "functionCode": 1, "fields": []any{map[string]any{"name": "smoke", "coilAddress": 0}}}}
+	message, err := PreviewProtocolAssistant(draft, "tenant-test", "00 01 00 00 00 04 01 01 01 01")
 	if err != nil {
 		t.Fatal(err)
 	}
-	draft.Source = source
-	message, err := PreviewProtocolAssistant(draft, "tenant-test", "01 2A")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if message.Properties["temperature"] != 4.2 || message.Properties["smoke"] != true || message.Parser != parser.JavaScriptParserName {
+	if message.Properties["smoke"] != true || message.Parser != parser.ModbusCoilParserName {
 		t.Fatalf("unexpected protocol preview %#v", message)
 	}
 }
 
-func TestProtocolAssistantRejectsUnsafeExpression(t *testing.T) {
-	_, err := BuildProtocolJavaScriptSource(model.ProtocolAssistantDraft{PayloadFormat: "hex", Fields: []model.ProtocolAssistantField{{Name: "x", Expression: "fetch('http://example')"}}})
+func TestProtocolAssistantRejectsInvalidGoMapping(t *testing.T) {
+	err := parser.ValidateModbusCoilConfig(map[string]any{"fields": []any{map[string]any{"name": "x", "coilAddress": -1}}})
 	if err == nil {
-		t.Fatal("unsafe expression was accepted")
+		t.Fatal("invalid coil address was accepted")
 	}
 }
 
@@ -58,13 +53,13 @@ func TestGenerateProtocolAssistant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine := New(repo, archive, local.NewBus(), local.NewRealtime(), parser.NewRegistry(parser.JavaScriptParser{}), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := New(repo, archive, local.NewBus(), local.NewRealtime(), parser.NewRegistry(parser.ModbusCoilParser{}), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	engine.AI = protocolAssistantAI{}
 	draft, err := engine.GenerateProtocolAssistant(context.Background(), "tenant-test", ProtocolAssistantInput{PointTable: "温度：第 2 字节，单位 0.1 度", SamplePayload: "01 2A"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if draft.Source == "" || len(draft.Fields) != 2 || draft.Preview == nil || draft.Preview.Properties["temperature"] != 4.2 {
+	if draft.Source != "" || draft.ParserType != parser.ModbusCoilParserName || len(draft.Fields) != 1 || draft.Preview != nil {
 		t.Fatalf("unexpected generated draft %#v", draft)
 	}
 }

@@ -793,4 +793,8 @@ onBeforeUnmount(() => { abortController?.abort(); if (scrollFrame) cancelAnimati
 .knowledge-summary span,
 .knowledge-summary small { color:#3f6212; }
 .typing i { background:var(--muted-foreground); }
+.message-error .el-button { min-height:24px; height:24px; padding:0 8px; }
+.message-meta button { min-height:24px; padding:3px 8px; color:#1d4ed8; background:#eff6ff; border:1px solid #bfdbfe; border-radius:.375rem; font-size:9px; cursor:pointer; }
+.message-meta button:hover { background:#dbeafe; border-color:#93c5fd; }
+.message-meta button:focus-visible { outline:2px solid rgba(59,130,246,.35); outline-offset:2px; }
 </style>

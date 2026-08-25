@@ -297,6 +297,54 @@ func TestHTTPWorkflow(t *testing.T) {
 	if !foundChild || gatewayChildCount != 1 {
 		t.Fatalf("gateway relation missing %#v", registryAfterGateway)
 	}
+	testFixture := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/test-devices/provision", token, map[string]any{}, http.StatusCreated)
+	testDevice := testFixture["device"].(map[string]any)
+	testDeviceID := testDevice["id"].(string)
+	testProduct := testFixture["product"].(map[string]any)
+	if testProduct["status"] != "ENABLED" || testFixture["protocolPackage"].(map[string]any)["status"] != "PUBLISHED" {
+		t.Fatalf("test fixture is not ready %#v", testFixture)
+	}
+	testRules := requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/rules", token, nil, http.StatusOK)
+	if len(testRules["items"].([]any)) != 0 {
+		t.Fatalf("test fixture unexpectedly created an alarm rule %#v", testRules)
+	}
+	fixtureAgain := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/test-devices/provision", token, map[string]any{}, http.StatusOK)
+	if fixtureAgain["device"].(map[string]any)["id"] != testDeviceID {
+		t.Fatalf("test fixture was not repeatable %#v", fixtureAgain)
+	}
+	requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/rules", token, map[string]any{
+		"id":        "rule_test_device_navigation",
+		"name":      "测试设备报警后打开设备管理",
+		"productId": testProduct["id"],
+		"alarmType": "FIRE_RISK",
+		"level":     "HIGH",
+		"match":     "all",
+		"enabled":   true,
+		"conditions": []map[string]any{
+			{"field": "temperature", "operator": ">", "value": 80},
+			{"field": "smoke", "operator": "eq", "value": true},
+		},
+		"actions": []map[string]any{{"type": "OPEN_PAGE", "page": "devices"}},
+	}, http.StatusCreated)
+	testIngest := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/device-registry/"+testDeviceID+"/debug", token, map[string]any{
+		"messageId": "raw_test_device_alarm_e2e",
+		"payload": map[string]any{
+			"alarm":      true,
+			"properties": map[string]any{"temperature": 88.5, "smoke": true, "battery": 92},
+			"tags":       map[string]any{"cityCode": "city_001", "districtCode": "district_01", "buildingId": "A-01", "deviceType": "smoke"},
+		},
+	}, http.StatusCreated)
+	if testIngest["created"] != true {
+		t.Fatalf("test fixture alarm raw was not created %#v", testIngest)
+	}
+	testRaw := requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/raw-messages/raw_test_device_alarm_e2e", token, nil, http.StatusOK)
+	if testRaw["parseStatus"] != "PARSED" || testRaw["standardMessage"].(map[string]any)["messageType"] != "ALARM_REPORT" {
+		t.Fatalf("test fixture alarm was not parsed %#v", testRaw)
+	}
+	testAlarms := requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/alarms?deviceId="+testDeviceID+"&status=ACTIVE", token, nil, http.StatusOK)
+	if testAlarms["count"].(float64) < 1 {
+		t.Fatalf("test fixture alarm rule did not trigger %#v", testAlarms)
+	}
 	resp, err := server.Client().Get(server.URL + "/")
 	if err != nil {
 		t.Fatal(err)
