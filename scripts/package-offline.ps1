@@ -1,0 +1,473 @@
+[CmdletBinding()]
+param(
+    [string]$OutputDir = "offline-bundles",
+    [string]$EnvFile = "",
+    [switch]$Full,
+    [switch]$IncludeAi,
+    [switch]$IncludeHarness,
+    [switch]$IncludeThingsPanel,
+    [switch]$IncludeGb26875,
+    [string]$OllamaModel = "qwen3:8b",
+    [switch]$SkipOllamaModel
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$projectRoot = Split-Path -Parent $scriptDir
+
+if ($Full) {
+    $IncludeAi = $true
+    $IncludeHarness = $true
+    $IncludeThingsPanel = $true
+    $IncludeGb26875 = $true
+}
+
+function Invoke-Checked {
+    param([Parameter(Mandatory)][string[]]$Arguments)
+
+    Write-Host ("> docker " + ($Arguments -join " ")) -ForegroundColor DarkGray
+    & docker @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Docker 命令失败，退出码 $LASTEXITCODE：docker $($Arguments -join ' ')"
+    }
+}
+
+function Invoke-Captured {
+    param([Parameter(Mandatory)][string[]]$Arguments)
+
+    $output = @(& docker @Arguments 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Docker 命令失败，退出码 $LASTEXITCODE：docker $($Arguments -join ' ')"
+    }
+    return @($output | ForEach-Object { $_.ToString().Trim() } | Where-Object { $_ })
+}
+
+function Write-Utf8NoBom {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string[]]$Lines
+    )
+
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllLines($Path, $Lines, $encoding)
+}
+
+function New-RandomHex {
+    param([int]$Bytes = 24)
+
+    $buffer = New-Object byte[] $Bytes
+    $random = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $random.GetBytes($buffer)
+    } finally {
+        $random.Dispose()
+    }
+    return ([BitConverter]::ToString($buffer).Replace("-", "").ToLowerInvariant())
+}
+
+function Get-EnvEntries {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $entries = @{}
+    foreach ($line in @(Get-Content -LiteralPath $Path -Encoding UTF8)) {
+        if ($line -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$') {
+            $value = $matches[2].Trim()
+            if ($value.Length -ge 2 -and $value.StartsWith('"') -and $value.EndsWith('"')) {
+                $value = $value.Substring(1, $value.Length - 2)
+            } elseif ($value.Length -ge 2 -and $value.StartsWith("'") -and $value.EndsWith("'")) {
+                $value = $value.Substring(1, $value.Length - 2)
+            }
+            $entries[$matches[1]] = $value
+        }
+    }
+    return $entries
+}
+
+function Set-OrAdd-EnvLine {
+    param(
+        [Parameter(Mandatory)][string[]]$Lines,
+        [Parameter(Mandatory)][string]$Key,
+        [Parameter(Mandatory)][string]$Value
+    )
+
+    $pattern = '^\s*' + [Regex]::Escape($Key) + '\s*='
+    $result = New-Object 'System.Collections.Generic.List[string]'
+    $replaced = $false
+    foreach ($line in $Lines) {
+        if ($line -match $pattern) {
+            [void]$result.Add("$Key=$Value")
+            $replaced = $true
+        } else {
+            [void]$result.Add($line)
+        }
+    }
+    if (-not $replaced) {
+        [void]$result.Add("$Key=$Value")
+    }
+    return ,$result.ToArray()
+}
+
+function New-OfflineEnv {
+    param(
+        [Parameter(Mandatory)][string]$Destination,
+        [string]$Source,
+        [switch]$UseAi,
+        [switch]$UseHarness,
+        [switch]$UseThingsPanel
+    )
+
+    $generated = [string]::IsNullOrWhiteSpace($Source)
+    $credentialLines = New-Object 'System.Collections.Generic.List[string]'
+
+    if (-not $generated) {
+        if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
+            throw "指定的 EnvFile 不存在：$Source"
+        }
+        $lines = @(Get-Content -LiteralPath $Source -Encoding UTF8)
+        $entries = Get-EnvEntries -Path $Source
+        $required = @(
+            "POSTGRES_PASSWORD", "REDIS_PASSWORD", "CLICKHOUSE_PASSWORD",
+            "MINIO_ROOT_PASSWORD", "MINIO_DR_ROOT_PASSWORD", "IOT_JWT_SECRET",
+            "IOT_ADMIN_USER", "IOT_ADMIN_PASSWORD", "IOT_ADMIN_TENANTS",
+            "IOT_VIDEO_PLATFORM_SECRETS", "IOT_BACKUP_ADMIN_TOKEN",
+            "EMQX_DASHBOARD_USER", "EMQX_DASHBOARD_PASSWORD",
+            "GRAFANA_ADMIN_USER", "GRAFANA_ADMIN_PASSWORD"
+        )
+        foreach ($key in $required) {
+            if (-not $entries.ContainsKey($key) -or [string]::IsNullOrWhiteSpace([string]$entries[$key])) {
+                throw "EnvFile 缺少必填安全配置：$key。请不要直接使用 .env.example 的默认值。"
+            }
+        }
+        $unsafe = @($lines | Where-Object { $_ -match '(change-this|local-iot-|admin123|public-change-me|change-me)' })
+        if ($unsafe.Count -gt 0) {
+            throw "EnvFile 仍包含示例密码或默认密钥，请先替换后再打包。"
+        }
+        [void]$credentialLines.Add("凭据来自外部 EnvFile：$Source")
+        [void]$credentialLines.Add("本文件不复制外部 EnvFile 的内容，请单独保管原始凭据。")
+    } else {
+        $postgresPassword = "pg-" + (New-RandomHex -Bytes 18)
+        $redisPassword = "redis-" + (New-RandomHex -Bytes 18)
+        $clickhousePassword = "ch-" + (New-RandomHex -Bytes 18)
+        $minioPassword = "minio-" + (New-RandomHex -Bytes 18)
+        $minioDrPassword = "minio-dr-" + (New-RandomHex -Bytes 18)
+        $jwtSecret = New-RandomHex -Bytes 32
+        $adminPassword = "Admin-" + (New-RandomHex -Bytes 12)
+        $videoSecret = New-RandomHex -Bytes 24
+        $harnessToken = New-RandomHex -Bytes 32
+        $backupToken = New-RandomHex -Bytes 32
+        $emqxPassword = "Emqx-" + (New-RandomHex -Bytes 12)
+        $grafanaPassword = "Grafana-" + (New-RandomHex -Bytes 12)
+
+        $ollamaUrl = if ($UseAi) { "http://ollama:11434" } else { "" }
+        $aiProvider = if ($UseAi) { "ollama" } else { "" }
+        $weaviateUrl = if ($UseAi) { "http://weaviate:8080" } else { "" }
+        $harnessUrl = if ($UseHarness) { "http://deepseek-harness:8091" } else { "" }
+
+        $lines = @(
+            "# 自动生成的离线部署配置，请限制此文件权限。",
+            "POSTGRES_PASSWORD=$postgresPassword",
+            "REDIS_PASSWORD=$redisPassword",
+            "CLICKHOUSE_PASSWORD=$clickhousePassword",
+            "MINIO_ROOT_USER=iotadmin",
+            "MINIO_ROOT_PASSWORD=$minioPassword",
+            "MINIO_DR_ROOT_USER=iotdradmin",
+            "MINIO_DR_ROOT_PASSWORD=$minioDrPassword",
+            "IOT_JWT_SECRET=$jwtSecret",
+            "IOT_ADMIN_USER=admin",
+            "IOT_ADMIN_PASSWORD=$adminPassword",
+            "IOT_ADMIN_TENANTS=tenant_001",
+            "IOT_VIDEO_PLATFORM_SECRETS=video-platform-1:$videoSecret",
+            "IOT_VIDEO_MEDIA_ALLOWED_HOSTS=",
+            "IOT_VIDEO_PREVIEW_ALLOWED_ORIGINS=",
+            "IOT_VIDEO_PREVIEW_CSP_SOURCES=",
+            "IOT_OLLAMA_URL=$ollamaUrl",
+            "IOT_OLLAMA_MODEL=$OllamaModel",
+            "IOT_AI_PROVIDER=$aiProvider",
+            "IOT_AI_BASE_URL=",
+            "IOT_AI_MODEL=",
+            "IOT_AI_API_KEY=",
+            "IOT_AI_PROVIDER_TEST_ALLOWED_ORIGINS=http://ollama:11434",
+            "IOT_AI_OLLAMA_URL=http://ollama:11434",
+            "DEEPSEEK_API_KEY=",
+            "IOT_AI_HARNESS_URL=$harnessUrl",
+            "IOT_AI_HARNESS_TOKEN=$harnessToken",
+            "IOT_AI_HARNESS_MCP_URL=http://platform-api:8080/mcp/harness",
+            "IOT_AI_HARNESS_MODEL=deepseek-v4-flash",
+            "IOT_AI_HARNESS_TIMEOUT=90s",
+            "IOT_WEAVIATE_URL=$weaviateUrl",
+            "IOT_BACKUP_ADMIN_TOKEN=$backupToken",
+            "IOT_BACKUP_INTERVAL=24h",
+            "IOT_BACKUP_INCREMENTAL_INTERVAL=15m",
+            "IOT_MQTT_WEBSOCKET_PUBLIC_URL=",
+            "IOT_THINGSPANEL_URL=",
+            "IOT_THINGSPANEL_USER=",
+            "IOT_THINGSPANEL_PASSWORD=",
+            "IOT_WEB_PORT=8080",
+            "IOT_API_PORT=8081",
+            "IOT_CORS_ALLOWED_ORIGINS=http://localhost:8080,http://127.0.0.1:8080",
+            "EMQX_DASHBOARD_USER=admin",
+            "EMQX_DASHBOARD_PASSWORD=$emqxPassword",
+            "GRAFANA_ADMIN_USER=admin",
+            "GRAFANA_ADMIN_PASSWORD=$grafanaPassword"
+        )
+
+        [void]$credentialLines.Add("平台管理员：admin")
+        [void]$credentialLines.Add("平台管理员密码：$adminPassword")
+        [void]$credentialLines.Add("备份服务 Token：$backupToken")
+        [void]$credentialLines.Add("EMQX Dashboard：admin / $emqxPassword")
+        [void]$credentialLines.Add("Grafana：admin / $grafanaPassword")
+        [void]$credentialLines.Add("PostgreSQL 密码：$postgresPassword")
+        [void]$credentialLines.Add("Redis 密码：$redisPassword")
+        [void]$credentialLines.Add("ClickHouse 密码：$clickhousePassword")
+        [void]$credentialLines.Add("MinIO 主密码：$minioPassword")
+        [void]$credentialLines.Add("MinIO 灾备密码：$minioDrPassword")
+    }
+
+    $imageValues = [ordered]@{
+        "IOT_PLATFORM_API_IMAGE" = "iot-platform-api:offline"
+        "IOT_PLATFORM_WEB_IMAGE" = "iot-platform-web:offline"
+        "IOT_BACKUP_IMAGE" = "iot-platform-backup:offline"
+        "IOT_DEEPSEEK_HARNESS_IMAGE" = "iot-deepseek-harness:offline"
+        "IOT_THINGSPANEL_BACKEND_IMAGE" = "iot-thingspanel-backend:offline"
+        "IOT_THINGSPANEL_WEB_IMAGE" = "iot-thingspanel-web:offline"
+    }
+    foreach ($item in $imageValues.GetEnumerator()) {
+        $lines = @(Set-OrAdd-EnvLine -Lines $lines -Key $item.Key -Value $item.Value)
+    }
+
+    Write-Utf8NoBom -Path $Destination -Lines $lines
+    $credentialPath = Join-Path (Split-Path -Parent $Destination) "OFFLINE-CREDENTIALS.txt"
+    $credentialFileLines = @(
+        "# 离线部署凭据",
+        "# 请将本文件视为密码文件，不要提交 Git 或公开传输。",
+        ""
+    ) + @($credentialLines)
+    Write-Utf8NoBom -Path $credentialPath -Lines $credentialFileLines
+
+    return [pscustomobject]@{
+        Generated = $generated
+        CredentialPath = $credentialPath
+    }
+}
+
+function Get-ImageIdForComposeService {
+    param(
+        [Parameter(Mandatory)][string]$Service,
+        [Parameter(Mandatory)][string[]]$ProfileArguments
+    )
+
+    $composeArguments = @("compose") + $ProfileArguments + @("images", "-q", $Service)
+    $ids = @(& docker @composeArguments 2>$null | ForEach-Object { $_.ToString().Trim() } | Where-Object { $_ })
+    if ($LASTEXITCODE -eq 0 -and $ids.Count -gt 0) {
+        return $ids[0]
+    }
+
+    $labelArguments = @(
+        "image", "ls",
+        "--filter", "label=com.docker.compose.project=iot-platform",
+        "--filter", "label=com.docker.compose.service=$Service",
+        "--format", "{{.ID}}"
+    )
+    $ids = @(& docker @labelArguments 2>$null | ForEach-Object { $_.ToString().Trim() } | Where-Object { $_ })
+    if ($LASTEXITCODE -eq 0 -and $ids.Count -gt 0) {
+        return $ids[0]
+    }
+
+    $expected = "iot-platform-$Service"
+    $ids = @(& docker image inspect $expected --format "{{.Id}}" 2>$null | ForEach-Object { $_.ToString().Trim() } | Where-Object { $_ })
+    if ($LASTEXITCODE -eq 0 -and $ids.Count -gt 0) {
+        return $ids[0]
+    }
+
+    throw "无法找到 ThingsPanel 服务 $Service 构建出的镜像。请检查 docker compose build 输出。"
+}
+
+if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+    throw "找不到 docker 命令。请在安装并启动 Docker Engine/Desktop 的有网打包机执行。"
+}
+& docker info *> $null
+if ($LASTEXITCODE -ne 0) {
+    throw "Docker Engine 不可用。请先启动 Docker Desktop 或 Docker Engine。"
+}
+
+$parentPath = if ([System.IO.Path]::IsPathRooted($OutputDir)) { $OutputDir } else { Join-Path $projectRoot $OutputDir }
+$parentPath = [System.IO.Path]::GetFullPath($parentPath)
+New-Item -ItemType Directory -Force -Path $parentPath | Out-Null
+$bundleName = "iot-platform-offline-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+$bundleRoot = Join-Path $parentPath $bundleName
+New-Item -ItemType Directory -Force -Path $bundleRoot | Out-Null
+
+$forcedImages = [ordered]@{
+    "IOT_PLATFORM_API_IMAGE" = "iot-platform-api:offline"
+    "IOT_PLATFORM_WEB_IMAGE" = "iot-platform-web:offline"
+    "IOT_BACKUP_IMAGE" = "iot-platform-backup:offline"
+    "IOT_DEEPSEEK_HARNESS_IMAGE" = "iot-deepseek-harness:offline"
+}
+$savedEnvironment = @{}
+foreach ($item in $forcedImages.GetEnumerator()) {
+    $savedEnvironment[$item.Key] = [Environment]::GetEnvironmentVariable($item.Key, "Process")
+    Set-Item -Path "Env:$($item.Key)" -Value $item.Value
+}
+$savedProjectName = [Environment]::GetEnvironmentVariable("COMPOSE_PROJECT_NAME", "Process")
+Set-Item -Path "Env:COMPOSE_PROJECT_NAME" -Value "iot-platform"
+
+$profiles = New-Object 'System.Collections.Generic.List[string]'
+if ($IncludeAi) { [void]$profiles.Add("ai") }
+if ($IncludeHarness) { [void]$profiles.Add("harness") }
+if ($IncludeThingsPanel) { [void]$profiles.Add("thingspanel") }
+if ($IncludeGb26875) { [void]$profiles.Add("gb26875") }
+$profileArguments = New-Object 'System.Collections.Generic.List[string]'
+foreach ($profile in $profiles) {
+    [void]$profileArguments.Add("--profile")
+    [void]$profileArguments.Add($profile)
+}
+
+$ollamaArchive = $null
+$ollamaVolumeName = $null
+$thingsPanelImages = New-Object 'System.Collections.Generic.List[string]'
+
+try {
+    $pullServices = @(
+        "postgres", "postgres-wal-init", "redis", "minio", "minio-dr",
+        "redpanda", "redpanda-init", "clickhouse", "emqx", "prometheus",
+        "grafana", "loki"
+    )
+    Invoke-Checked -Arguments (@("compose", "pull") + $pullServices)
+    Invoke-Checked -Arguments @("compose", "build", "--pull", "platform-api", "platform-web", "backup-service")
+
+    if ($IncludeAi) {
+        Invoke-Checked -Arguments @("compose", "--profile", "ai", "pull", "ollama", "weaviate")
+        if (-not $SkipOllamaModel) {
+            Invoke-Checked -Arguments @("compose", "--profile", "ai", "up", "-d", "ollama")
+            $ollamaReady = $false
+            for ($i = 0; $i -lt 30; $i++) {
+                & docker compose --profile ai exec -T ollama ollama list *> $null
+                if ($LASTEXITCODE -eq 0) {
+                    $ollamaReady = $true
+                    break
+                }
+                Start-Sleep -Seconds 2
+            }
+            if (-not $ollamaReady) {
+                throw "Ollama 容器未在规定时间内就绪。"
+            }
+            Invoke-Checked -Arguments @("compose", "--profile", "ai", "exec", "-T", "ollama", "ollama", "pull", $OllamaModel)
+            $ollamaVolumes = @(& docker volume ls --filter "label=com.docker.compose.volume=ollama-data" --format "{{.Name}}" 2>$null | ForEach-Object { $_.ToString().Trim() } | Where-Object { $_ })
+            $ollamaVolume = if ($ollamaVolumes.Count -gt 0) { $ollamaVolumes[0] } else { "iot-platform_ollama-data" }
+            $ollamaVolumeName = $ollamaVolume
+            Invoke-Checked -Arguments @(
+                "run", "--rm",
+                "--mount", "type=volume,source=$ollamaVolume,target=/src,readonly",
+                "--mount", "type=bind,source=$bundleRoot,target=/backup",
+                "alpine:3.22", "sh", "-ec", "tar -czf /backup/ollama-data.tgz -C /src ."
+            )
+            $ollamaArchive = "ollama-data.tgz"
+        }
+    }
+
+    if ($IncludeHarness) {
+        Invoke-Checked -Arguments @("compose", "--profile", "harness", "build", "--pull", "deepseek-harness")
+    }
+
+    if ($IncludeThingsPanel) {
+        Invoke-Checked -Arguments @("compose", "--profile", "thingspanel", "pull", "thingspanel-postgres", "thingspanel-db-init")
+        Invoke-Checked -Arguments @("compose", "--profile", "thingspanel", "build", "--pull", "backend", "thingspanel")
+        $backendId = Get-ImageIdForComposeService -Service "backend" -ProfileArguments @("--profile", "thingspanel")
+        $webId = Get-ImageIdForComposeService -Service "thingspanel" -ProfileArguments @("--profile", "thingspanel")
+        Invoke-Checked -Arguments @("tag", $backendId, "iot-thingspanel-backend:offline")
+        Invoke-Checked -Arguments @("tag", $webId, "iot-thingspanel-web:offline")
+        [void]$thingsPanelImages.Add("iot-thingspanel-backend:offline")
+        [void]$thingsPanelImages.Add("iot-thingspanel-web:offline")
+    }
+
+    $sourceEnv = $EnvFile
+    if (-not [string]::IsNullOrWhiteSpace($sourceEnv) -and -not [System.IO.Path]::IsPathRooted($sourceEnv)) {
+        $sourceEnv = Join-Path $projectRoot $sourceEnv
+    }
+    $envResult = New-OfflineEnv -Destination (Join-Path $bundleRoot ".env.offline") -Source $sourceEnv -UseAi:$IncludeAi -UseHarness:$IncludeHarness -UseThingsPanel:$IncludeThingsPanel
+
+    Copy-Item -LiteralPath (Join-Path $projectRoot "compose.yaml") -Destination $bundleRoot
+    Copy-Item -LiteralPath (Join-Path $projectRoot "compose.offline.yaml") -Destination $bundleRoot
+    Copy-Item -LiteralPath (Join-Path $projectRoot "deploy") -Destination $bundleRoot -Recurse
+    New-Item -ItemType Directory -Force -Path (Join-Path $bundleRoot "scripts") | Out-Null
+    foreach ($runtimeScript in @(
+        "deploy-offline.ps1",
+        "deploy-offline-windows.ps1",
+        "deploy-offline.sh",
+        "deploy-offline-linux.sh",
+        "deploy-offline-macos.sh"
+    )) {
+        Copy-Item -LiteralPath (Join-Path $scriptDir $runtimeScript) -Destination (Join-Path $bundleRoot "scripts")
+    }
+    Copy-Item -LiteralPath (Join-Path $projectRoot "docs\OFFLINE_DEPLOYMENT.md") -Destination (Join-Path $bundleRoot "OFFLINE_DEPLOYMENT.md")
+
+    $resolvedImages = @(Invoke-Captured -Arguments ((@("compose") + $profileArguments.ToArray()) + @("config", "--images")))
+    $offlineImages = @(
+        "iot-platform-api:offline",
+        "iot-platform-web:offline",
+        "iot-platform-backup:offline"
+    )
+    if ($IncludeHarness) { $offlineImages += "iot-deepseek-harness:offline" }
+    $offlineImages += $thingsPanelImages.ToArray()
+    $images = @($resolvedImages + $offlineImages | Where-Object { $_ } | Sort-Object -Unique)
+    foreach ($image in $images) {
+        & docker image inspect $image *> $null
+        if ($LASTEXITCODE -ne 0) {
+            throw "镜像不存在，无法导出：$image"
+        }
+    }
+
+    $archivePath = Join-Path $bundleRoot "images.tar"
+    Invoke-Checked -Arguments (@("save", "-o", $archivePath) + $images)
+    $hash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Write-Utf8NoBom -Path (Join-Path $bundleRoot "images.tar.sha256") -Lines @("$hash  images.tar")
+    Write-Utf8NoBom -Path (Join-Path $bundleRoot "profiles.txt") -Lines $profiles.ToArray()
+    if ($ollamaVolumeName) {
+        Write-Utf8NoBom -Path (Join-Path $bundleRoot "ollama-volume.txt") -Lines @($ollamaVolumeName)
+    }
+
+    $commit = (& git -C $projectRoot rev-parse HEAD 2>$null | Select-Object -First 1)
+    if ($LASTEXITCODE -ne 0) { $commit = "unknown" }
+    $manifest = [ordered]@{
+        format = 1
+        project = "iot-platform"
+        createdAtUtc = (Get-Date).ToUniversalTime().ToString("o")
+        gitCommit = ([string]$commit).Trim()
+        profiles = $profiles.ToArray()
+        images = $images
+        imageArchive = "images.tar"
+        imageArchiveSha256 = $hash
+        envFile = ".env.offline"
+        composeFiles = @("compose.yaml", "compose.offline.yaml")
+        ollamaModel = if ($ollamaArchive) { $OllamaModel } else { $null }
+        ollamaArchive = $ollamaArchive
+        ollamaVolume = $ollamaVolumeName
+        generatedCredentials = [bool]$envResult.Generated
+    }
+    $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $bundleRoot "manifest.json") -Encoding UTF8
+
+    Write-Host ""
+    Write-Host "离线包已生成：$bundleRoot" -ForegroundColor Green
+    Write-Host "镜像数量：$($images.Count)"
+    Write-Host "镜像包大小：$([Math]::Round((Get-Item $archivePath).Length / 1GB, 2)) GB"
+    Write-Host "部署方式：按服务器系统运行 scripts/deploy-offline-windows.ps1、deploy-offline-macos.sh 或 deploy-offline-linux.sh"
+    if ($envResult.Generated) {
+        Write-Host "自动生成的凭据：$($envResult.CredentialPath)" -ForegroundColor Yellow
+    }
+} finally {
+    foreach ($item in $forcedImages.GetEnumerator()) {
+        $oldValue = $savedEnvironment[$item.Key]
+        if ($null -eq $oldValue) {
+            Remove-Item -Path "Env:$($item.Key)" -ErrorAction SilentlyContinue
+        } else {
+            Set-Item -Path "Env:$($item.Key)" -Value $oldValue
+        }
+    }
+    if ($null -eq $savedProjectName) {
+        Remove-Item -Path "Env:COMPOSE_PROJECT_NAME" -ErrorAction SilentlyContinue
+    } else {
+        Set-Item -Path "Env:COMPOSE_PROJECT_NAME" -Value $savedProjectName
+    }
+}

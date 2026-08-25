@@ -64,6 +64,59 @@ docker compose --profile harness logs -f deepseek-harness platform-api
 curl http://127.0.0.1:8091/health
 ```
 
+### 一键离线部署
+
+打包分为两个阶段：在有网机器上准备完整离线包，再把离线包传到无网服务器启动。打包机需要已安装并启动 Docker Engine/Desktop；服务器端不会执行镜像构建、依赖安装或镜像拉取。
+
+打包机按操作系统执行：
+
+```powershell
+# Windows
+powershell -ExecutionPolicy Bypass -File .\scripts\package-offline-windows.ps1
+```
+
+```bash
+# macOS
+bash ./scripts/package-offline-macos.sh
+
+# Linux
+bash ./scripts/package-offline-linux.sh
+```
+
+可选组件参数按系统分别为：Windows 使用 `-IncludeAi`、`-IncludeHarness`、`-IncludeThingsPanel`、`-IncludeGb26875`、`-Full`；macOS/Linux 使用对应的长参数 `--include-ai`、`--include-harness`、`--include-thingspanel`、`--include-gb26875`、`--full`。例如：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\package-offline-windows.ps1 `
+  -IncludeAi -OllamaModel qwen3:8b
+```
+
+```bash
+# macOS
+bash ./scripts/package-offline-macos.sh --include-ai --ollama-model qwen3:8b
+
+# Linux
+bash ./scripts/package-offline-linux.sh --include-ai --ollama-model qwen3:8b
+```
+
+脚本会构建/拉取镜像、导出 `images.tar`、生成 SHA-256、复制 Compose 和部署文件，并生成离线配置。将输出的 `iot-platform-offline-*` 目录整体传到无网服务器后，按服务器操作系统执行：
+
+```powershell
+# Windows
+powershell -ExecutionPolicy Bypass -File .\scripts\deploy-offline-windows.ps1
+```
+
+```bash
+# macOS
+bash ./scripts/deploy-offline-macos.sh
+
+# Linux
+bash ./scripts/deploy-offline-linux.sh
+```
+
+服务器端使用 `--no-build --pull never`，不会安装 Go/Node 依赖或访问镜像仓库。离线包包含镜像归档、校验文件、Compose 文件、环境配置和三种系统的部署脚本。打包机与服务器应使用兼容的 Docker CPU 架构；例如 Apple Silicon macOS 打包给 `linux/amd64` 服务器时，应使用 `linux/amd64` 架构的有网打包机。
+
+正式密钥、Ollama 模型、Harness、ThingsPanel、GB/T 26875 以及故障排查说明见 [一键离线部署](docs/OFFLINE_DEPLOYMENT.md)。
+
 停止服务但保留数据：
 
 ```bash
