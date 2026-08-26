@@ -33,6 +33,7 @@ type Engine struct {
 	Metrics                   interface{ Inc(string) }
 	VideoMediaAllowedHosts    []string
 	RequireVideoCameraMapping bool
+	VideoPreview              ports.VideoPreviewService
 }
 
 func New(repo ports.Repository, archive ports.Archive, bus ports.EventBus, realtime ports.RealtimePublisher, parsers *parser.Registry, log *slog.Logger) *Engine {

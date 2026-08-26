@@ -48,6 +48,16 @@ type Config struct {
 	VideoPlatformTenants map[string]string
 	VideoMediaHosts      []string
 	VideoPreviewOrigins  []string
+	VideoZLMAPIURL       string
+	VideoZLMPlaybackURL  string
+	VideoZLMSecret       string
+	VideoZLMVhost        string
+	VideoZLMApp          string
+	DahuaVideoSDKURL     string
+	DahuaVideoSDKToken   string
+	HikvisionVideoAPIURL string
+	HikvisionAppKey      string
+	HikvisionAppSecret   string
 	ThingsPanelURL       string
 	ThingsPanelUser      string
 	ThingsPanelPassword  string
@@ -107,6 +117,16 @@ func Load() Config {
 		VideoPlatformTenants: parsePairs(os.Getenv("IOT_VIDEO_PLATFORM_TENANTS")),
 		VideoMediaHosts:      split(os.Getenv("IOT_VIDEO_MEDIA_ALLOWED_HOSTS")),
 		VideoPreviewOrigins:  split(os.Getenv("IOT_VIDEO_PREVIEW_ALLOWED_ORIGINS")),
+		VideoZLMAPIURL:       strings.TrimRight(strings.TrimSpace(os.Getenv("IOT_VIDEO_ZLM_API_URL")), "/"),
+		VideoZLMPlaybackURL:  strings.TrimRight(strings.TrimSpace(os.Getenv("IOT_VIDEO_ZLM_PLAYBACK_BASE_URL")), "/"),
+		VideoZLMSecret:       strings.TrimSpace(os.Getenv("IOT_VIDEO_ZLM_SECRET")),
+		VideoZLMVhost:        get("IOT_VIDEO_ZLM_VHOST", "__defaultVhost__"),
+		VideoZLMApp:          get("IOT_VIDEO_ZLM_APP", "iot"),
+		DahuaVideoSDKURL:     strings.TrimRight(strings.TrimSpace(os.Getenv("IOT_VIDEO_DAHUA_SDK_URL")), "/"),
+		DahuaVideoSDKToken:   strings.TrimSpace(os.Getenv("IOT_VIDEO_DAHUA_SDK_TOKEN")),
+		HikvisionVideoAPIURL: strings.TrimRight(strings.TrimSpace(os.Getenv("IOT_VIDEO_HIKVISION_API_URL")), "/"),
+		HikvisionAppKey:      strings.TrimSpace(os.Getenv("IOT_VIDEO_HIKVISION_APP_KEY")),
+		HikvisionAppSecret:   strings.TrimSpace(os.Getenv("IOT_VIDEO_HIKVISION_APP_SECRET")),
 		ThingsPanelURL:       strings.TrimRight(os.Getenv("IOT_THINGSPANEL_URL"), "/"),
 		ThingsPanelUser:      os.Getenv("IOT_THINGSPANEL_USER"),
 		ThingsPanelPassword:  os.Getenv("IOT_THINGSPANEL_PASSWORD"),

@@ -753,29 +753,49 @@ func (r *Repository) ListPendingVideoEvents(ctx context.Context, limit int) ([]m
 	}
 	return out, rows.Err()
 }
+
+const videoCameraMappingColumns = `tenant_id,camera_id,coalesce(camera_name,''),coalesce(ingest_mode,'direct'),coalesce(project_id,''),coalesce(city_code,''),coalesce(district_code,''),coalesce(building,''),coalesce(floor,''),coalesce(area_id,''),related_device_ids,related_floor_ids,related_room_ids,coalesce(video_platform_id,''),coalesce(stream_url,''),coalesce(stream_type,''),coalesce(sdk_endpoint,''),coalesce(sdk_camera_id,''),coalesce(sdk_credential_ref,''),enabled`
+
 func (r *Repository) SaveVideoCameraMapping(ctx context.Context, v model.VideoCameraMapping) error {
-	related, _ := json.Marshal(v.RelatedDeviceIDs)
-	_, err := r.pool.Exec(ctx, `INSERT INTO video_camera_mapping(tenant_id,camera_id,camera_name,project_id,city_code,district_code,building,floor,area_id,related_device_ids,video_platform_id,stream_url,stream_type,enabled) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT(tenant_id,camera_id) DO UPDATE SET camera_name=excluded.camera_name,project_id=excluded.project_id,city_code=excluded.city_code,district_code=excluded.district_code,building=excluded.building,floor=excluded.floor,area_id=excluded.area_id,related_device_ids=excluded.related_device_ids,video_platform_id=excluded.video_platform_id,stream_url=excluded.stream_url,stream_type=excluded.stream_type,enabled=excluded.enabled`, v.TenantID, v.CameraID, v.CameraName, v.ProjectID, v.CityCode, v.DistrictCode, v.Building, v.Floor, v.AreaID, related, v.VideoPlatformID, v.StreamURL, v.StreamType, v.Enabled)
-	return err
+	if v.IngestMode == "" {
+		v.IngestMode = "direct"
+	}
+	deviceIDs, _ := json.Marshal(v.RelatedDeviceIDs)
+	floorIDs, _ := json.Marshal(v.RelatedFloorIDs)
+	roomIDs, _ := json.Marshal(v.RelatedRoomIDs)
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `INSERT INTO video_camera_mapping(tenant_id,camera_id,camera_name,ingest_mode,project_id,city_code,district_code,building,floor,area_id,related_device_ids,related_floor_ids,related_room_ids,video_platform_id,stream_url,stream_type,sdk_endpoint,sdk_camera_id,sdk_credential_ref,enabled) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) ON CONFLICT(tenant_id,camera_id) DO UPDATE SET camera_name=excluded.camera_name,ingest_mode=excluded.ingest_mode,project_id=excluded.project_id,city_code=excluded.city_code,district_code=excluded.district_code,building=excluded.building,floor=excluded.floor,area_id=excluded.area_id,related_device_ids=excluded.related_device_ids,related_floor_ids=excluded.related_floor_ids,related_room_ids=excluded.related_room_ids,video_platform_id=excluded.video_platform_id,stream_url=excluded.stream_url,stream_type=excluded.stream_type,sdk_endpoint=excluded.sdk_endpoint,sdk_camera_id=excluded.sdk_camera_id,sdk_credential_ref=excluded.sdk_credential_ref,enabled=excluded.enabled`, v.TenantID, v.CameraID, v.CameraName, v.IngestMode, v.ProjectID, v.CityCode, v.DistrictCode, v.Building, v.Floor, v.AreaID, deviceIDs, floorIDs, roomIDs, v.VideoPlatformID, v.StreamURL, v.StreamType, v.SDKEndpoint, v.SDKCameraID, v.SDKCredentialRef, v.Enabled); err != nil {
+		return err
+	}
+	if err = replaceVideoCameraRelationsTx(ctx, tx, v.TenantID, v.CameraID, videoRelations(v)); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 func (r *Repository) scanVideoMapping(row rowScanner) (model.VideoCameraMapping, error) {
 	var v model.VideoCameraMapping
-	var related []byte
-	err := row.Scan(&v.TenantID, &v.CameraID, &v.CameraName, &v.ProjectID, &v.CityCode, &v.DistrictCode, &v.Building, &v.Floor, &v.AreaID, &related, &v.VideoPlatformID, &v.StreamURL, &v.StreamType, &v.Enabled)
+	var related, floors, rooms []byte
+	err := row.Scan(&v.TenantID, &v.CameraID, &v.CameraName, &v.IngestMode, &v.ProjectID, &v.CityCode, &v.DistrictCode, &v.Building, &v.Floor, &v.AreaID, &related, &floors, &rooms, &v.VideoPlatformID, &v.StreamURL, &v.StreamType, &v.SDKEndpoint, &v.SDKCameraID, &v.SDKCredentialRef, &v.Enabled)
 	if err == nil {
 		_ = json.Unmarshal(related, &v.RelatedDeviceIDs)
+		_ = json.Unmarshal(floors, &v.RelatedFloorIDs)
+		_ = json.Unmarshal(rooms, &v.RelatedRoomIDs)
 	}
 	return v, err
 }
 func (r *Repository) GetVideoCameraMapping(ctx context.Context, tenant, camera string) (model.VideoCameraMapping, error) {
-	v, err := r.scanVideoMapping(r.pool.QueryRow(ctx, `SELECT tenant_id,camera_id,coalesce(camera_name,''),coalesce(project_id,''),coalesce(city_code,''),coalesce(district_code,''),coalesce(building,''),coalesce(floor,''),coalesce(area_id,''),related_device_ids,coalesce(video_platform_id,''),coalesce(stream_url,''),coalesce(stream_type,''),enabled FROM video_camera_mapping WHERE tenant_id=$1 AND camera_id=$2`, tenant, camera))
+	v, err := r.scanVideoMapping(r.pool.QueryRow(ctx, `SELECT `+videoCameraMappingColumns+` FROM video_camera_mapping WHERE tenant_id=$1 AND camera_id=$2`, tenant, camera))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return v, ErrNotFound
 	}
 	return v, err
 }
 func (r *Repository) ListVideoCameraMappings(ctx context.Context, tenant string) ([]model.VideoCameraMapping, error) {
-	rows, err := r.pool.Query(ctx, `SELECT tenant_id,camera_id,coalesce(camera_name,''),coalesce(project_id,''),coalesce(city_code,''),coalesce(district_code,''),coalesce(building,''),coalesce(floor,''),coalesce(area_id,''),related_device_ids,coalesce(video_platform_id,''),coalesce(stream_url,''),coalesce(stream_type,''),enabled FROM video_camera_mapping WHERE tenant_id=$1 ORDER BY camera_id`, tenant)
+	rows, err := r.pool.Query(ctx, `SELECT `+videoCameraMappingColumns+` FROM video_camera_mapping WHERE tenant_id=$1 ORDER BY camera_id`, tenant)
 	if err != nil {
 		return nil, err
 	}
@@ -796,7 +816,7 @@ func (r *Repository) ListVideoCameraMappingsPage(ctx context.Context, tenant str
 	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM video_camera_mapping WHERE tenant_id=$1`, tenant).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := r.pool.Query(ctx, `SELECT tenant_id,camera_id,coalesce(camera_name,''),coalesce(project_id,''),coalesce(city_code,''),coalesce(district_code,''),coalesce(building,''),coalesce(floor,''),coalesce(area_id,''),related_device_ids,coalesce(video_platform_id,''),coalesce(stream_url,''),coalesce(stream_type,''),enabled FROM video_camera_mapping WHERE tenant_id=$1 ORDER BY camera_id LIMIT $2 OFFSET $3`, tenant, limit, offset)
+	rows, err := r.pool.Query(ctx, `SELECT `+videoCameraMappingColumns+` FROM video_camera_mapping WHERE tenant_id=$1 ORDER BY camera_id LIMIT $2 OFFSET $3`, tenant, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -810,6 +830,101 @@ func (r *Repository) ListVideoCameraMappingsPage(ctx context.Context, tenant str
 		items = append(items, item)
 	}
 	return items, total, rows.Err()
+}
+func (r *Repository) ReplaceVideoCameraRelations(ctx context.Context, tenant, camera string, relations []model.VideoCameraRelation) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err = replaceVideoCameraRelationsTx(ctx, tx, tenant, camera, relations); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+func replaceVideoCameraRelationsTx(ctx context.Context, tx pgx.Tx, tenant, camera string, relations []model.VideoCameraRelation) error {
+	if _, err := tx.Exec(ctx, `DELETE FROM video_camera_relation WHERE tenant_id=$1 AND camera_id=$2`, tenant, camera); err != nil {
+		return err
+	}
+	for _, relation := range relations {
+		if relation.TargetID == "" || (relation.RelationType != "device" && relation.RelationType != "floor" && relation.RelationType != "room") {
+			continue
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO video_camera_relation(tenant_id,camera_id,relation_type,target_id) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`, tenant, camera, relation.RelationType, relation.TargetID); err != nil {
+			return err
+		}
+	}
+	deviceIDs, floorIDs, roomIDs := relationIDs(relations)
+	deviceJSON, _ := json.Marshal(deviceIDs)
+	floorJSON, _ := json.Marshal(floorIDs)
+	roomJSON, _ := json.Marshal(roomIDs)
+	if _, err := tx.Exec(ctx, `UPDATE video_camera_mapping SET related_device_ids=$3,related_floor_ids=$4,related_room_ids=$5 WHERE tenant_id=$1 AND camera_id=$2`, tenant, camera, deviceJSON, floorJSON, roomJSON); err != nil {
+		return err
+	}
+	return nil
+}
+func (r *Repository) ListVideoCameraRelations(ctx context.Context, tenant, camera string) ([]model.VideoCameraRelation, error) {
+	rows, err := r.pool.Query(ctx, `SELECT tenant_id,camera_id,relation_type,target_id FROM video_camera_relation WHERE tenant_id=$1 AND camera_id=$2 ORDER BY relation_type,target_id`, tenant, camera)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.VideoCameraRelation{}
+	for rows.Next() {
+		var relation model.VideoCameraRelation
+		if err = rows.Scan(&relation.TenantID, &relation.CameraID, &relation.RelationType, &relation.TargetID); err != nil {
+			return nil, err
+		}
+		out = append(out, relation)
+	}
+	return out, rows.Err()
+}
+func (r *Repository) ListVideoCameraRelationsByTarget(ctx context.Context, tenant, relationType, targetID string) ([]model.VideoCameraRelation, error) {
+	rows, err := r.pool.Query(ctx, `SELECT tenant_id,camera_id,relation_type,target_id FROM video_camera_relation WHERE tenant_id=$1 AND relation_type=$2 AND target_id=$3 ORDER BY camera_id`, tenant, relationType, targetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.VideoCameraRelation{}
+	for rows.Next() {
+		var relation model.VideoCameraRelation
+		if err = rows.Scan(&relation.TenantID, &relation.CameraID, &relation.RelationType, &relation.TargetID); err != nil {
+			return nil, err
+		}
+		out = append(out, relation)
+	}
+	return out, rows.Err()
+}
+
+func videoRelations(v model.VideoCameraMapping) []model.VideoCameraRelation {
+	out := make([]model.VideoCameraRelation, 0, len(v.RelatedDeviceIDs)+len(v.RelatedFloorIDs)+len(v.RelatedRoomIDs))
+	for _, id := range v.RelatedDeviceIDs {
+		out = append(out, model.VideoCameraRelation{TenantID: v.TenantID, CameraID: v.CameraID, RelationType: "device", TargetID: id})
+	}
+	for _, id := range v.RelatedFloorIDs {
+		out = append(out, model.VideoCameraRelation{TenantID: v.TenantID, CameraID: v.CameraID, RelationType: "floor", TargetID: id})
+	}
+	for _, id := range v.RelatedRoomIDs {
+		out = append(out, model.VideoCameraRelation{TenantID: v.TenantID, CameraID: v.CameraID, RelationType: "room", TargetID: id})
+	}
+	return out
+}
+
+func relationIDs(relations []model.VideoCameraRelation) (deviceIDs, floorIDs, roomIDs []string) {
+	for _, relation := range relations {
+		if relation.TargetID == "" {
+			continue
+		}
+		switch relation.RelationType {
+		case "device":
+			deviceIDs = append(deviceIDs, relation.TargetID)
+		case "floor":
+			floorIDs = append(floorIDs, relation.TargetID)
+		case "room":
+			roomIDs = append(roomIDs, relation.TargetID)
+		}
+	}
+	return deviceIDs, floorIDs, roomIDs
 }
 func (r *Repository) SaveAIAnalysis(ctx context.Context, v model.AIAnalysis) error {
 	b, _ := json.Marshal(v)

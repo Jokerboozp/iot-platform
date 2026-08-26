@@ -51,7 +51,7 @@ func (e *Engine) ValidateRuleDraft(ctx context.Context, rule model.AlarmRule) ([
 				return nil, nil, fmt.Errorf("OPEN_CAMERA action requires cameraId")
 			}
 			camera, err := e.Repo.GetVideoCameraMapping(ctx, rule.TenantID, cameraID)
-			if err != nil || !camera.Enabled || strings.TrimSpace(camera.StreamURL) == "" {
+			if err != nil || !camera.Enabled || (strings.TrimSpace(camera.StreamURL) == "" && strings.TrimSpace(camera.SDKCameraID) == "") {
 				return nil, nil, fmt.Errorf("camera %q is not available for preview", cameraID)
 			}
 		case "OPEN_PAGE":

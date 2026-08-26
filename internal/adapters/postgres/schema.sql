@@ -77,13 +77,40 @@ CREATE TABLE IF NOT EXISTS video_alarm_event (
 );
 CREATE TABLE IF NOT EXISTS video_camera_mapping (
   tenant_id text NOT NULL, camera_id text NOT NULL, camera_name text, project_id text,
-  city_code text, district_code text, building text, floor text, area_id text, related_device_ids jsonb NOT NULL DEFAULT '[]',
-  video_platform_id text, stream_url text, stream_type text, enabled boolean NOT NULL DEFAULT true,
+  ingest_mode text NOT NULL DEFAULT 'direct', city_code text, district_code text, building text, floor text, area_id text,
+  related_device_ids jsonb NOT NULL DEFAULT '[]', related_floor_ids jsonb NOT NULL DEFAULT '[]', related_room_ids jsonb NOT NULL DEFAULT '[]',
+  video_platform_id text, stream_url text, stream_type text, sdk_endpoint text, sdk_camera_id text, sdk_credential_ref text,
+  enabled boolean NOT NULL DEFAULT true,
   PRIMARY KEY (tenant_id, camera_id)
 );
+ALTER TABLE video_camera_mapping ADD COLUMN IF NOT EXISTS ingest_mode text NOT NULL DEFAULT 'direct';
 ALTER TABLE video_camera_mapping ADD COLUMN IF NOT EXISTS city_code text;
 ALTER TABLE video_camera_mapping ADD COLUMN IF NOT EXISTS district_code text;
 ALTER TABLE video_camera_mapping ADD COLUMN IF NOT EXISTS stream_type text;
+ALTER TABLE video_camera_mapping ADD COLUMN IF NOT EXISTS related_floor_ids jsonb NOT NULL DEFAULT '[]';
+ALTER TABLE video_camera_mapping ADD COLUMN IF NOT EXISTS related_room_ids jsonb NOT NULL DEFAULT '[]';
+ALTER TABLE video_camera_mapping ADD COLUMN IF NOT EXISTS sdk_endpoint text;
+ALTER TABLE video_camera_mapping ADD COLUMN IF NOT EXISTS sdk_camera_id text;
+ALTER TABLE video_camera_mapping ADD COLUMN IF NOT EXISTS sdk_credential_ref text;
+CREATE TABLE IF NOT EXISTS video_camera_relation (
+  tenant_id text NOT NULL, camera_id text NOT NULL, relation_type text NOT NULL,
+  target_id text NOT NULL,
+  PRIMARY KEY (tenant_id, camera_id, relation_type, target_id),
+  CHECK (relation_type IN ('device','floor','room'))
+);
+CREATE INDEX IF NOT EXISTS video_camera_relation_target_idx ON video_camera_relation(tenant_id, relation_type, target_id);
+INSERT INTO video_camera_relation(tenant_id,camera_id,relation_type,target_id)
+SELECT tenant_id,camera_id,'device',jsonb_array_elements_text(coalesce(related_device_ids,'[]'::jsonb))
+FROM video_camera_mapping
+ON CONFLICT DO NOTHING;
+INSERT INTO video_camera_relation(tenant_id,camera_id,relation_type,target_id)
+SELECT tenant_id,camera_id,'floor',jsonb_array_elements_text(coalesce(related_floor_ids,'[]'::jsonb))
+FROM video_camera_mapping
+ON CONFLICT DO NOTHING;
+INSERT INTO video_camera_relation(tenant_id,camera_id,relation_type,target_id)
+SELECT tenant_id,camera_id,'room',jsonb_array_elements_text(coalesce(related_room_ids,'[]'::jsonb))
+FROM video_camera_mapping
+ON CONFLICT DO NOTHING;
 CREATE TABLE IF NOT EXISTS video_alarm_media (
   tenant_id text NOT NULL, event_id text NOT NULL, media_type text NOT NULL,
   object_bucket text NOT NULL, object_key text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),

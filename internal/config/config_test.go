@@ -58,6 +58,16 @@ func TestVideoPlatformTenantBindings(t *testing.T) {
 	}
 }
 
+func TestHikvisionArtemisConfig(t *testing.T) {
+	t.Setenv("IOT_VIDEO_HIKVISION_API_URL", "https://hikcentral.example.internal")
+	t.Setenv("IOT_VIDEO_HIKVISION_APP_KEY", "app-key")
+	t.Setenv("IOT_VIDEO_HIKVISION_APP_SECRET", "app-secret")
+	cfg := Load()
+	if cfg.HikvisionVideoAPIURL != "https://hikcentral.example.internal" || cfg.HikvisionAppKey != "app-key" || cfg.HikvisionAppSecret != "app-secret" {
+		t.Fatalf("unexpected Hikvision Artemis config: %#v", cfg)
+	}
+}
+
 func TestAdminTenantAllowlist(t *testing.T) {
 	t.Setenv("IOT_ADMIN_TENANTS", "tenant-a, tenant-b")
 	cfg := Load()

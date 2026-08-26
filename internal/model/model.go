@@ -290,6 +290,7 @@ type AlarmRule struct {
 	TenantID        string          `json:"tenantId"`
 	ProductID       string          `json:"productId,omitempty"`
 	Name            string          `json:"name"`
+	Description     string          `json:"description,omitempty"`
 	AlarmType       string          `json:"alarmType"`
 	Level           string          `json:"level"`
 	Conditions      []RuleCondition `json:"conditions"`
@@ -461,6 +462,7 @@ type VideoCameraMapping struct {
 	TenantID         string   `json:"tenantId"`
 	CameraID         string   `json:"cameraId"`
 	CameraName       string   `json:"cameraName"`
+	IngestMode       string   `json:"ingestMode,omitempty"`
 	ProjectID        string   `json:"projectId,omitempty"`
 	CityCode         string   `json:"cityCode,omitempty"`
 	DistrictCode     string   `json:"districtCode,omitempty"`
@@ -468,13 +470,47 @@ type VideoCameraMapping struct {
 	Floor            string   `json:"floor,omitempty"`
 	AreaID           string   `json:"areaId"`
 	RelatedDeviceIDs []string `json:"relatedDeviceIds,omitempty"`
+	RelatedFloorIDs  []string `json:"relatedFloorIds,omitempty"`
+	RelatedRoomIDs   []string `json:"relatedRoomIds,omitempty"`
 	VideoPlatformID  string   `json:"videoPlatformId,omitempty"`
 	StreamURL        string   `json:"streamUrl,omitempty"`
 	StreamType       string   `json:"streamType,omitempty"`
+	SDKEndpoint      string   `json:"sdkEndpoint,omitempty"`
+	SDKCameraID      string   `json:"sdkCameraId,omitempty"`
+	SDKCredentialRef string   `json:"sdkCredentialRef,omitempty"`
 	StreamConfigured bool     `json:"streamConfigured,omitempty"`
 	PreviewEligible  bool     `json:"previewEligible,omitempty"`
 	Enabled          bool     `json:"enabled"`
 	UpdatedAt        int64    `json:"updatedAt"`
+}
+
+// VideoCameraRelation is the normalized many-to-many edge between one camera
+// and a device, floor, or room. The legacy arrays on VideoCameraMapping remain
+// in the API for compatibility; durable adapters also mirror these edges here.
+type VideoCameraRelation struct {
+	TenantID     string `json:"tenantId"`
+	CameraID     string `json:"cameraId"`
+	RelationType string `json:"relationType"`
+	TargetID     string `json:"targetId"`
+}
+
+// VideoStream is a short-lived source or browser playback address. SDK
+// providers may return an expiring URL; it is never persisted in a camera
+// mapping and should not be exposed to viewers before the preview request.
+type VideoStream struct {
+	URL        string `json:"url"`
+	StreamType string `json:"streamType"`
+	Provider   string `json:"provider,omitempty"`
+	ExpiresAt  int64  `json:"expiresAt,omitempty"`
+}
+
+type VideoPreview struct {
+	CameraID    string `json:"cameraId"`
+	CameraName  string `json:"cameraName"`
+	PlaybackURL string `json:"playbackUrl"`
+	StreamType  string `json:"streamType"`
+	Provider    string `json:"provider,omitempty"`
+	ExpiresAt   int64  `json:"expiresAt,omitempty"`
 }
 
 type AIToolCallLog struct {

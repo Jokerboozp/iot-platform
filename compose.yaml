@@ -30,6 +30,16 @@ services:
       IOT_VIDEO_PLATFORM_TENANTS: ${IOT_VIDEO_PLATFORM_TENANTS:-video-platform-1:tenant_001}
       IOT_VIDEO_MEDIA_ALLOWED_HOSTS: ${IOT_VIDEO_MEDIA_ALLOWED_HOSTS:-}
       IOT_VIDEO_PREVIEW_ALLOWED_ORIGINS: ${IOT_VIDEO_PREVIEW_ALLOWED_ORIGINS:-}
+      IOT_VIDEO_ZLM_API_URL: ${IOT_VIDEO_ZLM_API_URL:-http://zlm:80}
+      IOT_VIDEO_ZLM_PLAYBACK_BASE_URL: ${IOT_VIDEO_ZLM_PLAYBACK_BASE_URL:-http://localhost:8090}
+      IOT_VIDEO_ZLM_SECRET: ${IOT_VIDEO_ZLM_SECRET:-local-zlm-secret-change-me}
+      IOT_VIDEO_ZLM_VHOST: ${IOT_VIDEO_ZLM_VHOST:-__defaultVhost__}
+      IOT_VIDEO_ZLM_APP: ${IOT_VIDEO_ZLM_APP:-iot}
+      IOT_VIDEO_DAHUA_SDK_URL: ${IOT_VIDEO_DAHUA_SDK_URL:-}
+      IOT_VIDEO_DAHUA_SDK_TOKEN: ${IOT_VIDEO_DAHUA_SDK_TOKEN:-}
+      IOT_VIDEO_HIKVISION_API_URL: ${IOT_VIDEO_HIKVISION_API_URL:-}
+      IOT_VIDEO_HIKVISION_APP_KEY: ${IOT_VIDEO_HIKVISION_APP_KEY:-}
+      IOT_VIDEO_HIKVISION_APP_SECRET: ${IOT_VIDEO_HIKVISION_APP_SECRET:-}
       IOT_POSTGRES_DSN: postgres://iot:${POSTGRES_PASSWORD:-local-iot-postgres-change-me}@postgres:5432/iot?sslmode=disable
       IOT_REDIS_ADDR: redis:6379
       IOT_REDIS_PASSWORD: ${REDIS_PASSWORD:-local-iot-redis-change-me}
@@ -71,6 +81,7 @@ services:
       redpanda-init: {condition: service_completed_successfully}
       clickhouse: {condition: service_healthy}
       emqx: {condition: service_healthy}
+      zlm: {condition: service_started}
 
   platform-web:
     <<: *service-defaults
@@ -83,6 +94,26 @@ services:
     ports: ["${IOT_WEB_PORT:-8080}:8080"]
     depends_on:
       platform-api: {condition: service_started}
+
+  zlm:
+    <<: *service-defaults
+    image: ${IOT_ZLM_IMAGE:-zlmediakit/zlmediakit:master}
+    environment:
+      IOT_VIDEO_ZLM_SECRET: ${IOT_VIDEO_ZLM_SECRET:-local-zlm-secret-change-me}
+    command:
+      - sh
+      - -ec
+      - |
+        sed -i "s|^secret=.*|secret=$${IOT_VIDEO_ZLM_SECRET}|" /opt/media/conf/config.ini
+        exec ./MediaServer -s default.pem -c ../conf/config.ini -l 0
+    ports:
+      - "${IOT_ZLM_RTMP_PORT:-1935}:1935"
+      - "${IOT_ZLM_HTTP_PORT:-8090}:80"
+      - "${IOT_ZLM_HTTPS_PORT:-8443}:443"
+      - "${IOT_ZLM_RTSP_PORT:-8554}:554"
+      - "${IOT_ZLM_RTP_PORT:-10000}:10000"
+      - "${IOT_ZLM_RTP_PORT:-10000}:10000/udp"
+      - "${IOT_ZLM_WEBRTC_PORT:-8000}:8000/udp"
 
   gb26875-gateway:
     <<: *service-defaults
@@ -401,6 +432,8 @@ services:
 
   backup-service:
     <<: *service-defaults
+    profiles: [backup]
+    restart: "no"
     image: ${IOT_BACKUP_IMAGE:-iot-platform-backup:local}
     build:
       context: .
@@ -432,7 +465,7 @@ services:
       IOT_BACKUP_INTERVAL: ${IOT_BACKUP_INTERVAL:-24h}
       IOT_BACKUP_INCREMENTAL_INTERVAL: ${IOT_BACKUP_INCREMENTAL_INTERVAL:-15m}
       IOT_BACKUP_ADMIN_TOKEN: ${IOT_BACKUP_ADMIN_TOKEN:-change-me-backup-admin-token}
-    ports: ["127.0.0.1:${IOT_BACKUP_HTTP_PORT:-8090}:8090"]
+    ports: ["127.0.0.1:${IOT_BACKUP_HTTP_PORT:-8092}:8090"]
     volumes:
       - backup-staging:/app/data/backups
       - postgres-wal:/sources/postgres-wal:ro

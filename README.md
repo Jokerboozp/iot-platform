@@ -348,9 +348,9 @@ kubectl apply -f deploy/k8s/platform.yaml
 
 ### 智能巡检操作约定
 
-进入“智能巡检”页面只展示说明和空状态，不会自动触发请求；只有点击“立即巡检”才开始。本次巡检先由平台计算设备数量、状态、最近上报时间和活动告警，再让 AI 生成文字建议；即使 AI 不可用，确定性巡检结果仍然可查看。巡检按钮带有加载状态，重复点击不会并发发起同一页面的巡检。
+进入“智能巡检”页面只展示说明和空状态，不会自动触发请求；只有点击“立即巡检”才开始。本次巡检先由平台计算设备数量、状态、最近上报时间和活动告警，再让 AI 生成文字建议；即使 AI 不可用，确定性巡检结果仍然可查看。巡检按钮带有加载状态，重复点击不会并发发起同一页面的巡检；完成后可点击“下载 PDF”导出同一份已核实快照和建议。
 
-“告警规则”支持人工新建、编辑、启停和删除，也支持 AI 生成默认禁用的规则草稿。规则可以在条件满足时产生告警、打开摄像头或通过实时 Topic 打开允许的前端页面；AI 不会直接启用规则，必须由用户在规则页检查后确认。
+“告警规则”支持人工新建、编辑、启停和删除，也支持 AI 生成默认禁用的规则草稿。规则可以在条件满足时产生告警、打开摄像头或通过实时 Topic 打开允许的前端页面；AI 不会直接启用规则，必须由用户在规则页检查后确认。草稿返回纯 JSON、字段含义说明和等价的 Gengine 表达式；Gengine 默认只以注释占位符展示，人工填入后才参与运行。
 
 “原始报文”同时展示原始内容、解析状态、解析器和标准消息结果。协议包发布并绑定到产品后，新报文会沿同一 Parser Registry 链路解析；解析失败会保留原始证据并进入失败处理链路。
 
@@ -368,9 +368,9 @@ kubectl apply -f deploy/k8s/platform.yaml
 | 状态管理 | ONLINE、OFFLINE、SUSPECTED_OFFLINE 与多维离线判定 |
 | 规则与告警 | JSON/Gengine、物模型校验、冲突检测、告警生命周期和审计 |
 | 实时推送 | EMQX JWT、租户 Topic ACL、WebSocket 状态和告警推送 |
-| 视频 | HMAC Webhook、摄像头映射、融合告警、HLS/MP4/WebM 预览 |
+| 视频 | HMAC Webhook、摄像头映射、设备/楼层/房间多对多关系、直连与大华适配器、海康官方 Artemis Go 客户端、ZLMediaKit HLS 预览、融合告警 |
 | AI Provider | Eino 编排、Ollama、DeepSeek、OpenAI-compatible 适配器 |
-| AI 工作流 | DeepSeek Harness 源码运行时、SSE、工具卡片、轨迹、告警研判、知识库绑定、Agent 管理、设备巡检和取消 |
+| AI 工作流 | DeepSeek Harness 源码运行时、SSE、工具卡片、轨迹、告警研判、知识库绑定、Agent 管理、设备巡检和取消、健康巡检 PDF |
 | MCP | Streamable HTTP、租户隔离、只读查询工具和调用审计 |
 | 回放 | DRY_RUN、REINGEST、DIFF、指定解析器版本和限速 |
 | 备份 | PostgreSQL/WAL、ClickHouse、Redis、MinIO-DR、校验与恢复演练 |
@@ -435,7 +435,7 @@ docs                          AI Harness、ThingsPanel 和覆盖说明
 | 平台 API | `http://localhost:8081` |
 | DeepSeek Harness | `http://127.0.0.1:8091` |
 | GB/T 26875 网关（可选） | `tcp://localhost:26875` / `udp://localhost:26875` |
-| 备份服务 | `http://127.0.0.1:8090` |
+| 备份服务（可选，默认不启动） | `http://127.0.0.1:8092` |
 | EMQX MQTT | `tcp://localhost:1883` |
 | EMQX WebSocket | `ws://localhost:8083/mqtt` |
 | EMQX Dashboard | `http://localhost:18083` |
@@ -460,6 +460,7 @@ Compose profiles：
 | `harness` | DeepSeek Harness 插件工作流 | `docker compose --profile harness up -d --build` |
 | `ai` | Ollama 与 Weaviate | `docker compose --profile ai up -d --build` |
 | `thingspanel` | ThingsPanel 上游前后端 | `docker compose --profile thingspanel up -d --build` |
+| `backup` | 备份与恢复演练服务 | `docker compose --profile backup up -d --build backup-service` |
 
 ### GB/T 26875 设备接入示例
 
@@ -676,7 +677,7 @@ AI 页面“管理中心 → Provider 测试与配置”支持 DeepSeek、Ollama
 
 ## 14. 摄像头映射与视频流预览
 
-摄像头映射用于把视频平台的 `cameraId` 与平台设备、建筑、区域等空间信息关联。视频告警到达后，平台可以结合附近传感器状态、设备属性和当前告警完成跨源研判。
+摄像头映射用于把视频平台的 `cameraId` 与平台设备、楼层、房间和区域等空间信息关联。摄像头与这些对象通过规范化关系表实现多对多，既可从摄像头查看关联对象，也可通过关系接口按设备、楼层或房间反向查询摄像头。视频告警到达后，平台可以结合附近传感器状态、设备属性和当前告警完成跨源研判。
 
 浏览器预览支持：
 
@@ -684,7 +685,14 @@ AI 页面“管理中心 → Provider 测试与配置”支持 DeepSeek、Ollama
 - MP4
 - WebM
 
-浏览器不能直接播放 RTSP/RTMP。需要先通过 MediaMTX、ZLMediaKit 等媒体网关转换为 HLS、WebRTC 或浏览器支持的文件流。
+浏览器不能直接播放 RTSP/RTMP。Compose 默认启动 ZLMediaKit，平台预览服务会通过 `addStreamProxy` 创建拉流代理并返回 HLS 播放地址；也可以直接配置已 allowlist 的 HLS/MP4/WebM 地址。官方 ZLMediaKit 的 HTTP API 和播放 URL 约定见 [HTTP API](https://github.com/ZLMediaKit/ZLMediaKit/wiki/MediaServer%E6%94%AF%E6%8C%81%E7%9A%84HTTP-API) 和 [播放 URL 规则](https://github.com/ZLMediaKit/ZLMediaKit/wiki/%E6%92%AD%E6%94%BEurl%E8%A7%84%E5%88%99)。
+
+摄像头接入方式有三种：直接直播地址、`dahua_sdk`、`hikvision_sdk`。海康方式由 Go
+进程直接调用官方 Artemis OpenAPI 的 `/artemis/api/video/v2/cameras/previewURLs`，用
+`IOT_VIDEO_HIKVISION_APP_KEY`/`IOT_VIDEO_HIKVISION_APP_SECRET` 签名，每次预览重新获取
+短时效地址；平台不调用或依赖已有 Java 服务，也不在摄像头表保存厂商密码。返回的
+RTSP/RTMP 地址再交给 ZLMediaKit 转换。配置和验收边界见
+[视频 SDK 适配器契约](docs/VIDEO_SDK_ADAPTER.md)。
 
 允许预览的媒体 Origin：
 
@@ -694,6 +702,21 @@ IOT_VIDEO_PREVIEW_CSP_SOURCES=https://video.example.internal http://localhost:88
 ```
 
 `IOT_VIDEO_PREVIEW_ALLOWED_ORIGINS` 使用逗号分隔的精确 Origin；`IOT_VIDEO_PREVIEW_CSP_SOURCES` 使用空格分隔。HLS 主播放列表、子播放列表和分片使用到的 Origin 都必须包含。
+
+ZLMediaKit 配置示例：
+
+```dotenv
+IOT_VIDEO_MEDIA_ALLOWED_HOSTS=camera.example.internal,dahua-sdk.internal,hikvision-sdk.internal
+IOT_VIDEO_ZLM_API_URL=http://zlm:80
+IOT_VIDEO_ZLM_PLAYBACK_BASE_URL=https://video.example.internal
+IOT_VIDEO_ZLM_SECRET=<与 ZLMediaKit api.secret 相同的随机值>
+IOT_VIDEO_ZLM_VHOST=__defaultVhost__
+IOT_VIDEO_ZLM_APP=iot
+IOT_VIDEO_DAHUA_SDK_URL=http://dahua-sdk.internal:8080/stream
+IOT_VIDEO_HIKVISION_API_URL=https://hikcentral.example.internal
+IOT_VIDEO_HIKVISION_APP_KEY=<Artemis AppKey>
+IOT_VIDEO_HIKVISION_APP_SECRET=<Artemis AppSecret>
+```
 
 未配置白名单时可以保存摄像头映射，但 API 会拒绝创建浏览器预览，防止利用媒体 URL 探测内网。
 
@@ -772,6 +795,7 @@ POST         /api/v1/ai/chat/stream
 GET          /api/v1/ai/alarm-analysis/{alarmId}
 POST         /api/v1/ai/alarm-analysis/{alarmId}/run
 POST         /api/v1/ai/health-inspection
+POST         /api/v1/ai/health-inspection/pdf
 POST         /api/v1/ai/protocol-assistant/generate
 POST         /api/v1/ai/protocol-assistant/preview
 POST         /api/v1/ai/protocol-assistant/publish
@@ -779,6 +803,7 @@ POST         /api/v1/ai/rule-draft
 POST         /api/v1/ai/reports
 GET/POST     /api/v1/knowledge/documents
 GET/POST/PUT /api/v1/integrations/video/cameras[/{id}]
+GET          /api/v1/integrations/video/relations?relationType=device&targetId={id}
 POST         /api/v1/integrations/video/cameras/{id}/preview
 POST         /api/v1/integrations/video/alarm
 POST         /api/v1/mqtt/token
@@ -833,7 +858,16 @@ Harness 使用独立的 `/mcp/harness`，仅接受平台签发的短期内部令
 
 ## 18. 备份与恢复
 
-`backup-service` 默认每天全量备份、每 15 分钟执行增量任务，覆盖 PostgreSQL/WAL、ClickHouse、Redis、MinIO、Redpanda/EMQX 配置和可选 Weaviate 快照。
+`backup-service` 现在是可选服务，普通 `docker compose up -d` 不会启动它，也不会执行定时备份。容器还使用 `restart: "no"`，手动启动后 Docker 或主机重启也不会自动拉起。需要备份时手动启用 `backup` profile；启用后默认每天全量备份、每 15 分钟执行增量任务，覆盖 PostgreSQL/WAL、ClickHouse、Redis、MinIO、Redpanda/EMQX 配置和可选 Weaviate 快照。
+
+启动或停止备份服务：
+
+```powershell
+docker compose --profile backup up -d --build backup-service
+docker compose --profile backup stop backup-service
+```
+
+已有环境如果之前启动过备份服务，需要先执行一次 `stop`；`backup-staging` 数据卷不会被自动删除，历史备份数据仍会保留。
 
 登录前端后进入“运行中心 → 备份中心”，可以查看全量、增量和恢复演练记录，打开任务详情查看 manifest 中的制品清单与 SHA-256。管理员可以在页面触发全量/增量备份、下载制品和执行非破坏性恢复演练；普通查看账号只能查看记录和文件元数据。页面通过 `platform-api` 代理访问 `backup-service`，浏览器不会接触备份管理令牌。
 
@@ -843,8 +877,8 @@ Compose 默认使用 `IOT_BACKUP_URL=http://backup-service:8090`，并将同一�
 
 ```powershell
 $backupHeaders = @{Authorization='Bearer change-me-backup-admin-token'}
-Invoke-RestMethod -Method Post 'http://localhost:8090/backup?type=FULL' -Headers $backupHeaders
-Invoke-RestMethod -Method Post 'http://localhost:8090/restore/drill?backupId=latest' -Headers $backupHeaders
+Invoke-RestMethod -Method Post 'http://localhost:8092/backup?type=FULL' -Headers $backupHeaders
+Invoke-RestMethod -Method Post 'http://localhost:8092/restore/drill?backupId=latest' -Headers $backupHeaders
 ```
 
 恢复演练只读取制品、校验哈希并记录结果，不覆盖当前数据。生产恢复必须先在隔离环境验证。

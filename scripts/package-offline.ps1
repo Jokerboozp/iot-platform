@@ -132,6 +132,7 @@ function New-OfflineEnv {
             "MINIO_ROOT_PASSWORD", "MINIO_DR_ROOT_PASSWORD", "IOT_JWT_SECRET",
             "IOT_ADMIN_USER", "IOT_ADMIN_PASSWORD", "IOT_ADMIN_TENANTS",
             "IOT_VIDEO_PLATFORM_SECRETS", "IOT_BACKUP_ADMIN_TOKEN",
+            "IOT_VIDEO_ZLM_SECRET",
             "EMQX_DASHBOARD_USER", "EMQX_DASHBOARD_PASSWORD",
             "GRAFANA_ADMIN_USER", "GRAFANA_ADMIN_PASSWORD"
         )
@@ -155,6 +156,7 @@ function New-OfflineEnv {
         $jwtSecret = New-RandomHex -Bytes 32
         $adminPassword = "Admin-" + (New-RandomHex -Bytes 12)
         $videoSecret = New-RandomHex -Bytes 24
+        $zlmSecret = New-RandomHex -Bytes 24
         $harnessToken = New-RandomHex -Bytes 32
         $backupToken = New-RandomHex -Bytes 32
         $emqxPassword = "Emqx-" + (New-RandomHex -Bytes 12)
@@ -182,6 +184,12 @@ function New-OfflineEnv {
             "IOT_VIDEO_MEDIA_ALLOWED_HOSTS=",
             "IOT_VIDEO_PREVIEW_ALLOWED_ORIGINS=",
             "IOT_VIDEO_PREVIEW_CSP_SOURCES=",
+            "IOT_VIDEO_ZLM_API_URL=http://zlm:80",
+            "IOT_VIDEO_ZLM_PLAYBACK_BASE_URL=http://localhost:8090",
+            "IOT_VIDEO_ZLM_SECRET=$zlmSecret",
+            "IOT_VIDEO_ZLM_VHOST=__defaultVhost__",
+            "IOT_VIDEO_ZLM_APP=iot",
+            "IOT_ZLM_IMAGE=zlmediakit/zlmediakit:master",
             "IOT_OLLAMA_URL=$ollamaUrl",
             "IOT_OLLAMA_MODEL=$OllamaModel",
             "IOT_AI_PROVIDER=$aiProvider",
@@ -223,6 +231,7 @@ function New-OfflineEnv {
         [void]$credentialLines.Add("ClickHouse 密码：$clickhousePassword")
         [void]$credentialLines.Add("MinIO 主密码：$minioPassword")
         [void]$credentialLines.Add("MinIO 灾备密码：$minioDrPassword")
+        [void]$credentialLines.Add("ZLMediaKit API Secret：$zlmSecret")
     }
 
     $imageValues = [ordered]@{
@@ -330,7 +339,7 @@ $thingsPanelImages = New-Object 'System.Collections.Generic.List[string]'
 
 try {
     $pullServices = @(
-        "postgres", "postgres-wal-init", "redis", "minio", "minio-dr",
+        "zlm", "postgres", "postgres-wal-init", "redis", "minio", "minio-dr",
         "redpanda", "redpanda-init", "clickhouse", "emqx", "prometheus",
         "grafana", "loki"
     )

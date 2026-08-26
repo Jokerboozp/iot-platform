@@ -22,6 +22,7 @@ import (
 	"iot-platform/internal/adapters/postgres"
 	redisadapter "iot-platform/internal/adapters/redis"
 	thingspaneladapter "iot-platform/internal/adapters/thingspanel"
+	videoadapter "iot-platform/internal/adapters/video"
 	"iot-platform/internal/auth"
 	"iot-platform/internal/config"
 	"iot-platform/internal/core"
@@ -105,6 +106,23 @@ func main() {
 	engine := core.New(repo, archivePort, bus, realtime, parsers, log)
 	engine.VideoMediaAllowedHosts = cfg.VideoMediaHosts
 	engine.RequireVideoCameraMapping = !cfg.DevMode
+	var hikvisionResolver videoadapter.StreamResolver
+	if cfg.HikvisionVideoAPIURL != "" || cfg.HikvisionAppKey != "" || cfg.HikvisionAppSecret != "" {
+		resolver, resolverErr := videoadapter.NewHikvisionArtemis(videoadapter.HikvisionArtemisConfig{
+			BaseURL: cfg.HikvisionVideoAPIURL, AppKey: cfg.HikvisionAppKey, AppSecret: cfg.HikvisionAppSecret,
+		})
+		fatal(log, "initialize official Hikvision Go adapter", resolverErr)
+		hikvisionResolver = resolver
+	}
+	videoPreview, videoPreviewErr := videoadapter.New(videoadapter.Config{
+		ZLMAPIURL: cfg.VideoZLMAPIURL, ZLMPlaybackBaseURL: cfg.VideoZLMPlaybackURL, ZLMSecret: cfg.VideoZLMSecret,
+		ZLMVhost: cfg.VideoZLMVhost, ZLMApp: cfg.VideoZLMApp,
+		DahuaSDKURL: cfg.DahuaVideoSDKURL, DahuaSDKToken: cfg.DahuaVideoSDKToken,
+		HikvisionAPIURL: cfg.HikvisionVideoAPIURL, HikvisionResolver: hikvisionResolver,
+		AllowedSourceHosts: cfg.VideoMediaHosts,
+	})
+	fatal(log, "initialize video preview", videoPreviewErr)
+	engine.VideoPreview = videoPreview
 	engine.Metrics = registry
 	aiPlugins := aiadapter.NewProviderRegistry()
 	engine.AIPlugins = aiPlugins

@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"iot-platform/internal/adapters/local"
@@ -92,11 +93,72 @@ func (protocolEndpointAI) AnalyzeAlarm(context.Context, model.Alarm, []map[strin
 }
 func (protocolEndpointAI) Chat(context.Context, string, string) (string, error) { return "ok", nil }
 func (protocolEndpointAI) RuleDraft(context.Context, string, string) (model.AlarmRule, error) {
-	return model.AlarmRule{}, nil
+	return model.AlarmRule{
+		Name:        "AI 高温烟雾规则",
+		Description: "温度持续过高且烟雾信号出现时提示人工处置",
+		AlarmType:   "FIRE_RISK",
+		Level:       "HIGH",
+		Match:       "all",
+		Conditions: []model.RuleCondition{
+			{Field: "properties.temperature", Operator: ">", Value: 80},
+			{Field: "properties.smoke", Operator: "eq", Value: true},
+		},
+		Recovery: []model.RuleCondition{{Field: "properties.temperature", Operator: "lt", Value: 70}},
+		Actions:  []model.RuleAction{{Type: "OPEN_PAGE", Page: "alarms"}},
+	}, nil
 }
 func (protocolEndpointAI) Health(context.Context) error { return nil }
 func (protocolEndpointAI) GenerateJSON(context.Context, string, string, string) (string, error) {
 	return `{"name":"端点测试协议","protocol":"endpoint-modbus","transport":"MODBUS_TCP","payloadFormat":"hex","parserType":"modbus_coil_parser","messageType":"PROPERTY_REPORT","config":{"frame":"tcp","startAddress":0,"functionCode":1,"fields":[{"name":"smoke","coilAddress":0}]},"fields":[{"name":"smoke","label":"烟雾","type":"boolean","coilAddress":0,"dataType":"BOOL"}]}`, nil
+}
+
+func TestAIRuleDraftReturnsAnnotatedJSONAndCommentedGengine(t *testing.T) {
+	repo := memory.NewRepository()
+	archive, err := local.NewArchive(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := core.New(repo, archive, local.NewBus(), local.NewRealtime(), parser.NewRegistry(parser.JSONParser{}), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine.AI = protocolEndpointAI{}
+	engine.Metrics = metrics.New()
+	if err = engine.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Load()
+	cfg.DevMode = true
+	cfg.JWTSecret = "test-secret-at-least-32-characters"
+	api := New(cfg, engine, engine.Metrics.(*metrics.Registry), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server := httptest.NewServer(api.Handler())
+	defer server.Close()
+	login := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/auth/login", "", map[string]any{"username": "admin", "password": "admin123", "tenantId": "tenant_001"}, http.StatusOK)
+	token := login["accessToken"].(string)
+	result := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/ai/rule-draft", token, map[string]any{"text": "温度超过 80 且烟雾出现"}, http.StatusOK)
+
+	draft := result["draft"].(map[string]any)
+	if draft["enabled"] != false || draft["expression"] != nil || draft["tenantId"] != "tenant_001" {
+		t.Fatalf("AI rule draft was not kept as a safe tenant draft: %#v", draft)
+	}
+	presentation := result["presentation"].(map[string]any)
+	var executableJSON map[string]any
+	if err := json.Unmarshal([]byte(presentation["json"].(string)), &executableJSON); err != nil {
+		t.Fatalf("presentation JSON is not executable JSON: %v", err)
+	}
+	if presentation["gengine"].(string) == "" || !strings.HasPrefix(strings.TrimSpace(presentation["genginePlaceholder"].(string)), "//") {
+		t.Fatalf("Gengine presentation is not an explicitly commented alternative: %#v", presentation)
+	}
+	descriptions := presentation["fieldDescriptions"].([]any)
+	needed := map[string]bool{"conditions[].field": false, "recovery[].value": false, "actions[].page": false}
+	for _, item := range descriptions {
+		field := item.(map[string]any)["field"].(string)
+		if _, ok := needed[field]; ok {
+			needed[field] = true
+		}
+	}
+	for field, found := range needed {
+		if !found {
+			t.Fatalf("missing nested field description %q", field)
+		}
+	}
 }
 
 func TestProtocolAssistantEndpoints(t *testing.T) {

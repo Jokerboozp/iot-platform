@@ -66,6 +66,13 @@ func evaluateGengine(expression string, msg model.StandardMessage, execute bool)
 	expression = bindExpressionFields(expression, dc, msg)
 	dc.Add("Message", msg)
 	dc.Add("MarkMatched", func() { matched = true })
+	dc.Add("Contains", func(value, target any) bool {
+		return strings.Contains(fmt.Sprint(value), fmt.Sprint(target))
+	})
+	dc.Add("Exists", func(field string) bool {
+		_, ok := fieldValue(msg, field)
+		return ok
+	})
 	rb := builder.NewRuleBuilder(dc)
 	ruleText := "rule \"iot_expression\" \"controlled expression\"\nbegin\nif " + expression + " { MarkMatched() }\nend"
 	if err := rb.BuildRuleFromString(ruleText); err != nil {

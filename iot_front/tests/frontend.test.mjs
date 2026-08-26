@@ -100,6 +100,14 @@ test('AI workbench uses cancellable SSE workflows and stable message keys', asyn
   assert.match(sseSource, /getReader\(\)/)
 })
 
+test('switching away from the add-custom Provider hides its profile editor', async () => {
+  const aiView = await readFile(new URL('src/views/AiView.vue', root), 'utf8')
+  const providerWatch = aiView.match(/watch\(\(\) => sandbox\.provider, \(\) => \{([\s\S]*?)\n\}\)/)?.[1]
+  assert.ok(providerWatch, 'Provider selection watcher must remain explicit')
+  const nonCustomBranch = providerWatch.split('if (sandbox.provider === customProviderOptionId)')[1]
+  assert.match(nonCustomBranch, /providerProfileEditorVisible\.value = false/, 'built-in Provider selection must close the custom profile editor')
+})
+
 test('protocol mappings, parsed raw results and device connection state are visible', async () => {
   const protocols = await readFile(new URL('src/views/ProtocolsView.vue', root), 'utf8')
   const raw = await readFile(new URL('src/views/RawView.vue', root), 'utf8')

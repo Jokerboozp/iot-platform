@@ -21,6 +21,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"iot-platform/internal/auth"
@@ -40,20 +41,37 @@ type ctxKey string
 const claimsKey ctxKey = "claims"
 
 type Server struct {
-	cfg     config.Config
-	engine  *core.Engine
-	auth    *auth.Manager
-	metrics *metrics.Registry
-	log     *slog.Logger
-	router  *gin.Engine
+	cfg                   config.Config
+	engine                *core.Engine
+	auth                  *auth.Manager
+	metrics               *metrics.Registry
+	log                   *slog.Logger
+	router                *gin.Engine
+	healthInspectionMu    sync.RWMutex
+	healthInspectionCache map[string]healthInspectionSnapshot
 }
+
+type healthInspectionSnapshot struct {
+	report    model.DeviceHealthReport
+	expiresAt time.Time
+}
+
+const healthInspectionCacheTTL = 10 * time.Minute
 
 func New(cfg config.Config, engine *core.Engine, m *metrics.Registry, log *slog.Logger) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	router.HandleMethodNotAllowed = true
 	router.RedirectTrailingSlash = false
-	s := &Server{cfg: cfg, engine: engine, auth: auth.New(cfg.JWTSecret), metrics: m, log: log, router: router}
+	s := &Server{
+		cfg:                   cfg,
+		engine:                engine,
+		auth:                  auth.New(cfg.JWTSecret),
+		metrics:               m,
+		log:                   log,
+		router:                router,
+		healthInspectionCache: make(map[string]healthInspectionSnapshot),
+	}
 	router.Use(s.cors(), s.security(), s.accessLog(), s.recovery())
 	s.routes()
 	return s
@@ -69,6 +87,7 @@ func (s *Server) routes() {
 	}))
 	s.router.POST("/api/v1/integrations/video/alarm", s.endpoint(s.videoWebhook))
 	s.router.GET("/api/v1/integrations/video/cameras", s.authorize("viewer"), s.endpoint(s.videoCameras))
+	s.router.GET("/api/v1/integrations/video/relations", s.authorize("viewer"), s.endpoint(s.videoRelations))
 	s.router.POST("/api/v1/integrations/video/cameras", s.authorize("operator"), s.endpoint(s.saveVideoCamera))
 	s.router.PUT("/api/v1/integrations/video/cameras/:id", s.authorize("operator"), s.endpoint(s.saveVideoCamera, "id"))
 	s.router.POST("/api/v1/integrations/video/cameras/:id/preview", s.authorize("viewer"), s.endpoint(s.previewVideoCamera, "id"))
@@ -116,6 +135,7 @@ func (s *Server) routes() {
 	s.router.GET("/api/v1/ai/alarm-analysis/:alarmId", s.authorize("viewer"), s.endpoint(s.aiAnalysis, "alarmId"))
 	s.router.POST("/api/v1/ai/alarm-analysis/:alarmId/run", s.authorize("operator"), s.endpoint(s.runAIAlarmAnalysis, "alarmId"))
 	s.router.POST("/api/v1/ai/health-inspection", s.authorize("viewer"), s.endpoint(s.healthInspection))
+	s.router.POST("/api/v1/ai/health-inspection/pdf", s.authorize("viewer"), s.endpoint(s.healthInspectionPDF))
 	s.router.POST("/api/v1/ai/protocol-assistant/generate", s.authorize("operator"), s.endpoint(s.generateProtocolAssistant))
 	s.router.POST("/api/v1/ai/protocol-assistant/preview", s.authorize("operator"), s.endpoint(s.previewProtocolAssistant))
 	s.router.POST("/api/v1/ai/protocol-assistant/publish", s.authorize("operator"), s.endpoint(s.publishProtocolAssistant))
@@ -1875,6 +1895,10 @@ func (s *Server) aiRuleDraft(w http.ResponseWriter, r *http.Request) {
 	c := claims(r)
 	rule.TenantID = c.TenantID
 	rule.Enabled = false
+	// AI drafts always start from the executable JSON condition form. A model
+	// response must not smuggle an already-active Gengine expression into the
+	// editor; the generated alternative is shown as a commented placeholder.
+	rule.Expression = ""
 	if rule.ID == "" {
 		rule.ID = "rule_draft_" + randomHex(8)
 	}
@@ -1893,9 +1917,14 @@ func (s *Server) aiRuleDraft(w http.ResponseWriter, r *http.Request) {
 		problem(w, 422, validationErr.Error())
 		return
 	}
+	presentation, presentationErr := core.PresentRule(rule)
+	if presentationErr != nil {
+		problem(w, http.StatusInternalServerError, presentationErr.Error())
+		return
+	}
 	_ = s.engine.Repo.SaveAudit(r.Context(), model.AuditLog{ID: fmt.Sprintf("audit_%d", time.Now().UnixNano()), TenantID: c.TenantID, Actor: c.Username, Action: "ai.rule_draft", TargetType: "rule", TargetID: rule.ID, Details: map[string]any{"success": true}, CreatedAt: time.Now().UnixMilli()})
 	_ = s.engine.Repo.SaveAIToolCall(r.Context(), model.AIToolCallLog{ID: "tool_" + randomHex(8), TenantID: c.TenantID, Actor: c.Username, Tool: "ai.rule_draft", Input: map[string]any{"text": in.Text}, Output: rule, Success: true, CreatedAt: time.Now().UnixMilli()})
-	write(w, 200, map[string]any{"draft": rule, "requiresHumanApproval": true, "schemaValid": true, "warnings": warnings, "conflicts": conflicts})
+	write(w, 200, map[string]any{"draft": rule, "presentation": presentation, "requiresHumanApproval": true, "schemaValid": true, "warnings": warnings, "conflicts": conflicts})
 }
 
 func (s *Server) aiReport(w http.ResponseWriter, r *http.Request) {
@@ -2151,15 +2180,35 @@ func (s *Server) videoCameras(w http.ResponseWriter, r *http.Request) {
 	}
 	canConfigure := claims(r).Role == "admin" || claims(r).Role == "operator"
 	for index := range items {
-		items[index].StreamConfigured = strings.TrimSpace(items[index].StreamURL) != ""
-		streamType, streamErr := resolveBrowserStreamType(items[index].StreamURL, items[index].StreamType)
-		browserType := streamType == "hls" || streamType == "mp4" || streamType == "webm" || streamType == "native"
-		items[index].PreviewEligible = items[index].Enabled && streamErr == nil && browserType && streamOriginAllowed(items[index].StreamURL, s.cfg.VideoPreviewOrigins)
+		items[index].StreamConfigured = strings.TrimSpace(items[index].StreamURL) != "" || strings.TrimSpace(items[index].SDKCameraID) != ""
+		if s.engine.VideoPreview != nil {
+			items[index].PreviewEligible = s.engine.VideoPreview.Eligible(items[index], s.cfg.VideoPreviewOrigins)
+		} else {
+			streamType, streamErr := resolveBrowserStreamType(items[index].StreamURL, items[index].StreamType)
+			browserType := streamType == "hls" || streamType == "mp4" || streamType == "webm" || streamType == "native"
+			items[index].PreviewEligible = items[index].Enabled && streamErr == nil && browserType && streamOriginAllowed(items[index].StreamURL, s.cfg.VideoPreviewOrigins)
+		}
 		if !canConfigure {
 			items[index].StreamURL = ""
+			items[index].SDKEndpoint = ""
+			items[index].SDKCredentialRef = ""
 		}
 	}
 	writeList(w, 200, items, total, pagination, nil)
+}
+func (s *Server) videoRelations(w http.ResponseWriter, r *http.Request) {
+	relationType := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("relationType")))
+	targetID := strings.TrimSpace(r.URL.Query().Get("targetId"))
+	if !oneOf(relationType, "device", "floor", "room") || targetID == "" {
+		problem(w, http.StatusUnprocessableEntity, "relationType must be device, floor or room and targetId is required")
+		return
+	}
+	relations, err := s.engine.Repo.ListVideoCameraRelationsByTarget(r.Context(), claims(r).TenantID, relationType, targetID)
+	if err != nil {
+		problem(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	write(w, http.StatusOK, map[string]any{"items": relations, "relationType": relationType, "targetId": targetID})
 }
 func (s *Server) saveVideoCamera(w http.ResponseWriter, r *http.Request) {
 	var v model.VideoCameraMapping
@@ -2171,8 +2220,30 @@ func (s *Server) saveVideoCamera(w http.ResponseWriter, r *http.Request) {
 	if id := r.PathValue("id"); id != "" {
 		v.CameraID = id
 	}
-	if v.CameraID == "" || v.CameraName == "" || v.AreaID == "" {
-		problem(w, 422, "cameraId, cameraName and areaId are required")
+	if v.CameraID == "" || v.CameraName == "" {
+		problem(w, 422, "cameraId and cameraName are required")
+		return
+	}
+	v.IngestMode = strings.ToLower(strings.TrimSpace(v.IngestMode))
+	if v.IngestMode == "" {
+		v.IngestMode = "direct"
+	}
+	if !oneOf(v.IngestMode, "direct", "dahua_sdk", "hikvision_sdk") {
+		problem(w, 422, "ingestMode must be direct, dahua_sdk or hikvision_sdk")
+		return
+	}
+	v.RelatedDeviceIDs = cleanStringList(v.RelatedDeviceIDs, 128, 128)
+	v.RelatedFloorIDs = cleanStringList(v.RelatedFloorIDs, 128, 128)
+	v.RelatedRoomIDs = cleanStringList(v.RelatedRoomIDs, 128, 128)
+	if v.Floor != "" {
+		v.RelatedFloorIDs = cleanStringList(append(v.RelatedFloorIDs, v.Floor), 128, 128)
+	}
+	if v.IngestMode == "direct" && v.StreamURL == "" {
+		problem(w, 422, "direct ingest requires streamUrl")
+		return
+	}
+	if v.IngestMode != "direct" && strings.TrimSpace(v.SDKCameraID) == "" {
+		problem(w, 422, "SDK ingest requires sdkCameraId")
 		return
 	}
 	if v.StreamURL != "" {
@@ -2199,6 +2270,19 @@ func (s *Server) previewVideoCamera(w http.ResponseWriter, r *http.Request) {
 	}
 	if !v.Enabled {
 		problem(w, 422, "camera is disabled")
+		return
+	}
+	if s.engine.VideoPreview != nil {
+		preview, previewErr := s.engine.VideoPreview.Preview(r.Context(), v)
+		if previewErr != nil {
+			problem(w, http.StatusUnprocessableEntity, previewErr.Error())
+			return
+		}
+		if !streamOriginAllowed(preview.PlaybackURL, s.cfg.VideoPreviewOrigins) {
+			problem(w, http.StatusUnprocessableEntity, "video playback origin is not allowlisted for browser preview")
+			return
+		}
+		write(w, http.StatusOK, preview)
 		return
 	}
 	if !streamOriginAllowed(v.StreamURL, s.cfg.VideoPreviewOrigins) {

@@ -93,7 +93,7 @@ validate_env() {
     POSTGRES_PASSWORD REDIS_PASSWORD CLICKHOUSE_PASSWORD
     MINIO_ROOT_PASSWORD MINIO_DR_ROOT_PASSWORD IOT_JWT_SECRET
     IOT_ADMIN_USER IOT_ADMIN_PASSWORD IOT_ADMIN_TENANTS
-    IOT_VIDEO_PLATFORM_SECRETS IOT_BACKUP_ADMIN_TOKEN
+    IOT_VIDEO_PLATFORM_SECRETS IOT_BACKUP_ADMIN_TOKEN IOT_VIDEO_ZLM_SECRET
     EMQX_DASHBOARD_USER EMQX_DASHBOARD_PASSWORD
     GRAFANA_ADMIN_USER GRAFANA_ADMIN_PASSWORD
   )
@@ -122,6 +122,7 @@ write_env() {
     local jwt_secret="$(random_hex 32)"
     local admin_password="Admin-$(random_hex 12)"
     local video_secret="$(random_hex 24)"
+    local zlm_secret="$(random_hex 24)"
     local harness_token="$(random_hex 32)"
     local backup_token="$(random_hex 32)"
     local emqx_password="Emqx-$(random_hex 12)"
@@ -155,6 +156,12 @@ IOT_VIDEO_PLATFORM_SECRETS=video-platform-1:$video_secret
 IOT_VIDEO_MEDIA_ALLOWED_HOSTS=
 IOT_VIDEO_PREVIEW_ALLOWED_ORIGINS=
 IOT_VIDEO_PREVIEW_CSP_SOURCES=
+IOT_VIDEO_ZLM_API_URL=http://zlm:80
+IOT_VIDEO_ZLM_PLAYBACK_BASE_URL=http://localhost:8090
+IOT_VIDEO_ZLM_SECRET=$zlm_secret
+IOT_VIDEO_ZLM_VHOST=__defaultVhost__
+IOT_VIDEO_ZLM_APP=iot
+IOT_ZLM_IMAGE=zlmediakit/zlmediakit:master
 IOT_OLLAMA_URL=$ollama_url
 IOT_OLLAMA_MODEL=$ollama_model
 IOT_AI_PROVIDER=$ai_provider
@@ -198,6 +205,7 @@ Redis 密码：$redis_password
 ClickHouse 密码：$clickhouse_password
 MinIO 主密码：$minio_password
 MinIO 灾备密码：$minio_dr_password
+ZLMediaKit API Secret：$zlm_secret
 EOF
   fi
 
@@ -292,7 +300,7 @@ add_profile() {
 (( include_gb26875 )) && add_profile gb26875
 
 pull_services=(
-  postgres postgres-wal-init redis minio minio-dr redpanda redpanda-init
+  zlm postgres postgres-wal-init redis minio minio-dr redpanda redpanda-init
   clickhouse emqx prometheus grafana loki
 )
 run_docker compose pull "${pull_services[@]}"

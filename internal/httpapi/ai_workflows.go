@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,7 +35,60 @@ func (s *Server) healthInspection(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	s.rememberHealthInspection(claims(r).TenantID, report)
 	write(w, http.StatusOK, report)
+}
+
+func (s *Server) healthInspectionPDF(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+	tenantID := claims(r).TenantID
+	report, ok := s.recentHealthInspection(tenantID)
+	if !ok {
+		var err error
+		report, err = s.engine.InspectDeviceHealth(ctx, tenantID)
+		if err != nil {
+			problem(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		s.rememberHealthInspection(tenantID, report)
+	}
+	data, err := core.RenderHealthInspectionPDF(report)
+	if err != nil {
+		problem(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	filename := fmt.Sprintf("health-inspection-%d.pdf", report.GeneratedAt)
+	w.Header().Set("Content-Type", "application/pdf")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"; filename*=UTF-8''%s`, filename, url.QueryEscape("智能巡检结果.pdf")))
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	s.audit(r, "ai.health-inspection.download", "device-health", fmt.Sprintf("inspection_%d", report.GeneratedAt), map[string]any{"format": "pdf", "bytes": len(data)})
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+func (s *Server) rememberHealthInspection(tenantID string, report model.DeviceHealthReport) {
+	s.healthInspectionMu.Lock()
+	defer s.healthInspectionMu.Unlock()
+	if s.healthInspectionCache == nil {
+		s.healthInspectionCache = make(map[string]healthInspectionSnapshot)
+	}
+	s.healthInspectionCache[tenantID] = healthInspectionSnapshot{report: report, expiresAt: time.Now().Add(healthInspectionCacheTTL)}
+}
+
+func (s *Server) recentHealthInspection(tenantID string) (model.DeviceHealthReport, bool) {
+	s.healthInspectionMu.RLock()
+	snapshot, ok := s.healthInspectionCache[tenantID]
+	s.healthInspectionMu.RUnlock()
+	if !ok || time.Now().After(snapshot.expiresAt) {
+		if ok {
+			s.healthInspectionMu.Lock()
+			delete(s.healthInspectionCache, tenantID)
+			s.healthInspectionMu.Unlock()
+		}
+		return model.DeviceHealthReport{}, false
+	}
+	return snapshot.report, true
 }
 
 func (s *Server) generateProtocolAssistant(w http.ResponseWriter, r *http.Request) {

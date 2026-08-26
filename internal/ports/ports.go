@@ -76,6 +76,9 @@ type Repository interface {
 	GetVideoCameraMapping(context.Context, string, string) (model.VideoCameraMapping, error)
 	ListVideoCameraMappings(context.Context, string) ([]model.VideoCameraMapping, error)
 	ListVideoCameraMappingsPage(context.Context, string, int, int) ([]model.VideoCameraMapping, int, error)
+	ReplaceVideoCameraRelations(context.Context, string, string, []model.VideoCameraRelation) error
+	ListVideoCameraRelations(context.Context, string, string) ([]model.VideoCameraRelation, error)
+	ListVideoCameraRelationsByTarget(context.Context, string, string, string) ([]model.VideoCameraRelation, error)
 	SaveAIAnalysis(context.Context, model.AIAnalysis) error
 	GetAIAnalysis(context.Context, string, string) (model.AIAnalysis, error)
 	SaveKnowledgeDoc(context.Context, model.KnowledgeDoc) error
@@ -128,6 +131,13 @@ type AIClient interface {
 // workflows to request machine-readable output.
 type AIJSONGenerator interface {
 	GenerateJSON(context.Context, string, string, string) (string, error)
+}
+
+// VideoPreviewService resolves direct or vendor-SDK camera sources and, when
+// configured, proxies them through ZLMediaKit into a browser playback URL.
+type VideoPreviewService interface {
+	Preview(context.Context, model.VideoCameraMapping) (model.VideoPreview, error)
+	Eligible(model.VideoCameraMapping, []string) bool
 }
 
 type AIPluginConfig struct {

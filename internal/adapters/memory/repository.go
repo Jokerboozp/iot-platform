@@ -27,6 +27,7 @@ type Repository struct {
 	alarms            map[string]model.Alarm
 	video             map[string]model.VideoAlarmEvent
 	videoMappings     map[string]model.VideoCameraMapping
+	videoRelations    map[string][]model.VideoCameraRelation
 	ai                map[string]model.AIAnalysis
 	knowledge         map[string]model.KnowledgeDoc
 	workflowKnowledge map[string]model.WorkflowKnowledgeBinding
@@ -39,7 +40,7 @@ type Repository struct {
 }
 
 func NewRepository() *Repository {
-	return &Repository{raw: map[string]model.RawArchiveIndex{}, standard: map[string]model.StandardMessage{}, standardProcessed: map[string]bool{}, rulePending: map[string]int64{}, states: map[string]model.DeviceState{}, rules: map[string]model.AlarmRule{}, alarms: map[string]model.Alarm{}, video: map[string]model.VideoAlarmEvent{}, videoMappings: map[string]model.VideoCameraMapping{}, ai: map[string]model.AIAnalysis{}, knowledge: map[string]model.KnowledgeDoc{}, workflowKnowledge: map[string]model.WorkflowKnowledgeBinding{}, replays: map[string]model.ReplayRequest{}, products: map[string]model.Product{}, protocols: map[string]model.ProtocolPackage{}, devices: map[string]model.ManagedDevice{}}
+	return &Repository{raw: map[string]model.RawArchiveIndex{}, standard: map[string]model.StandardMessage{}, standardProcessed: map[string]bool{}, rulePending: map[string]int64{}, states: map[string]model.DeviceState{}, rules: map[string]model.AlarmRule{}, alarms: map[string]model.Alarm{}, video: map[string]model.VideoAlarmEvent{}, videoMappings: map[string]model.VideoCameraMapping{}, videoRelations: map[string][]model.VideoCameraRelation{}, ai: map[string]model.AIAnalysis{}, knowledge: map[string]model.KnowledgeDoc{}, workflowKnowledge: map[string]model.WorkflowKnowledgeBinding{}, replays: map[string]model.ReplayRequest{}, products: map[string]model.Product{}, protocols: map[string]model.ProtocolPackage{}, devices: map[string]model.ManagedDevice{}}
 }
 
 func key(parts ...string) string { return strings.Join(parts, "\x00") }
@@ -628,6 +629,17 @@ func (r *Repository) SaveVideoCameraMapping(_ context.Context, v model.VideoCame
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.videoMappings[key(v.TenantID, v.CameraID)] = clone(v)
+	relations := make([]model.VideoCameraRelation, 0, len(v.RelatedDeviceIDs)+len(v.RelatedFloorIDs)+len(v.RelatedRoomIDs))
+	for _, target := range v.RelatedDeviceIDs {
+		relations = append(relations, model.VideoCameraRelation{TenantID: v.TenantID, CameraID: v.CameraID, RelationType: "device", TargetID: target})
+	}
+	for _, target := range v.RelatedFloorIDs {
+		relations = append(relations, model.VideoCameraRelation{TenantID: v.TenantID, CameraID: v.CameraID, RelationType: "floor", TargetID: target})
+	}
+	for _, target := range v.RelatedRoomIDs {
+		relations = append(relations, model.VideoCameraRelation{TenantID: v.TenantID, CameraID: v.CameraID, RelationType: "room", TargetID: target})
+	}
+	r.videoRelations[key(v.TenantID, v.CameraID)] = clone(relations)
 	return nil
 }
 func (r *Repository) GetVideoCameraMapping(_ context.Context, tenant, camera string) (model.VideoCameraMapping, error) {
@@ -657,6 +669,50 @@ func (r *Repository) ListVideoCameraMappingsPage(ctx context.Context, tenant str
 		return nil, 0, err
 	}
 	return page(items, offset, limit), len(items), nil
+}
+func (r *Repository) ReplaceVideoCameraRelations(_ context.Context, tenant, camera string, relations []model.VideoCameraRelation) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	copyRelations := make([]model.VideoCameraRelation, 0, len(relations))
+	for _, relation := range relations {
+		relation.TenantID, relation.CameraID = tenant, camera
+		copyRelations = append(copyRelations, relation)
+	}
+	r.videoRelations[key(tenant, camera)] = clone(copyRelations)
+	if mapping, ok := r.videoMappings[key(tenant, camera)]; ok {
+		mapping.RelatedDeviceIDs, mapping.RelatedFloorIDs, mapping.RelatedRoomIDs = nil, nil, nil
+		for _, relation := range copyRelations {
+			switch relation.RelationType {
+			case "device":
+				mapping.RelatedDeviceIDs = append(mapping.RelatedDeviceIDs, relation.TargetID)
+			case "floor":
+				mapping.RelatedFloorIDs = append(mapping.RelatedFloorIDs, relation.TargetID)
+			case "room":
+				mapping.RelatedRoomIDs = append(mapping.RelatedRoomIDs, relation.TargetID)
+			}
+		}
+		r.videoMappings[key(tenant, camera)] = clone(mapping)
+	}
+	return nil
+}
+func (r *Repository) ListVideoCameraRelations(_ context.Context, tenant, camera string) ([]model.VideoCameraRelation, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return clone(r.videoRelations[key(tenant, camera)]), nil
+}
+func (r *Repository) ListVideoCameraRelationsByTarget(_ context.Context, tenant, relationType, targetID string) ([]model.VideoCameraRelation, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := []model.VideoCameraRelation{}
+	for _, relations := range r.videoRelations {
+		for _, relation := range relations {
+			if relation.TenantID == tenant && relation.RelationType == relationType && relation.TargetID == targetID {
+				out = append(out, clone(relation))
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CameraID < out[j].CameraID })
+	return out, nil
 }
 func (r *Repository) SaveAIAnalysis(_ context.Context, v model.AIAnalysis) error {
 	r.mu.Lock()

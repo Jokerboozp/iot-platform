@@ -5,6 +5,7 @@ import { api, notifyError } from '../api'
 import VideoStreamPlayer from '../components/VideoStreamPlayer.vue'
 
 const cameras = ref([])
+const devices = ref([])
 const loading = ref(false)
 const dialogVisible = ref(false)
 const editing = ref('')
@@ -15,17 +16,22 @@ const page = ref(1)
 const pageSize = ref(20)
 const total = ref(0)
 const blank = () => ({
-  cameraId: '', cameraName: '', videoPlatformId: '', projectId: '',
+  cameraId: '', cameraName: '', ingestMode:'direct', videoPlatformId: '', projectId: '',
   cityCode: '', districtCode: '', building: '', floor: '', areaId: '',
-  relatedDeviceIds: '', streamUrl: '', streamType: '', enabled: true
+  relatedDeviceIds: [], relatedFloorIds: [], relatedRoomIds: [], streamUrl: '', streamType: '',
+  sdkEndpoint:'', sdkCameraId:'', sdkCredentialRef:'', enabled: true
 })
 const camera = reactive(blank())
 
 async function load() {
   loading.value = true
   try {
-    const data = await api(`/api/v1/integrations/video/cameras?page=${page.value}&pageSize=${pageSize.value}`)
+    const [data, deviceData] = await Promise.all([
+      api(`/api/v1/integrations/video/cameras?page=${page.value}&pageSize=${pageSize.value}`),
+      api('/api/v1/device-registry?page=1&pageSize=100')
+    ])
     cameras.value = data.items || []
+    devices.value = (deviceData.items || []).map(item => item.device || item).filter(item => item.id)
     total.value = Number(data.total ?? data.count ?? cameras.value.length)
   } catch (error) {
     notifyError(error)
@@ -37,7 +43,9 @@ async function load() {
 function open(value) {
   Object.assign(camera, blank(), value ? {
     ...value,
-    relatedDeviceIds: (value.relatedDeviceIds || []).join(',')
+    relatedDeviceIds: [...(value.relatedDeviceIds || [])],
+    relatedFloorIds: [...(value.relatedFloorIds || [])],
+    relatedRoomIds: [...(value.relatedRoomIds || [])]
   } : {})
   editing.value = value?.cameraId || ''
   dialogVisible.value = true
@@ -47,7 +55,9 @@ async function save() {
   try {
     const value = {
       ...camera,
-      relatedDeviceIds: camera.relatedDeviceIds.split(',').map(item => item.trim()).filter(Boolean)
+      relatedDeviceIds: [...new Set(camera.relatedDeviceIds.map(item => item.trim()).filter(Boolean))],
+      relatedFloorIds: [...new Set(camera.relatedFloorIds.map(item => item.trim()).filter(Boolean))],
+      relatedRoomIds: [...new Set(camera.relatedRoomIds.map(item => item.trim()).filter(Boolean))]
     }
     await api(
       editing.value
@@ -109,7 +119,7 @@ onMounted(async()=>{await load();await consumeNavigationAction()})
   <div class="page-toolbar">
     <el-button type="primary" @click="open()">新增映射</el-button>
     <el-button @click="load">刷新</el-button>
-    <span>共 {{ total }} 个映射，维护摄像头与城市、建筑、区域及物联设备的关联关系</span>
+    <span>共 {{ total }} 个映射，摄像头与设备、楼层、房间均支持多选多对多关联</span>
   </div>
 
   <el-card shadow="never" class="surface-card table-card">
@@ -117,11 +127,12 @@ onMounted(async()=>{await load();await consumeNavigationAction()})
       <el-table-column label="摄像头" min-width="180">
         <template #default="{ row }"><b>{{ row.cameraName }}</b><small class="subline">{{ row.cameraId }}</small></template>
       </el-table-column>
+      <el-table-column label="接入方式" width="130"><template #default="{ row }"><el-tag effect="plain">{{ row.ingestMode === 'dahua_sdk' ? '大华 SDK' : row.ingestMode === 'hikvision_sdk' ? '海康 SDK' : '直播地址' }}</el-tag></template></el-table-column>
       <el-table-column label="平台 / 项目" min-width="160">
         <template #default="{ row }">{{ row.videoPlatformId || '—' }}<small class="subline">{{ row.projectId || '—' }}</small></template>
       </el-table-column>
-      <el-table-column label="位置" min-width="220">
-        <template #default="{ row }">{{ [row.cityCode, row.districtCode, row.building, row.floor, row.areaId].filter(Boolean).join(' / ') || '—' }}</template>
+      <el-table-column label="位置关系" min-width="260">
+        <template #default="{ row }"><span>{{ [row.cityCode, row.districtCode, row.building, row.floor, row.areaId].filter(Boolean).join(' / ') || '—' }}</span><small class="subline">楼层：{{ (row.relatedFloorIds || []).join('、') || '—' }} · 房间：{{ (row.relatedRoomIds || []).join('、') || '—' }}</small></template>
       </el-table-column>
       <el-table-column label="关联设备" min-width="160">
         <template #default="{ row }">{{ (row.relatedDeviceIds || []).join(', ') || '—' }}</template>
@@ -147,6 +158,7 @@ onMounted(async()=>{await load();await consumeNavigationAction()})
       <div class="form-grid">
         <el-form-item label="摄像头 ID"><el-input v-model="camera.cameraId" :disabled="!!editing" /></el-form-item>
         <el-form-item label="摄像头名称"><el-input v-model="camera.cameraName" /></el-form-item>
+        <el-form-item label="接入方式"><el-select v-model="camera.ingestMode"><el-option label="直接输入直播地址" value="direct" /><el-option label="大华 SDK" value="dahua_sdk" /><el-option label="海康 SDK" value="hikvision_sdk" /></el-select></el-form-item>
         <el-form-item label="视频平台 ID"><el-input v-model="camera.videoPlatformId" /></el-form-item>
         <el-form-item label="项目 ID"><el-input v-model="camera.projectId" /></el-form-item>
         <el-form-item label="城市编码"><el-input v-model="camera.cityCode" /></el-form-item>
@@ -155,12 +167,21 @@ onMounted(async()=>{await load();await consumeNavigationAction()})
         <el-form-item label="楼层"><el-input v-model="camera.floor" /></el-form-item>
       </div>
       <el-form-item label="区域 ID"><el-input v-model="camera.areaId" /></el-form-item>
-      <el-form-item label="关联设备 ID（逗号分隔）"><el-input v-model="camera.relatedDeviceIds" /></el-form-item>
       <div class="form-grid">
+        <el-form-item label="关联设备（可多选）"><el-select v-model="camera.relatedDeviceIds" multiple filterable allow-create default-first-option collapse-tags collapse-tags-tooltip placeholder="选择或输入设备 ID"><el-option v-for="item in devices" :key="item.id" :label="`${item.name || item.id} · ${item.id}`" :value="item.id" /></el-select></el-form-item>
+        <el-form-item label="关联楼层（可多选）"><el-select v-model="camera.relatedFloorIds" multiple filterable allow-create default-first-option collapse-tags placeholder="输入楼层 ID"><el-option v-for="item in camera.relatedFloorIds" :key="item" :label="item" :value="item" /></el-select></el-form-item>
+        <el-form-item label="关联房间（可多选）"><el-select v-model="camera.relatedRoomIds" multiple filterable allow-create default-first-option collapse-tags placeholder="输入房间 ID"><el-option v-for="item in camera.relatedRoomIds" :key="item" :label="item" :value="item" /></el-select></el-form-item>
+      </div>
+      <div v-if="camera.ingestMode === 'direct'" class="form-grid">
         <el-form-item label="视频流地址"><el-input v-model="camera.streamUrl" placeholder="https://media.example/live/camera.m3u8" /></el-form-item>
         <el-form-item label="流类型"><el-select v-model="camera.streamType" placeholder="自动识别" clearable><el-option label="HLS (.m3u8)" value="hls" /><el-option label="MP4" value="mp4" /><el-option label="WebM" value="webm" /><el-option label="浏览器原生" value="native" /><el-option label="RTSP（需网关转换）" value="rtsp" /><el-option label="RTMP（需网关转换）" value="rtmp" /></el-select></el-form-item>
       </div>
-      <el-alert title="浏览器可直接预览 HLS、MP4 和 WebM；流媒体 Origin 需由管理员加入服务端白名单，RTSP/RTMP 请先通过网关转换。" type="info" :closable="false" show-icon />
+      <div v-else class="form-grid">
+        <el-form-item label="SDK/API 地址（可选）"><el-input v-model="camera.sdkEndpoint" placeholder="海康可填官方 Artemis API 地址；大华填适配器地址" /></el-form-item>
+        <el-form-item label="SDK 摄像头 ID"><el-input v-model="camera.sdkCameraId" placeholder="厂商平台中的设备/通道 ID" /></el-form-item>
+        <el-form-item label="SDK 凭证引用"><el-input v-model="camera.sdkCredentialRef" placeholder="仅保存密钥引用，不在平台保存厂商密码" /></el-form-item>
+      </div>
+      <el-alert title="预览统一交给 ZLMediaKit：浏览器可直接预览 HLS；RTSP/RTMP/HLS 会先创建拉流代理并返回 HLS；海康由 Go 直接调用官方 Artemis API，每次预览重新获取有时效地址。请把 ZLMediaKit 播放 Origin 加入服务端白名单。" type="info" :closable="false" show-icon />
       <el-form-item><el-switch v-model="camera.enabled" active-text="启用该摄像头" /></el-form-item>
     </el-form>
     <template #footer>

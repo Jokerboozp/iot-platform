@@ -120,7 +120,7 @@ bash ./scripts/package-offline-linux.sh --full
 
 `-Full` 只表示镜像和文件全部打包。DeepSeek Harness 运行时仍需要可访问的模型服务；真正完全无外网时，应使用 `-IncludeAi` 的本地 Ollama，并且提前打包模型卷。
 
-如果不传 `-EnvFile`，脚本会生成随机数据库密码、JWT 密钥、管理员密码、EMQX/Grafana 密码和备份 Token，写入 `.env.offline`，并把查看凭据写入 `OFFLINE-CREDENTIALS.txt`。离线包包含密钥，必须通过受控介质传输并限制文件权限。
+如果不传 `-EnvFile`，脚本会生成随机数据库密码、JWT 密钥、管理员密码、EMQX/Grafana 密码、备份 Token 和 ZLMediaKit API Secret，写入 `.env.offline`，并把查看凭据写入 `OFFLINE-CREDENTIALS.txt`。离线包包含密钥，必须通过受控介质传输并限制文件权限。`IOT_VIDEO_ZLM_PLAYBACK_BASE_URL` 必须改成浏览器实际可访问的 ZLMediaKit Origin；默认的 `http://localhost:8090` 只适用于浏览器和部署服务器在同一台机器的场景。
 
 脚本会为运行镜像固定以下离线标签：
 
@@ -128,6 +128,7 @@ bash ./scripts/package-offline-linux.sh --full
 iot-platform-api:offline
 iot-platform-web:offline
 iot-platform-backup:offline
+zlmediakit/zlmediakit:master
 iot-deepseek-harness:offline
 iot-thingspanel-backend:offline
 iot-thingspanel-web:offline
@@ -168,6 +169,20 @@ chmod +x scripts/deploy-offline-linux.sh
 - 等待 `/health/live` 返回成功。
 
 如果目标机已经存在同名 Ollama 数据卷，脚本会跳过模型恢复，不覆盖现有数据。
+
+离线部署默认也不会启动 `backup-service`。需要使用备份功能时，在离线包目录执行：
+
+```powershell
+docker compose --env-file .\.env.offline -f .\compose.yaml -f .\compose.offline.yaml --profile backup up -d --no-build --pull never backup-service
+```
+
+停止备份服务：
+
+```powershell
+docker compose --env-file .\.env.offline -f .\compose.yaml -f .\compose.offline.yaml --profile backup stop backup-service
+```
+
+启用或停止服务不会自动删除 `backup-staging` 数据卷；如需回收历史备份空间，请先确认数据保留要求后单独处理。
 
 ## 数据迁移和安全边界
 

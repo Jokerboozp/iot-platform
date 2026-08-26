@@ -464,6 +464,7 @@ watch(() => sandbox.provider, () => {
     testResult.value = null
     return
   }
+  if (!selectedCustomProvider.value) providerProfileEditorVisible.value = false
   const plugin = selectedPlugin.value
   if (!plugin) return
   sandbox.baseUrl = plugin.defaultBaseUrl || ''

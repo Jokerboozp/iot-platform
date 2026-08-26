@@ -19,7 +19,10 @@ JetLinks 协议包改造（原文第 6 章）按用户要求排除。其余章�
 | AI 告警诊断 | Eino 编排、Ollama、10m/1h/24h 趋势、同类告警、知识检索 | 已实现异步旁路与失败降级 |
 | AI 运维助手 | `core.OpsChat` | 已实现受控数据上下文，不执行 SQL/设备控制 |
 | RAG | PDF/DOCX/PPTX/XLSX/ODF/文本抽取、重叠分块、MinIO、Weaviate | 已实现并有 Office 抽取测试 |
-| 规则助手 | Eino rule-draft、Schema/物模型/Gengine/冲突校验、人工确认 | 已实现，AI 草稿强制禁用 |
+| 规则助手 | Eino rule-draft、纯 JSON 字段说明、注释版 Gengine 占位符、Schema/物模型/Gengine/冲突校验、人工确认 | 已实现，AI 草稿强制禁用 |
+| 智能巡检文档 | 确定性健康快照、AI 建议、同一快照 PDF 下载 | 已实现并有 PDF 解析与 HTTP 下载测试 |
+| 摄像头关系与预览 | 设备/楼层/房间规范化多对多关系、反向查询、直连/HLS、ZLMediaKit 拉流代理 | 已实现；ZLMediaKit add/delStreamProxy 已完成本机联调 |
+| 厂商视频 SDK | 大华独立适配器、海康官方 Artemis Go 客户端、短时效地址刷新、租户隔离与源地址白名单 | Go 适配层和签名单测已实现；海康 AppKey/AppSecret、HikCentral 版本、真实摄像头和目标网络仍需现场验收 |
 | 报表 | AI reports API | 已实现日报/周报/月报数据聚合与生成入口 |
 | MCP 工具服务 | `internal/mcpserver`、`ai_tool_call_log` | mcp-go Streamable HTTP、租户隔离、每次工具调用审计 |
 | 回放/补偿 | `internal/core/replay.go` | 三模式、指定版本、限速、真实前后消息差异与审计均已实现 |
