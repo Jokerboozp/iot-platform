@@ -32,15 +32,27 @@
 
 启动基础平台：
 
-```bash
-docker compose up -d --build
+首次部署或修改了后端/前端代码、Dockerfile 时，只构建应用服务：
+
+```powershell
+docker compose up -d --build platform-api platform-web
 docker compose ps
 ```
 
+日常启动不需要重新构建：
+
+```powershell
+docker compose up -d
+docker compose ps
+```
+
+当前默认 Compose 配置中的构建服务是 `platform-api` 和 `platform-web`。不要每次都执行不带服务名的
+`--build`；按服务构建可以避免无关组件产生新的构建缓存。Compose 会自动启动目标服务依赖的基础设施。
+
 需要 AI 工作流时，使用 Harness profile 一起启动（需要配置 `DEEPSEEK_API_KEY`）：
 
-```bash
-docker compose --profile harness up -d --build
+```powershell
+docker compose --profile harness up -d --build platform-api deepseek-harness platform-web
 docker compose --profile harness ps
 ```
 
@@ -78,6 +90,50 @@ docker compose logs -f platform-api platform-web
 docker compose --profile harness logs -f deepseek-harness platform-api
 curl http://127.0.0.1:8091/health
 ```
+
+#### Docker 构建缓存与磁盘空间
+
+`--build` 不会每次完整重建，但源码变更会让 `COPY . .` 和编译步骤产生新的 BuildKit 缓存记录；旧缓存不会因为
+容器重建自动删除。建议按以下方式控制空间：
+
+- 没有代码或 Dockerfile 变更时，只执行 `docker compose up -d`。
+- 只修改后端时执行 `docker compose up -d --build platform-api`；只修改前端时执行
+  `docker compose up -d --build platform-web`。
+- `backup-service`、DeepSeek Harness、ThingsPanel、Ollama 和 Weaviate 仅在需要时启用对应 profile；备份服务的
+  手动启动方式见[备份与恢复](#18-备份与恢复)。
+- 不要日常使用 `--no-cache` 或 `--pull`；只有需要强制刷新基础镜像时再使用，否则会增加下载和构建量。
+
+查看占用并清理 7 天未使用的构建缓存：
+
+```powershell
+docker system df
+docker builder prune -f --filter "until=168h" --keep-storage 8GB
+docker image prune -f --filter "until=168h"
+```
+
+`docker builder prune` 会删除可重新生成的未使用构建缓存，可能使下一次构建变慢；`docker image prune` 不带 `-a`
+时只清理悬空镜像。不要在未确认数据可丢弃前执行 `docker compose down -v`、`docker system prune --volumes`
+或 `docker image prune -a`，这些命令可能删除数据库卷、对象存储卷或仍需使用的镜像。
+
+清理 Docker 内部缓存后，WSL 的 `docker_data.vhdx` 文件在宿主机上可能仍保持原大小。需要回收宿主机空间时，先完全
+退出 Docker Desktop，再以管理员身份打开 PowerShell 执行：
+
+```powershell
+wsl --shutdown
+
+$dockerVhdx = (Get-ChildItem -LiteralPath (Join-Path $env:LOCALAPPDATA 'Docker\wsl') `
+  -Filter docker_data.vhdx -Recurse -File | Select-Object -First 1).FullName
+if (-not $dockerVhdx) { throw '找不到 Docker Desktop 的 docker_data.vhdx' }
+
+@"
+select vdisk file="$dockerVhdx"
+compact vdisk
+exit
+"@ | diskpart
+```
+
+压缩前必须确认 Docker Desktop 已退出；`wsl --shutdown` 会停止所有 WSL2 实例，但不会注销它们。压缩失败并提示文件
+正在使用时，不要强制删除或卸载虚拟磁盘，先关闭仍在运行的 Docker/WSL 进程。
 
 ## 2. 离线部署
 
