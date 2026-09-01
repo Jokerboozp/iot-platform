@@ -7,24 +7,34 @@ import (
 	"iot-platform/internal/model"
 )
 
-func TestVideoCameraRelationsSupportReverseLookup(t *testing.T) {
+func TestVideoCameraRelationsEnforceOneDevicePerCamera(t *testing.T) {
 	repo := NewRepository()
-	camera := model.VideoCameraMapping{TenantID: "tenant-001", CameraID: "camera-001", CameraName: "一号摄像头", RelatedDeviceIDs: []string{"device-001", "device-002"}, RelatedFloorIDs: []string{"floor-01"}, RelatedRoomIDs: []string{"room-101", "room-102"}}
+	camera := model.VideoCameraMapping{TenantID: "tenant-001", CameraID: "camera-001", CameraName: "一号摄像头", DeviceID: "device-001", Brand: "大华", CameraPoint: "东侧入口", Building: "A", Floor: "1", Room: "大厅"}
 	if err := repo.SaveVideoCameraMapping(context.Background(), camera); err != nil {
 		t.Fatal(err)
 	}
-	relations, err := repo.ListVideoCameraRelationsByTarget(context.Background(), "tenant-001", "device", "device-002")
+	if err := repo.SaveVideoCameraMapping(context.Background(), model.VideoCameraMapping{TenantID: "tenant-001", CameraID: "camera-002", CameraName: "二号摄像头", DeviceID: "device-001"}); err != nil {
+		t.Fatal(err)
+	}
+	relations, err := repo.ListVideoCameraRelationsByTarget(context.Background(), "tenant-001", "device", "device-001")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(relations) != 1 || relations[0].CameraID != "camera-001" {
+	if len(relations) != 2 || relations[0].CameraID != "camera-001" || relations[1].CameraID != "camera-002" {
 		t.Fatalf("reverse device lookup = %#v", relations)
 	}
-	roomRelations, err := repo.ListVideoCameraRelations(context.Background(), "tenant-001", "camera-001")
+	otherDevice, err := repo.ListVideoCameraRelationsByTarget(context.Background(), "tenant-001", "device", "device-002")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(roomRelations) != 5 {
-		t.Fatalf("camera relations = %#v", roomRelations)
+	if len(otherDevice) != 0 {
+		t.Fatalf("unexpected second device relation = %#v", otherDevice)
+	}
+	cameraRelations, err := repo.ListVideoCameraRelations(context.Background(), "tenant-001", "camera-001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cameraRelations) != 1 || cameraRelations[0].TargetID != "device-001" {
+		t.Fatalf("camera relations = %#v", cameraRelations)
 	}
 }

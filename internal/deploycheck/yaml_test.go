@@ -41,7 +41,7 @@ func TestDeploymentYAMLParses(t *testing.T) {
 	}
 }
 
-func TestBackupServiceIsOptInComposeProfile(t *testing.T) {
+func TestBackupServiceFollowsComposeLifecycle(t *testing.T) {
 	_, file, _, _ := runtime.Caller(0)
 	root := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
 	content, err := os.ReadFile(filepath.Join(root, "compose.yaml"))
@@ -62,17 +62,10 @@ func TestBackupServiceIsOptInComposeProfile(t *testing.T) {
 	if !ok {
 		t.Fatal("compose.yaml must define backup-service")
 	}
-	profileFound := false
-	for _, profile := range backup.Profiles {
-		if profile == "backup" {
-			profileFound = true
-			break
-		}
+	if len(backup.Profiles) != 0 {
+		t.Fatalf("backup-service must start with the main system, got profiles %v", backup.Profiles)
 	}
-	if !profileFound {
-		t.Fatalf("backup-service must be guarded by the backup profile, got profiles %v", backup.Profiles)
-	}
-	if backup.Restart != "no" {
-		t.Fatalf("backup-service must require manual restart, got restart policy %q", backup.Restart)
+	if backup.Restart != "unless-stopped" {
+		t.Fatalf("backup-service must follow the main system restart policy, got %q", backup.Restart)
 	}
 }

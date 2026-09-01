@@ -19,7 +19,6 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "element-plus": "2.14.4",
-    "hls.js": "^1.7.1",
     "mqtt": "5.15.2",
     "tailwind-merge": "^3.6.0",
     "tailwindcss": "^4.3.3",

@@ -50,6 +50,9 @@ func TestKnowledgeUploadAndTenantScopedList(t *testing.T) {
 
 	var body bytes.Buffer
 	form := multipart.NewWriter(&body)
+	if err = form.WriteField("workflowId", "ops-assistant"); err != nil {
+		t.Fatal(err)
+	}
 	if err = form.WriteField("productId", "fire-smoke"); err != nil {
 		t.Fatal(err)
 	}
@@ -94,16 +97,30 @@ func TestKnowledgeUploadAndTenantScopedList(t *testing.T) {
 	}
 	items := listed["items"].([]any)
 	item := items[0].(map[string]any)
-	if item["tenantId"] != "tenant-a" || item["productId"] != "fire-smoke" || item["category"] != "alarm-sop" || item["filename"] != "fire-sop.txt" {
+	if item["tenantId"] != "tenant-a" || item["workflowId"] != "ops-assistant" || item["productId"] != "fire-smoke" || item["category"] != "alarm-sop" || item["filename"] != "fire-sop.txt" {
 		t.Fatalf("unexpected knowledge item %#v", item)
 	}
 	tags := item["tags"].([]any)
 	if len(tags) != 2 || tags[0] != "smoke" || tags[1] != "certified" {
 		t.Fatalf("unexpected knowledge tags %#v", tags)
 	}
+	detail := requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/knowledge/documents/"+item["id"].(string), viewerToken, nil, http.StatusOK)
+	indexDetails := detail["index"].(map[string]any)
+	if indexDetails["mode"] != "local-memory" || indexDetails["chunkCount"] != float64(1) {
+		t.Fatalf("unexpected knowledge index details %#v", detail)
+	}
+	chunking := indexDetails["chunking"].(map[string]any)
+	if chunking["size"] != float64(1200) || chunking["overlap"] != float64(200) {
+		t.Fatalf("unexpected chunking policy %#v", chunking)
+	}
+	detailChunks := detail["chunks"].([]any)
+	if len(detailChunks) != 1 || detailChunks[0].(map[string]any)["content"] != "高温烟雾告警处置：先核对设备状态，再通知现场人员复核。" || detailChunks[0].(map[string]any)["vectorized"] != false {
+		t.Fatalf("unexpected knowledge chunks %#v", detailChunks)
+	}
 
 	isolated := requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/knowledge/documents", otherTenantToken, nil, http.StatusOK)
 	if isolated["count"] != float64(0) {
 		t.Fatalf("knowledge documents leaked across tenants: %#v", isolated)
 	}
+	requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/knowledge/documents/"+item["id"].(string), otherTenantToken, nil, http.StatusNotFound)
 }

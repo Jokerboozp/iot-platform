@@ -17,9 +17,12 @@ import (
 	"iot-platform/internal/ports"
 )
 
+const directAlarmRulePrefix = "device-report:"
+
 type Engine struct {
 	Repo                      ports.Repository
 	Archive                   ports.Archive
+	RawStore                  ports.RawMessageStore
 	Bus                       ports.EventBus
 	Realtime                  ports.RealtimePublisher
 	AI                        ports.AIClient
@@ -33,17 +36,28 @@ type Engine struct {
 	Metrics                   interface{ Inc(string) }
 	VideoMediaAllowedHosts    []string
 	RequireVideoCameraMapping bool
-	VideoPreview              ports.VideoPreviewService
 }
 
 func New(repo ports.Repository, archive ports.Archive, bus ports.EventBus, realtime ports.RealtimePublisher, parsers *parser.Registry, log *slog.Logger) *Engine {
-	return &Engine{Repo: repo, Archive: archive, Bus: bus, Realtime: realtime, Parsers: parsers, Clock: ports.RealClock{}, Log: log}
+	engine := &Engine{Repo: repo, Archive: archive, Bus: bus, Realtime: realtime, Parsers: parsers, Clock: ports.RealClock{}, Log: log}
+	if rawStore, ok := archive.(ports.RawMessageStore); ok {
+		engine.RawStore = rawStore
+	}
+	return engine
 }
+
+func (e *Engine) GetRaw(ctx context.Context, index model.RawArchiveIndex) (model.RawMessage, error) {
+	if e.RawStore == nil {
+		return model.RawMessage{}, errors.New("raw message store is not configured")
+	}
+	return e.RawStore.GetRaw(ctx, index)
+}
+
 func (e *Engine) Start(ctx context.Context) error {
 	subs := []struct {
 		topic, group string
 		h            ports.Handler
-	}{{model.TopicRaw, "parser", e.handleRaw}, {model.TopicPropertyReport, "storage", e.handleStandard}, {model.TopicEventReport, "storage", e.handleStandard}, {model.TopicDeviceState, "state", e.handleState}, {model.TopicAlarmRaised, "ai", e.handleAI}}
+	}{{model.TopicRaw, "parser", e.handleRaw}, {model.TopicPropertyReport, "storage", e.handleStandard}, {model.TopicEventReport, "storage", e.handleStandard}, {model.TopicParsed, "storage", e.handleStandard}, {model.TopicDeviceState, "state", e.handleState}, {model.TopicAlarmRaised, "ai", e.handleAI}}
 	for _, s := range subs {
 		if err := e.Bus.Subscribe(ctx, s.topic, s.group, s.h); err != nil {
 			return err
@@ -63,7 +77,7 @@ func (e *Engine) IngestRaw(ctx context.Context, raw model.RawMessage) (model.Raw
 	}
 	if existing, err := e.Repo.GetRawIndex(ctx, raw.TenantID, raw.MessageID); err == nil {
 		if existing.PublishedAt == 0 {
-			stored, readErr := e.Archive.GetRaw(ctx, existing)
+			stored, readErr := e.GetRaw(ctx, existing)
 			if readErr != nil {
 				return existing, false, fmt.Errorf("read pending raw: %w", readErr)
 			}
@@ -73,7 +87,10 @@ func (e *Engine) IngestRaw(ctx context.Context, raw model.RawMessage) (model.Raw
 		}
 		return existing, false, nil
 	}
-	idx, err := e.Archive.PutRaw(ctx, raw)
+	if e.RawStore == nil {
+		return model.RawArchiveIndex{}, false, errors.New("raw message store is not configured")
+	}
+	idx, err := e.RawStore.PutRaw(ctx, raw)
 	if err != nil {
 		if e.Metrics != nil {
 			e.Metrics.Inc("raw_archive_failed_total")
@@ -126,7 +143,7 @@ func (e *Engine) retryPendingRaw(ctx context.Context) {
 				continue
 			}
 			for _, idx := range indexes {
-				raw, readErr := e.Archive.GetRaw(ctx, idx)
+				raw, readErr := e.GetRaw(ctx, idx)
 				if readErr != nil {
 					_ = e.Repo.MarkRawPublished(ctx, idx.TenantID, idx.MessageID, 0, readErr.Error())
 					continue
@@ -219,8 +236,12 @@ func (e *Engine) handleRaw(ctx context.Context, b []byte) error {
 		if e.Metrics != nil {
 			e.Metrics.Inc("parse_failed_total")
 		}
-		failure, _ := json.Marshal(map[string]any{"raw": raw, "stage": "parse", "error": err.Error(), "failedAt": e.Clock.Now().UnixMilli()})
-		_ = e.Bus.Publish(ctx, model.TopicParseFailed, raw.MessageID, failure)
+		if e.Log != nil {
+			e.Log.Warn("raw message was not forwarded because parsing failed", "messageId", raw.MessageID, "deviceId", raw.DeviceID, "error", err)
+		}
+		// A parse failure is deliberately terminal for the forwarding path. The
+		// raw payload is already archived and remains available for replay, but
+		// no parsed Kafka or MQTT message is emitted.
 		return nil
 	}
 	out, _ := json.Marshal(msg)
@@ -228,8 +249,24 @@ func (e *Engine) handleRaw(ctx context.Context, b []byte) error {
 	switch msg.MessageType {
 	case model.EventReport, model.AlarmReport:
 		topic = model.TopicEventReport
+	case model.PropertyReport:
+		topic = model.TopicPropertyReport
+	default:
+		topic = model.TopicParsed
 	}
-	return e.Bus.Publish(ctx, topic, msg.DeviceID, out)
+	if err := e.Bus.Publish(ctx, topic, msg.DeviceID, out); err != nil {
+		return fmt.Errorf("publish parsed message to kafka topic %s: %w", topic, err)
+	}
+	if e.Realtime == nil {
+		return nil
+	}
+	if err := e.Realtime.Publish(ctx, msg.MQTTTopic(), out, 1, false); err != nil {
+		if e.Metrics != nil {
+			e.Metrics.Inc("parsed_mqtt_publish_failed_total")
+		}
+		return fmt.Errorf("publish parsed message to mqtt: %w", err)
+	}
+	return nil
 }
 func (e *Engine) handleStandard(ctx context.Context, b []byte) error {
 	var msg model.StandardMessage
@@ -250,6 +287,7 @@ func (e *Engine) handleStandard(ctx context.Context, b []byte) error {
 	if err != nil {
 		return err
 	}
+	ruleAlarmHandled := false
 	for _, rule := range rules {
 		if MatchRule(rule, msg) {
 			if rule.DurationSeconds > 0 {
@@ -261,6 +299,7 @@ func (e *Engine) handleStandard(ctx context.Context, b []byte) error {
 					continue
 				}
 			}
+			ruleAlarmHandled = true
 			if _, _, err := e.raiseRuleAlarm(ctx, rule, msg); err != nil {
 				return err
 			}
@@ -276,6 +315,22 @@ func (e *Engine) handleStandard(ctx context.Context, b []byte) error {
 				return err
 			}
 		}
+	}
+	// An ALARM_REPORT is already an assertion made by the device. Rules can
+	// classify it and trigger actions when they match, but a missing rule must
+	// never discard a device-originated alarm.
+	if msg.MessageType == model.AlarmReport && !ruleAlarmHandled {
+		if _, _, err := e.raiseDirectAlarm(ctx, msg); err != nil {
+			return err
+		}
+	}
+	if msg.MessageType != model.AlarmReport && directAlarmCleared(msg) {
+		if err := e.recoverDirectAlarms(ctx, msg); err != nil {
+			return err
+		}
+	}
+	if err := e.syncDeviceBusinessStatus(ctx, msg.TenantID, msg.ProductID, msg.DeviceID); err != nil {
+		return err
 	}
 	return e.Repo.MarkStandardMessageProcessed(ctx, msg.TenantID, msg.MessageID)
 }
@@ -301,7 +356,11 @@ func (e *Engine) touchState(ctx context.Context, msg model.StandardMessage) erro
 	}
 	old := state.BusinessStatus
 	state.DataStatus = "ACTIVE"
-	state.BusinessStatus = "ONLINE"
+	if msg.MessageType == model.AlarmReport || strings.EqualFold(old, "ALARM") {
+		state.BusinessStatus = "ALARM"
+	} else {
+		state.BusinessStatus = "ONLINE"
+	}
 	state.LastSeenAt = msg.Timestamp
 	state.LastMessageID = msg.MessageID
 	state.StatusSource = "RAW_MESSAGE"
@@ -315,9 +374,250 @@ func (e *Engine) touchState(ctx context.Context, msg model.StandardMessage) erro
 	}
 	return nil
 }
+
+func (e *Engine) syncDeviceBusinessStatus(ctx context.Context, tenant, product, device string) error {
+	state, err := e.Repo.GetDeviceState(ctx, tenant, device)
+	if err != nil {
+		return nil
+	}
+	open, err := e.hasOpenAlarm(ctx, tenant, device)
+	if err != nil {
+		return err
+	}
+	nextStatus, source, reason := "ONLINE", "RAW_MESSAGE", ""
+	if open {
+		nextStatus, source, reason = "ALARM", "ACTIVE_ALARM", "存在活动告警"
+	}
+	if state.ProductID == "" {
+		state.ProductID = product
+	}
+	state.BusinessStatus = nextStatus
+	state.StatusSource = source
+	state.Reason = reason
+	return e.UpdateDeviceState(ctx, state)
+}
+
+func (e *Engine) hasOpenAlarm(ctx context.Context, tenant, device string) (bool, error) {
+	for _, status := range []string{"ACTIVE", "ACKED"} {
+		items, err := e.Repo.ListAlarms(ctx, ports.AlarmFilter{TenantID: tenant, DeviceID: device, Status: status, Limit: 1})
+		if err != nil {
+			return false, err
+		}
+		if len(items) > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (e *Engine) raiseDirectAlarm(ctx context.Context, msg model.StandardMessage) (model.Alarm, bool, error) {
+	now := e.Clock.Now().UnixMilli()
+	alarmType, level := directAlarmMetadata(msg)
+	a := model.Alarm{
+		ID: id("alarm"), TenantID: msg.TenantID, RuleID: directAlarmRuleID(alarmType), TriggerID: msg.MessageID,
+		DeviceID: msg.DeviceID, AlarmType: alarmType, AlarmLevel: level, Status: "ACTIVE", Source: "device",
+		CityCode: tag(msg, "cityCode", "unknown"), DistrictCode: tag(msg, "districtCode", "unknown"),
+		BuildingID: tag(msg, "buildingId", "unknown"), DeviceType: tag(msg, "deviceType", msg.ProductID),
+		AreaID: tag(msg, "areaId", ""), FirstTriggeredAt: now, LastTriggeredAt: now, TriggerCount: 1,
+		Details: map[string]any{"message": msg, "direct": true},
+	}
+	a.Cameras, _ = e.ListCameraSummaries(ctx, msg.TenantID, msg.DeviceID)
+	saved, created, err := e.Repo.UpsertAlarm(ctx, a)
+	if err != nil {
+		return saved, false, err
+	}
+	if created {
+		if e.Metrics != nil {
+			e.Metrics.Inc("alarm_trigger_total")
+		}
+		payload, _ := json.Marshal(saved)
+		_ = e.Bus.Publish(ctx, model.TopicAlarmRaised, saved.ID, payload)
+		_ = e.Realtime.Publish(ctx, saved.MQTTTopic("raised"), payload, 1, false)
+	}
+	return saved, created, nil
+}
+
+func directAlarmRuleID(alarmType string) string {
+	return directAlarmRulePrefix + alarmType
+}
+
+func firstMessageValue(msg model.StandardMessage, keys ...string) any {
+	for _, key := range keys {
+		if value, ok := messageValue(msg, key); ok {
+			return value
+		}
+	}
+	return nil
+}
+
+func messageValue(msg model.StandardMessage, key string) (any, bool) {
+	for _, source := range directMessageSources(msg) {
+		if value, ok := source[key]; ok {
+			return value, true
+		}
+	}
+	return nil, false
+}
+
+func directMessageSources(msg model.StandardMessage) []map[string]any {
+	sources := []map[string]any{msg.Properties, msg.Event, msg.Raw}
+	if payload := messageMap(msg.Raw["payload"]); payload != nil {
+		sources = append(sources, payload)
+		if alarm := messageMap(payload["alarm"]); alarm != nil {
+			sources = append(sources, alarm)
+		}
+	}
+	if alarm := messageMap(msg.Event["alarm"]); alarm != nil {
+		sources = append(sources, alarm)
+	}
+	return sources
+}
+
+func messageMap(value any) map[string]any {
+	switch item := value.(type) {
+	case map[string]any:
+		return item
+	case json.RawMessage:
+		var out map[string]any
+		if json.Unmarshal(item, &out) == nil {
+			return out
+		}
+	case []byte:
+		var out map[string]any
+		if json.Unmarshal(item, &out) == nil {
+			return out
+		}
+	case string:
+		var out map[string]any
+		if json.Unmarshal([]byte(item), &out) == nil {
+			return out
+		}
+	}
+	return nil
+}
+
+func messageFlag(msg model.StandardMessage, key string) bool {
+	value, ok := messageValue(msg, key)
+	return ok && truthy(value)
+}
+
+func truthy(value any) bool {
+	switch item := value.(type) {
+	case bool:
+		return item
+	case float64:
+		return item != 0
+	case float32:
+		return item != 0
+	case int:
+		return item != 0
+	case int64:
+		return item != 0
+	case uint:
+		return item != 0
+	case uint64:
+		return item != 0
+	case string:
+		return strings.EqualFold(strings.TrimSpace(item), "true") || strings.TrimSpace(item) == "1" || strings.EqualFold(strings.TrimSpace(item), "yes") || strings.EqualFold(strings.TrimSpace(item), "on")
+	default:
+		return false
+	}
+}
+
+func normalizeAlarmToken(value any) string {
+	if value == nil {
+		return ""
+	}
+	text := strings.ToUpper(strings.TrimSpace(fmt.Sprint(value)))
+	if text == "" || text == "<NIL>" || text == "TRUE" || text == "FALSE" {
+		return ""
+	}
+	text = strings.NewReplacer(" ", "_", "-", "_").Replace(text)
+	var out strings.Builder
+	for _, r := range text {
+		if r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '.' {
+			out.WriteRune(r)
+		}
+	}
+	normalized := strings.Trim(out.String(), "_.")
+	if runes := []rune(normalized); len(runes) > 64 {
+		normalized = string(runes[:64])
+	}
+	return normalized
+}
+
+func directAlarmMetadata(msg model.StandardMessage) (string, string) {
+	alarmType := normalizeAlarmToken(firstMessageValue(msg, "alarmType", "alarm_type"))
+	if alarmType == "" {
+		switch {
+		case messageFlag(msg, "fireAlarm"):
+			alarmType = "FIRE"
+		case messageFlag(msg, "smoke") || messageFlag(msg, "smokeDetected"):
+			alarmType = "SMOKE_DETECTED"
+		case messageFlag(msg, "fault") || messageFlag(msg, "powerFault") || messageFlag(msg, "sensorFault"):
+			alarmType = "DEVICE_FAULT"
+		case messageFlag(msg, "offline"):
+			alarmType = "DEVICE_OFFLINE"
+		default:
+			alarmType = "MANUAL_ALARM"
+		}
+	}
+	level := normalizeAlarmToken(firstMessageValue(msg, "alarmLevel", "alarm_level", "level"))
+	switch level {
+	case "CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO":
+	default:
+		level = "HIGH"
+	}
+	return alarmType, level
+}
+
+func directAlarmCleared(msg model.StandardMessage) bool {
+	if msg.MessageType == model.StateChange {
+		return true
+	}
+	if msg.MessageType != model.PropertyReport {
+		return false
+	}
+	found := false
+	for _, key := range []string{"alarm", "fireAlarm", "smoke", "smokeDetected", "fault", "offline", "powerFault", "openCircuit", "shortCircuit", "removed", "sensorFault", "upgradeFault"} {
+		value, ok := messageValue(msg, key)
+		if !ok {
+			continue
+		}
+		found = true
+		if truthy(value) {
+			return false
+		}
+	}
+	return found
+}
+
+func (e *Engine) recoverDirectAlarms(ctx context.Context, msg model.StandardMessage) error {
+	for _, status := range []string{"ACTIVE", "ACKED"} {
+		alarms, err := e.Repo.ListAlarms(ctx, ports.AlarmFilter{TenantID: msg.TenantID, DeviceID: msg.DeviceID, Status: status, Limit: 100})
+		if err != nil {
+			return err
+		}
+		for _, alarm := range alarms {
+			if !strings.HasPrefix(alarm.RuleID, directAlarmRulePrefix) {
+				continue
+			}
+			alarm.Status = "RECOVERED"
+			alarm.RecoveredAt = e.Clock.Now().UnixMilli()
+			if err := e.Repo.UpdateAlarm(ctx, alarm); err != nil {
+				return err
+			}
+			payload := mustJSON(alarm)
+			_ = e.Bus.Publish(ctx, model.TopicAlarmRecovered, alarm.ID, payload)
+			_ = e.Realtime.Publish(ctx, alarm.MQTTTopic("recovered"), payload, 1, false)
+		}
+	}
+	return nil
+}
 func (e *Engine) raiseRuleAlarm(ctx context.Context, rule model.AlarmRule, msg model.StandardMessage) (model.Alarm, bool, error) {
 	now := e.Clock.Now().UnixMilli()
 	a := model.Alarm{ID: id("alarm"), TenantID: msg.TenantID, RuleID: rule.ID, TriggerID: msg.MessageID, DeviceID: msg.DeviceID, AlarmType: rule.AlarmType, AlarmLevel: rule.Level, Status: "ACTIVE", Source: "device", CityCode: tag(msg, "cityCode", "unknown"), DistrictCode: tag(msg, "districtCode", "unknown"), BuildingID: tag(msg, "buildingId", "unknown"), DeviceType: tag(msg, "deviceType", msg.ProductID), AreaID: tag(msg, "areaId", ""), FirstTriggeredAt: now, LastTriggeredAt: now, TriggerCount: 1, Details: map[string]any{"message": msg, "ruleName": rule.Name}}
+	a.Cameras, _ = e.ListCameraSummaries(ctx, msg.TenantID, msg.DeviceID)
 	saved, created, err := e.Repo.UpsertAlarm(ctx, a)
 	if err != nil {
 		return saved, false, err
@@ -387,6 +687,7 @@ func (e *Engine) DisableRule(ctx context.Context, tenant, ruleID string) error {
 
 func (e *Engine) closeRuleAlarms(ctx context.Context, tenant, ruleID string) error {
 	const batchSize = 1000
+	affectedDevices := make(map[string]struct{})
 	for _, status := range []string{"ACTIVE", "ACKED"} {
 		offset := 0
 		for {
@@ -407,6 +708,7 @@ func (e *Engine) closeRuleAlarms(ctx context.Context, tenant, ruleID string) err
 				if err := e.Repo.UpdateAlarm(ctx, alarm); err != nil {
 					return err
 				}
+				affectedDevices[alarm.DeviceID] = struct{}{}
 				payload := mustJSON(alarm)
 				_ = e.Bus.Publish(ctx, model.TopicAlarmRecovered, alarm.ID, payload)
 				_ = e.Realtime.Publish(ctx, alarm.MQTTTopic("recovered"), payload, 1, false)
@@ -419,6 +721,11 @@ func (e *Engine) closeRuleAlarms(ctx context.Context, tenant, ruleID string) err
 				continue
 			}
 			offset += len(alarms)
+		}
+	}
+	for deviceID := range affectedDevices {
+		if err := e.syncDeviceBusinessStatus(ctx, tenant, "", deviceID); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -529,6 +836,9 @@ func (e *Engine) IngestVideo(ctx context.Context, v model.VideoAlarmEvent) (mode
 	_ = e.Bus.Publish(ctx, model.TopicVideoAlarm, v.CameraID, mustJSON(v))
 	now := e.Clock.Now().UnixMilli()
 	a := model.Alarm{ID: id("alarm"), TenantID: v.TenantID, RuleID: "video:" + v.AlarmType, TriggerID: v.EventID, DeviceID: v.CameraID, DeviceName: v.CameraName, AlarmType: v.AlarmType, AlarmLevel: v.AlarmLevel, Status: "ACTIVE", Source: "video", CityCode: v.CityCode, DistrictCode: v.DistrictCode, BuildingID: v.BuildingID, DeviceType: "video_ai", AreaID: v.AreaID, FirstTriggeredAt: now, LastTriggeredAt: now, TriggerCount: 1, Confidence: v.Confidence, Details: map[string]any{"videoEvent": v}}
+	if mappingErr == nil {
+		a.Cameras = []model.CameraSummary{cameraSummary(mapping)}
+	}
 	if a.AlarmLevel == "" {
 		a.AlarmLevel = map[bool]string{true: "MEDIUM", false: "HIGH"}[v.Confidence < 0.6]
 	}
@@ -601,6 +911,40 @@ func relatedFireAlarm(deviceType, videoType string) bool {
 	a := strings.ToUpper(deviceType)
 	b := strings.ToUpper(videoType)
 	return (strings.Contains(a, "FIRE") || strings.Contains(a, "SMOKE") || strings.Contains(a, "TEMPERATURE")) && (strings.Contains(b, "FIRE") || strings.Contains(b, "FLAME") || strings.Contains(b, "SMOKE"))
+}
+
+// ListCameraSummaries resolves the cameras associated with one device without
+// exposing stream URLs or vendor credentials. The relation is intentionally
+// one camera -> one device; a device may return many camera summaries.
+func (e *Engine) ListCameraSummaries(ctx context.Context, tenant, deviceID string) ([]model.CameraSummary, error) {
+	if strings.TrimSpace(tenant) == "" || strings.TrimSpace(deviceID) == "" {
+		return nil, nil
+	}
+	relations, err := e.Repo.ListVideoCameraRelationsByTarget(ctx, tenant, "device", deviceID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]model.CameraSummary, 0, len(relations))
+	seen := make(map[string]struct{}, len(relations))
+	for _, relation := range relations {
+		if relation.CameraID == "" {
+			continue
+		}
+		if _, ok := seen[relation.CameraID]; ok {
+			continue
+		}
+		mapping, getErr := e.Repo.GetVideoCameraMapping(ctx, tenant, relation.CameraID)
+		if getErr != nil {
+			return nil, getErr
+		}
+		out = append(out, cameraSummary(mapping))
+		seen[relation.CameraID] = struct{}{}
+	}
+	return out, nil
+}
+
+func cameraSummary(v model.VideoCameraMapping) model.CameraSummary {
+	return model.CameraSummary{CameraID: v.CameraID, Brand: v.Brand, CameraName: v.CameraName, CameraPoint: v.CameraPoint, DeviceID: v.DeviceID, Building: v.Building, Floor: v.Floor, Room: v.Room, Enabled: v.Enabled}
 }
 func (e *Engine) handleAI(ctx context.Context, b []byte) error {
 	if e.AI == nil {
@@ -696,6 +1040,9 @@ func (e *Engine) SetAlarmStatus(ctx context.Context, tenant, alarmID, status, ac
 		return a, fmt.Errorf("unsupported status %s", status)
 	}
 	if err := e.Repo.UpdateAlarm(ctx, a); err != nil {
+		return a, err
+	}
+	if err := e.syncDeviceBusinessStatus(ctx, a.TenantID, "", a.DeviceID); err != nil {
 		return a, err
 	}
 	_ = e.Repo.SaveAudit(ctx, model.AuditLog{ID: id("audit"), TenantID: tenant, Actor: actor, Action: "alarm." + strings.ToLower(status), TargetType: "alarm", TargetID: alarmID, CreatedAt: now})

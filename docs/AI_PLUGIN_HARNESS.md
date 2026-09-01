@@ -21,9 +21,9 @@ Harness 源码不会复制进本仓库。`deploy/deepseek-harness/REVISION` 固�
 ./scripts/fetch-deepseek-harness.sh
 ```
 
-脚本不会覆盖有本地修改的上游目录。升级时先验证新提交，再同时更新 `REVISION` 和脚本中的锁定值。
+脚本不会覆盖有本地修改的上游目录。升级时先验证新提交，再更新 `REVISION` 并重新生成 `upstream/deepseek-harness.revision`。
 
-Docker 构建会按上游 `python/sdk-runtime` 的依赖清单生成独立 Node carrier，并执行真实 SDK、Cordis 与模拟 MCP 的启动握手；源码工作区的开发用软链接不会直接作为生产运行时。
+当前锁定的是上游 `cd5ef8148158c3a752a658978873241fdf8e2bbc`。该版本已将旧的 JSON-RPC demo 入口迁移为统一 `@deepseek-ai/dsh/lib/bin.js`；侧车使用 `sdk-minimal` profile，再通过 `cordis.yml` overlay 注入 IoT MCP 和只读策略。Docker 构建会按上游 `python/sdk-runtime` 的依赖清单生成独立 Node carrier，并执行真实 SDK、Cordis 与模拟 MCP 的启动握手；源码工作区的开发用软链接不会直接作为生产运行时。
 
 ## 业务插件
 
@@ -80,7 +80,7 @@ Harness 的 reasoning 分片不会发给浏览器；工具事件只包含工具�
 
 - Go API 与 Harness 的固定内部令牌使用 `X-IOT-Harness-Token`；短期 MCP JWT 单独使用 `Authorization: Bearer ...`，两者不混用。
 - 专用 `/mcp/harness` 仅接受 POST，限制请求体大小，并校验 `tokenUse`、Audience、租户和每个工具的精确 scope。
-- Harness 组合不加载 shell、文件系统、skills、jobs、goal、todo 或 subagent 工具。
+- Harness 组合会禁用 shell、文件系统、skills、jobs、goal、todo 和 subagent 的模型工具面；最终工具执行仍由平台策略 guard 再次限制。
 - 每个浏览器会话 ID 都由后端结合租户和用户派生为内部 Session ID，防止跨租户会话碰撞。
 - 工具查询有条数上限；所有工具调用写入平台审计仓储。
 

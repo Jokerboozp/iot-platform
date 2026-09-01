@@ -8,11 +8,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const DEFAULT_PLUGIN_DIR = join(here, 'plugins')
-const DEFAULT_CORDIS_CONFIG = join(here, 'cordis.yml')
-const DEFAULT_RUNTIME_BIN = '/harness/runtime-node/node_modules/@deepseek-ai/dsh-sdk-jsonrpc-demo/lib/packaged-bin.js'
+const DEFAULT_PATCH_FILE = join(here, 'cordis.yml')
+const DEFAULT_RUNTIME_BIN = '/harness/runtime-node/node_modules/@deepseek-ai/dsh/lib/bin.js'
 const DEFAULT_SDK_CLIENT_MODULE = '/harness/runtime-node/node_modules/@deepseek-ai/dsh-sdk-client/lib/index.js'
 const DEFAULT_WORKSPACE = '/data/workspace'
 const DEFAULT_SESSION_ROOT = '/data/sessions'
+const DEFAULT_HARNESS_HOME = '/data/runtime-home'
 const DEFAULT_MCP_ORIGINS = 'http://platform-api:8080'
 
 export const READ_ONLY_TOOL_CEILING = Object.freeze([
@@ -502,7 +503,6 @@ function childEnvironment(spec) {
   environment.HOME = process.env.HOME ?? '/tmp'
   environment.PATH = process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin'
   environment.TMPDIR = process.env.TMPDIR ?? '/tmp'
-  environment.DSH_CORDIS_CONFIG = spec.cordisConfig
   environment.IOT_MCP_URL = spec.proxyMcpUrl
   environment.IOT_MCP_RUNTIME_KEY = spec.runtimeAccessKey
   environment.IOT_HARNESS_SESSION_ROOT = spec.sessionRoot
@@ -511,30 +511,23 @@ function childEnvironment(spec) {
   return environment
 }
 
-export function runtimeNodeArgs(runtimeBin, cordisConfig) {
-  // The upstream runtime carrier is a pnpm deploy closure. Node must resolve
-  // package symlinks to their real .pnpm paths so transitive dependencies
-  // (for example readdirp and zod-to-json-schema) remain discoverable.
-  return [runtimeBin, cordisConfig]
-}
-
 async function officialHarnessFactory(spec) {
   const { DeepSeekHarness } = await import(pathToFileURL(spec.sdkClientModule).href)
   return new DeepSeekHarness({
-    launch: {
-      command: process.execPath,
-      args: runtimeNodeArgs(spec.runtimeBin, spec.cordisConfig),
-      cwd: spec.runtimeCwd,
-      env: childEnvironment(spec),
-      requestTimeoutMs: spec.requestTimeoutMs,
-      shutdownTimeoutMs: 2000,
-      disposeEofGraceMs: 6000,
-      disposeGraceMs: 3000,
-    },
+    dshBin: spec.runtimeBin,
+    profile: 'sdk-minimal',
+    patches: [spec.patchFile],
+    dshHome: spec.harnessHome,
+    processCwd: spec.runtimeCwd,
+    env: childEnvironment(spec),
     cwd: spec.workspace,
     provider: 'deepseek-official',
     model: spec.model,
     maxTokens: spec.maxTokens,
+    requestTimeoutMs: spec.requestTimeoutMs,
+    shutdownTimeoutMs: 2000,
+    disposeEofGraceMs: 6000,
+    disposeGraceMs: 3000,
   })
 }
 
@@ -564,7 +557,13 @@ export function createGateway(options = {}) {
     throw new Error('IOT_HARNESS_GATEWAY_TOKEN must contain 32 to 512 characters')
   }
   const pluginDir = resolve(options.pluginDir ?? process.env.IOT_HARNESS_PLUGIN_DIR ?? DEFAULT_PLUGIN_DIR)
-  const cordisConfig = resolve(options.cordisConfig ?? process.env.DSH_CORDIS_CONFIG ?? DEFAULT_CORDIS_CONFIG)
+  const patchFile = resolve(
+    options.patchFile
+      ?? options.cordisConfig
+      ?? process.env.IOT_HARNESS_PATCH_FILE
+      ?? process.env.DSH_CORDIS_CONFIG
+      ?? DEFAULT_PATCH_FILE,
+  )
   const runtimeBin = resolve(options.runtimeBin ?? process.env.DSH_RUNTIME_BIN ?? DEFAULT_RUNTIME_BIN)
   const sdkClientModule = resolve(
     options.sdkClientModule ?? process.env.DSH_SDK_CLIENT_MODULE ?? DEFAULT_SDK_CLIENT_MODULE,
@@ -574,6 +573,7 @@ export function createGateway(options = {}) {
   const sessionRoot = resolve(
     options.sessionRoot ?? process.env.IOT_HARNESS_SESSION_ROOT ?? DEFAULT_SESSION_ROOT,
   )
+  const harnessHome = resolve(options.harnessHome ?? process.env.IOT_HARNESS_HOME ?? DEFAULT_HARNESS_HOME)
   const allowedOrigins = configuredOrigins(
     options.allowedMcpOrigins ?? process.env.IOT_HARNESS_MCP_ALLOWED_ORIGINS ?? DEFAULT_MCP_ORIGINS,
   )
@@ -718,10 +718,11 @@ export function createGateway(options = {}) {
           ...run,
           runtimeBin,
           sdkClientModule,
-          cordisConfig,
+          patchFile,
           runtimeCwd,
           workspace,
           sessionRoot,
+          harnessHome: join(harnessHome, sessionId),
           proxyMcpUrl,
           runtimeAccessKey,
           requestTimeoutMs,
@@ -771,7 +772,7 @@ export function createGateway(options = {}) {
       const [plugins, revision] = await Promise.all([
         loadPluginCatalog(pluginDir),
         readFile(join(here, 'REVISION'), 'utf8'),
-        access(cordisConfig),
+        access(patchFile),
         access(runtimeBin),
         access(sdkClientModule),
       ])

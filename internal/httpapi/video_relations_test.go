@@ -13,10 +13,11 @@ import (
 	"iot-platform/internal/config"
 	"iot-platform/internal/core"
 	"iot-platform/internal/metrics"
+	"iot-platform/internal/model"
 	"iot-platform/internal/parser"
 )
 
-func TestVideoCameraRelationsHTTPSupportsManyToManyReverseLookup(t *testing.T) {
+func TestVideoCameraRelationsHTTPEnforcesCameraToOneDevice(t *testing.T) {
 	repo := memory.NewRepository()
 	archive, err := local.NewArchive(t.TempDir())
 	if err != nil {
@@ -37,29 +38,36 @@ func TestVideoCameraRelationsHTTPSupportsManyToManyReverseLookup(t *testing.T) {
 		"username": "admin", "password": "admin123", "tenantId": "tenant_001",
 	}, http.StatusOK)
 	token := login["accessToken"].(string)
-
-	camera := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/integrations/video/cameras", token, map[string]any{
-		"cameraId":         "camera_m2m",
-		"cameraName":       "多对多摄像头",
-		"streamUrl":        "https://media.example.internal/live/m2m.m3u8",
-		"relatedDeviceIds": []string{"device-001", "device-002"},
-		"relatedFloorIds":  []string{"floor-01", "floor-02"},
-		"relatedRoomIds":   []string{"room-101", "room-102"},
-		"enabled":          true,
-	}, http.StatusCreated)
-	if got := len(camera["relatedDeviceIds"].([]any)); got != 2 {
-		t.Fatalf("saved camera device relation count = %d, want 2: %#v", got, camera)
+	for index, deviceID := range []string{"device-001", "device-002"} {
+		if err := repo.SaveManagedDevice(context.Background(), model.ManagedDevice{ID: deviceID, TenantID: "tenant_001", ProductID: "product", Name: deviceID, Status: "ENABLED", AccessKey: "access-" + string(rune('a'+index))}); err != nil {
+			t.Fatal(err)
+		}
 	}
 
-	for relationType, targetID := range map[string]string{
-		"device": "device-002",
-		"floor":  "floor-02",
-		"room":   "room-102",
-	} {
-		result := requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/integrations/video/relations?relationType="+relationType+"&targetId="+targetID, token, nil, http.StatusOK)
-		items := result["items"].([]any)
-		if len(items) != 1 || items[0].(map[string]any)["cameraId"] != "camera_m2m" {
-			t.Fatalf("reverse %s lookup = %#v", relationType, result)
+	camera := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/integrations/video/cameras", token, map[string]any{
+		"cameraId": "camera_one_device", "cameraName": "一号摄像头", "brand": "海康", "cameraPoint": "东侧入口",
+		"building": "A", "floor": "1", "room": "大厅", "deviceId": "device-001", "enabled": true,
+	}, http.StatusCreated)
+	if camera["deviceId"] != "device-001" || camera["brand"] != "海康" || camera["cameraPoint"] != "东侧入口" {
+		t.Fatalf("saved camera metadata = %#v", camera)
+	}
+	requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/integrations/video/cameras", token, map[string]any{
+		"cameraId": "camera_two", "cameraName": "二号摄像头", "deviceId": "device-001", "enabled": true,
+	}, http.StatusCreated)
+	result := requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/integrations/video/relations?relationType=device&targetId=device-001", token, nil, http.StatusOK)
+	items := result["items"].([]any)
+	if len(items) != 2 {
+		t.Fatalf("reverse device lookup = %#v", result)
+	}
+	requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/integrations/video/relations?relationType=floor&targetId=1", token, nil, http.StatusUnprocessableEntity)
+	requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/integrations/video/cameras", token, map[string]any{
+		"cameraId": "camera_invalid", "cameraName": "非法摄像头", "relatedDeviceIds": []string{"device-001", "device-002"}, "enabled": true,
+	}, http.StatusUnprocessableEntity)
+	viewer := requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/integrations/video/cameras", token, nil, http.StatusOK)
+	for _, item := range viewer["items"].([]any) {
+		row := item.(map[string]any)
+		if _, exposed := row["streamUrl"]; exposed || row["cameraId"] == "camera_one_device" && row["deviceId"] != "device-001" {
+			t.Fatalf("camera response contains stream data or lost device relation: %#v", row)
 		}
 	}
 }

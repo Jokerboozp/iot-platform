@@ -149,7 +149,7 @@ onMounted(async () => {
   </el-dialog>
 
   <el-dialog v-model="debugDialog" :title="`数据联调 · ${deviceName(selected)}`" width="min(780px, 94vw)">
-    <el-alert title="这里仅用于验证协议包、归档和规则链路" description="真实设备上报后请到原始报文查看解析结果；测试数据也会进入同一条链路并留下审计记录。" type="info" :closable="false" show-icon />
+    <el-alert title="这里用于验证协议包、归档和告警链路" description="真实设备上报后请到原始报文查看解析结果；设备明确上报的告警无需规则即可进入告警中心，测试数据也会留下审计记录。" type="info" :closable="false" show-icon />
     <el-input class="top-gap" v-model="debugPayload" type="textarea" :rows="14" />
     <el-button class="top-gap" type="primary" @click="sendDebug">发送测试数据</el-button>
     <pre>{{ debugResult }}</pre>

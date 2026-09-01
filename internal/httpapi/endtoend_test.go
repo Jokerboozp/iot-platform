@@ -127,23 +127,13 @@ func TestHTTPWorkflow(t *testing.T) {
 	if ollamaTest["success"] != true || ollamaTest["answer"] != "Ollama 沙箱地址生效" {
 		t.Fatalf("unexpected Ollama provider test %#v", ollamaTest)
 	}
-	api.cfg.VideoPreviewOrigins = []string{"https://media.example"}
-	requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/integrations/video/cameras", token, map[string]any{"cameraId": "camera_preview", "cameraName": "园区入口", "areaId": "area_gate", "streamUrl": "https://media.example/live/gate.m3u8", "enabled": true}, 201)
-	preview := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/integrations/video/cameras/camera_preview/preview", token, map[string]any{}, 200)
-	if preview["streamType"] != "hls" || preview["playbackUrl"] != "https://media.example/live/gate.m3u8" {
-		t.Fatalf("unexpected video preview session %#v", preview)
-	}
+	requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/integrations/video/cameras", token, map[string]any{"cameraId": "camera_metadata", "cameraName": "园区入口", "brand": "海康", "cameraPoint": "东门", "building": "A", "floor": "1", "room": "大厅", "enabled": true}, 201)
+	requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/integrations/video/cameras/camera_metadata/preview", token, map[string]any{}, http.StatusNotFound)
 	viewerCameras := requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/integrations/video/cameras", viewerToken, nil, 200)
 	viewerCamera := viewerCameras["items"].([]any)[0].(map[string]any)
-	if _, exposed := viewerCamera["streamUrl"]; exposed || viewerCamera["streamConfigured"] != true || viewerCamera["previewEligible"] != true {
-		t.Fatalf("viewer camera stream metadata is unsafe or incomplete %#v", viewerCamera)
+	if _, exposed := viewerCamera["streamUrl"]; exposed || viewerCamera["cameraName"] != "园区入口" || viewerCamera["brand"] != "海康" {
+		t.Fatalf("viewer camera metadata is incomplete or contains stream data %#v", viewerCamera)
 	}
-	requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/integrations/video/cameras", token, map[string]any{"cameraId": "camera_blocked", "cameraName": "未授权来源", "areaId": "area_gate", "streamUrl": "http://127.0.0.1:8080/private.m3u8", "enabled": true}, http.StatusCreated)
-	requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/integrations/video/cameras/camera_blocked/preview", token, map[string]any{}, http.StatusUnprocessableEntity)
-	requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/integrations/video/cameras", token, map[string]any{"cameraId": "camera_disabled", "cameraName": "停用摄像头", "areaId": "area_gate", "streamUrl": "https://media.example/live/disabled.m3u8", "enabled": false}, http.StatusCreated)
-	requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/integrations/video/cameras/camera_disabled/preview", token, map[string]any{}, http.StatusUnprocessableEntity)
-	otherVideoLogin := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/auth/login", "", map[string]any{"username": "admin", "password": "admin123", "tenantId": "tenant_video_other"}, 200)
-	requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/integrations/video/cameras/camera_preview/preview", otherVideoLogin["accessToken"].(string), map[string]any{}, http.StatusNotFound)
 	requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/protocol-packages", token, map[string]any{"id": "protocol_json", "name": "JSON 通用协议", "version": "1.0.0", "protocol": "json", "transport": "HTTP", "payloadFormat": "json", "parserType": "custom_json_parser", "status": "PUBLISHED"}, 201)
 	protocolTest := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/protocol-packages/protocol_json/test", token, map[string]any{"payload": map[string]any{"properties": map[string]any{"temperature": 22.5}}}, 200)
 	if protocolTest["success"] != true {

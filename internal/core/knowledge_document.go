@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/ledongthuc/pdf"
@@ -306,7 +307,19 @@ func cleanText(s string) string {
 	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
-func ChunkKnowledgeText(text string, size, overlap int) []string {
+type KnowledgeTextChunk struct {
+	Index          int
+	StartChar      int
+	EndChar        int
+	CharacterCount int
+	OverlapChars   int
+	Text           string
+}
+
+// ChunkKnowledgeTextDetailed splits normalized extracted text into fixed
+// Unicode-code-point windows. The end offset is exclusive; adjacent windows
+// overlap by the requested number of code points.
+func ChunkKnowledgeTextDetailed(text string, size, overlap int) []KnowledgeTextChunk {
 	if size <= 0 {
 		size = 1200
 	}
@@ -317,20 +330,48 @@ func ChunkKnowledgeText(text string, size, overlap int) []string {
 	if len(r) == 0 {
 		return nil
 	}
-	out := []string{}
+	out := []KnowledgeTextChunk{}
+	previousRawEnd := 0
 	for start := 0; start < len(r); {
-		end := start + size
-		if end > len(r) {
-			end = len(r)
+		rawEnd := start + size
+		if rawEnd > len(r) {
+			rawEnd = len(r)
 		}
-		chunk := strings.TrimSpace(string(r[start:end]))
-		if chunk != "" {
-			out = append(out, chunk)
+		contentStart, contentEnd := start, rawEnd
+		for contentStart < contentEnd && unicode.IsSpace(r[contentStart]) {
+			contentStart++
 		}
-		if end == len(r) {
+		for contentEnd > contentStart && unicode.IsSpace(r[contentEnd-1]) {
+			contentEnd--
+		}
+		if contentStart < contentEnd {
+			overlapChars := 0
+			if previousRawEnd > contentStart {
+				overlapChars = previousRawEnd - contentStart
+			}
+			out = append(out, KnowledgeTextChunk{
+				Index:          len(out) + 1,
+				StartChar:      contentStart,
+				EndChar:        contentEnd,
+				CharacterCount: contentEnd - contentStart,
+				OverlapChars:   overlapChars,
+				Text:           string(r[contentStart:contentEnd]),
+			})
+		}
+		if rawEnd == len(r) {
 			break
 		}
-		start = end - overlap
+		previousRawEnd = rawEnd
+		start = rawEnd - overlap
+	}
+	return out
+}
+
+func ChunkKnowledgeText(text string, size, overlap int) []string {
+	detailed := ChunkKnowledgeTextDetailed(text, size, overlap)
+	out := make([]string, 0, len(detailed))
+	for _, chunk := range detailed {
+		out = append(out, chunk.Text)
 	}
 	return out
 }

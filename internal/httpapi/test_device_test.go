@@ -113,3 +113,70 @@ func TestTestDeviceUsesConfiguredAlarmRuleWithoutCreatingFixtureRule(t *testing.
 		t.Fatalf("configured alarm rule did not publish OPEN_PAGE devices action: %#v", realtime.Messages)
 	}
 }
+
+func TestTestDeviceDirectAlarmCreatesAlarmAndUpdatesDeviceState(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	repo := memory.NewRepository()
+	archive, err := local.NewArchive(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := core.New(repo, archive, local.NewBus(), local.NewRealtime(), parser.NewRegistry(parser.JSONParser{}), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := engine.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Load()
+	cfg.DevMode = true
+	cfg.JWTSecret = "test-secret-at-least-32-characters"
+	cfg.AdminTenants = []string{"tenant_direct_alarm"}
+	api := New(cfg, engine, metrics.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server := httptest.NewServer(api.Handler())
+	defer server.Close()
+	token, err := api.auth.Issue("operator", "tenant_direct_alarm", "operator", nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/test-devices/provision", token, map[string]any{}, http.StatusCreated)
+	deviceID := fixture["device"].(map[string]any)["id"].(string)
+	requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/device-registry/"+deviceID+"/debug", token, map[string]any{
+		"messageId": "raw_direct_alarm",
+		"payload": map[string]any{
+			"alarm":      true,
+			"properties": map[string]any{"temperature": 88.5, "smoke": true, "battery": 92},
+			"tags":       map[string]any{"deviceType": "smoke"},
+		},
+	}, http.StatusCreated)
+	alarms := requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/alarms?deviceId="+deviceID+"&status=ACTIVE", token, nil, http.StatusOK)
+	if alarms["count"] != float64(1) {
+		t.Fatalf("direct device alarm was not shown in alarm center: %#v", alarms)
+	}
+	items := alarms["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("expected one direct alarm item: %#v", alarms)
+	}
+	item := items[0].(map[string]any)
+	if item["source"] != "device" || item["alarmType"] != "SMOKE_DETECTED" || item["alarmLevel"] != "HIGH" {
+		t.Fatalf("direct alarm metadata was not inferred correctly: %#v", item)
+	}
+	state := requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/devices/"+deviceID+"/latest", token, nil, http.StatusOK)
+	if state["state"].(map[string]any)["businessStatus"] != "ALARM" {
+		t.Fatalf("device state did not change to ALARM: %#v", state)
+	}
+
+	requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/device-registry/"+deviceID+"/debug", token, map[string]any{
+		"messageId": "raw_direct_recovery",
+		"payload": map[string]any{
+			"properties": map[string]any{"temperature": 26.5, "smoke": false, "battery": 96},
+			"tags":       map[string]any{"deviceType": "smoke"},
+		},
+	}, http.StatusCreated)
+	alarms = requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/alarms?deviceId="+deviceID+"&status=ACTIVE", token, nil, http.StatusOK)
+	if alarms["count"] != float64(0) {
+		t.Fatalf("direct device alarm was not recovered: %#v", alarms)
+	}
+	state = requestJSON(t, server.Client(), http.MethodGet, server.URL+"/api/v1/devices/"+deviceID+"/latest", token, nil, http.StatusOK)
+	if state["state"].(map[string]any)["businessStatus"] != "ONLINE" {
+		t.Fatalf("device state did not return to ONLINE: %#v", state)
+	}
+}

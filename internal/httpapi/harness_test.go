@@ -198,7 +198,7 @@ func TestHarnessHTTPBridgeAndTenantScopedConversation(t *testing.T) {
 		t.Fatalf("unexpected default knowledge binding: %#v", defaultBinding)
 	}
 	requestJSON(t, server.Client(), http.MethodPut, server.URL+"/api/v1/ai/workflows/ops-assistant/knowledge-binding", token, map[string]any{"retrievalMode": "disabled", "topK": 5, "minScore": .2, "noMatchPolicy": "allow-model"}, http.StatusForbidden)
-	savedBinding := requestJSON(t, server.Client(), http.MethodPut, server.URL+"/api/v1/ai/workflows/ops-assistant/knowledge-binding", operatorToken, map[string]any{"productIds": []string{"fire-smoke"}, "categories": []string{"manual"}, "tags": []string{"certified"}, "retrievalMode": "auto", "topK": 3, "minScore": .4, "noMatchPolicy": "allow-model"}, http.StatusOK)
+	savedBinding := requestJSON(t, server.Client(), http.MethodPut, server.URL+"/api/v1/ai/workflows/ops-assistant/knowledge-binding", operatorToken, map[string]any{"retrievalMode": "auto", "topK": 3, "minScore": .4, "noMatchPolicy": "allow-model"}, http.StatusOK)
 	if savedBinding["workflowId"] != "ops-assistant" || savedBinding["topK"] != float64(3) {
 		t.Fatalf("unexpected saved knowledge binding: %#v", savedBinding)
 	}
@@ -220,10 +220,10 @@ func TestHarnessHTTPBridgeAndTenantScopedConversation(t *testing.T) {
 	if claims.TokenUse != "harness" || claims.RunID != captured.RunID || !claims.HasAudience(auth.HarnessAudience) || len(claims.Scopes) != len(auth.HarnessReadScopes()) {
 		t.Fatalf("unsafe harness token: %#v", claims)
 	}
-	if claims.Knowledge == nil || claims.Knowledge.TopK != 3 || claims.Knowledge.MinScore != .4 || strings.Join(claims.Knowledge.ProductIDs, ",") != "fire-smoke" {
+	if claims.Knowledge == nil || claims.Knowledge.WorkflowID != "ops-assistant" || claims.Knowledge.TopK != 3 || claims.Knowledge.MinScore != .4 {
 		t.Fatalf("knowledge binding was not enforced in harness token: %#v", claims.Knowledge)
 	}
-	if !strings.Contains(captured.Question, "平台知识策略") || !strings.Contains(captured.Question, "fire-smoke") {
+	if !strings.Contains(captured.Question, "平台知识策略") || !strings.Contains(captured.Question, "ops-assistant") {
 		t.Fatalf("knowledge policy was not supplied to harness: %q", captured.Question)
 	}
 	if captured.ConversationID == "browser-controlled" || captured.ConversationID != harnessConversationID("tenant-a", "alice", "browser-controlled") {
@@ -237,10 +237,10 @@ func TestHarnessHTTPBridgeAndTenantScopedConversation(t *testing.T) {
 	}
 
 	engine.KB = knowledge.NewLocal()
-	if err = engine.KB.(ports.FilteredKnowledgeBase).IndexKnowledge(context.Background(), ports.KnowledgeIndexInput{TenantID: "tenant-a", ProductID: "fire-smoke", Category: "alarm-sop", Tags: []string{"certified"}, DocumentID: "doc-1", ChunkID: "chunk-1", Content: []byte("烟雾 告警 处置 需要 现场 复核")}); err != nil {
+	if err = engine.KB.(ports.FilteredKnowledgeBase).IndexKnowledge(context.Background(), ports.KnowledgeIndexInput{TenantID: "tenant-a", WorkflowID: "ops-assistant", ProductID: "fire-smoke", Category: "alarm-sop", Tags: []string{"certified"}, DocumentID: "doc-1", ChunkID: "chunk-1", Content: []byte("烟雾 告警 处置 需要 现场 复核")}); err != nil {
 		t.Fatal(err)
 	}
-	requestJSON(t, server.Client(), http.MethodPut, server.URL+"/api/v1/ai/workflows/ops-assistant/knowledge-binding", operatorToken, map[string]any{"productIds": []string{"fire-smoke"}, "categories": []string{"alarm-sop"}, "tags": []string{"certified"}, "retrievalMode": "always", "topK": 3, "minScore": .5, "noMatchPolicy": "require-evidence"}, http.StatusOK)
+	requestJSON(t, server.Client(), http.MethodPut, server.URL+"/api/v1/ai/workflows/ops-assistant/knowledge-binding", operatorToken, map[string]any{"retrievalMode": "always", "topK": 3, "minScore": .5, "noMatchPolicy": "require-evidence"}, http.StatusOK)
 	requestJSON(t, server.Client(), http.MethodPost, server.URL+"/api/v1/ai/chat", token, map[string]any{"question": "烟雾 告警", "workflowId": "ops-assistant"}, http.StatusOK)
 	runtime.mu.Lock()
 	forced := runtime.requests[len(runtime.requests)-1]

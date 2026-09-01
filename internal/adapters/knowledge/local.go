@@ -8,6 +8,7 @@ import (
 	"sync"
 	"unicode"
 
+	"iot-platform/internal/model"
 	"iot-platform/internal/ports"
 )
 
@@ -16,8 +17,9 @@ type Local struct {
 	docs map[string][]document
 }
 type document struct {
-	id, documentID, product, category, text string
-	tags                                    []string
+	id, documentID, workflow, product, category, text            string
+	chunkIndex, startChar, endChar, characterCount, overlapChars int
+	tags                                                         []string
 }
 
 func NewLocal() *Local { return &Local{docs: map[string][]document{}} }
@@ -27,8 +29,39 @@ func (k *Local) Index(_ context.Context, tenant, product, id string, data []byte
 func (k *Local) IndexKnowledge(_ context.Context, in ports.KnowledgeIndexInput) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	k.docs[in.TenantID] = append(k.docs[in.TenantID], document{id: in.ChunkID, documentID: in.DocumentID, product: in.ProductID, category: in.Category, tags: append([]string(nil), in.Tags...), text: string(in.Content)})
+	characterCount := in.CharacterCount
+	if characterCount <= 0 {
+		characterCount = len([]rune(string(in.Content)))
+	}
+	k.docs[in.TenantID] = append(k.docs[in.TenantID], document{id: in.ChunkID, documentID: in.DocumentID, workflow: in.WorkflowID, product: in.ProductID, category: in.Category, chunkIndex: in.ChunkIndex, startChar: in.StartChar, endChar: in.EndChar, characterCount: characterCount, overlapChars: in.OverlapChars, tags: append([]string(nil), in.Tags...), text: string(in.Content)})
 	return nil
+}
+
+func (k *Local) ListKnowledgeChunks(_ context.Context, tenant, documentID string) ([]model.KnowledgeChunk, error) {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	chunks := make([]model.KnowledgeChunk, 0)
+	for _, item := range k.docs[tenant] {
+		if item.documentID != documentID {
+			continue
+		}
+		index := item.chunkIndex
+		if index <= 0 {
+			index = len(chunks) + 1
+		}
+		start, end := item.startChar, item.endChar
+		if end <= start {
+			start, end = 0, item.characterCount
+		}
+		chunks = append(chunks, model.KnowledgeChunk{DocumentID: item.documentID, ChunkID: item.id, Index: index, StartChar: start, EndChar: end, CharacterCount: item.characterCount, OverlapChars: item.overlapChars, Content: item.text, Vectorized: false})
+	}
+	sort.SliceStable(chunks, func(i, j int) bool {
+		if chunks[i].Index == chunks[j].Index {
+			return chunks[i].ChunkID < chunks[j].ChunkID
+		}
+		return chunks[i].Index < chunks[j].Index
+	})
+	return chunks, nil
 }
 func (k *Local) Search(_ context.Context, tenant, q string, limit int) ([]string, error) {
 	hits, err := k.SearchKnowledge(context.Background(), ports.KnowledgeSearchRequest{TenantID: tenant, Question: q, Limit: limit})
@@ -54,6 +87,9 @@ func (k *Local) SearchKnowledge(_ context.Context, in ports.KnowledgeSearchReque
 	}
 	hits := []hit{}
 	for _, d := range k.docs[in.TenantID] {
+		if in.WorkflowID != "" && !strings.EqualFold(d.workflow, in.WorkflowID) {
+			continue
+		}
 		if !matchesAny(d.product, in.ProductIDs) || !matchesAny(d.category, in.Categories) || !containsAll(d.tags, in.Tags) {
 			continue
 		}
@@ -81,7 +117,7 @@ func (k *Local) SearchKnowledge(_ context.Context, in ports.KnowledgeSearchReque
 		if normalized < in.MinScore {
 			continue
 		}
-		out = append(out, ports.KnowledgeHit{DocumentID: h.doc.documentID, ChunkID: h.doc.id, ProductID: h.doc.product, Category: h.doc.category, Tags: append([]string(nil), h.doc.tags...), Content: h.doc.text, Score: normalized})
+		out = append(out, ports.KnowledgeHit{DocumentID: h.doc.documentID, ChunkID: h.doc.id, WorkflowID: h.doc.workflow, ProductID: h.doc.product, Category: h.doc.category, Tags: append([]string(nil), h.doc.tags...), Content: h.doc.text, Score: normalized})
 	}
 	return out, nil
 }

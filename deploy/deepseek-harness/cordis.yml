@@ -1,23 +1,35 @@
-# Protocol-only DeepSeek Harness composition for the IoT operations gateway.
-# stdout is reserved for newline-delimited JSON-RPC and no stdout logger is
-# composed. The gateway provides all dynamic values through a scrubbed child
-# environment for one tenant/user-namespaced resident runtime.
-
-- id: sdk-jsonrpc-server
-  name: '@deepseek-ai/dsh-sdk-jsonrpc-server'
-  config:
-    maxTokensAsSuccess: false
+# IoT deployment overlay for the upstream `dsh --profile sdk-minimal` tree.
+# This file is passed with `--patch`; the selected profile supplies the base
+# plugins, while this overlay restores the sidecar's tenant/session policy.
 
 - id: llm-deepseek
-  name: '@deepseek-ai/dsh-llm-deepseek'
   config:
     apiKeyEnv: DEEPSEEK_API_KEY
-    thinking: enabled
-    reasoningEffort: high
+    defaultContextWindow: !!js Number(process.env.DSH_CONTEXT_WINDOW ?? 1000000)
     streamIdleTimeoutMs: 300000
 
+- id: sandbox
+  disabled: true
+
+- id: sandbox-policy
+  disabled: true
+
+- id: subprocess
+  disabled: true
+
+- id: pty
+  disabled: true
+
+- id: terminal-bash
+  disabled: true
+
+- id: terminal-pwsh
+  disabled: true
+
+- id: fs-local
+  disabled: true
+
 - id: agent-spine
-  name: '@deepseek-ai/dsh-agent-spine-demo'
   config:
     includeHarnessIdentity: false
     includeRuntimeContext: false
@@ -32,30 +44,39 @@
     tools:
       mode: native
 
-- id: mcp-iot
-  name: '@deepseek-ai/dsh-mcp-client'
-  config:
-    serverName: iot
-    transport: streamable-http
-    url: !!js process.env.IOT_MCP_URL
-    headers:
-      X-IOT-Runtime-Key: !!js process.env.IOT_MCP_RUNTIME_KEY
-    toolCallTimeoutMs: 60000
-    failOnStartupError: true
-    reconnect:
-      enabled: true
-      initialDelayMs: 500
-      maxDelayMs: 30000
-      maxAttempts: 10
+- id: persistent-bash
+  disabled: true
 
-- id: session-persistence
-  name: '@deepseek-ai/dsh-session-persistence-jsonl'
+- id: persistent-pwsh
+  disabled: true
+
+- id: str-replace-editor
+  disabled: true
+
+- id: sessions
   config:
     root: !!js process.env.IOT_HARNESS_SESSION_ROOT
     packChunks: true
     compression: none
 
-- id: iot-ops-policy
-  name: './iot-ops-plugin.mjs'
-  config:
-    allowedTools: !!js JSON.parse(process.env.IOT_ALLOWED_TOOLS_JSON ?? '[]')
+- insert:
+    - id: mcp-iot
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: iot
+        transport: streamable-http
+        url: !!js process.env.IOT_MCP_URL
+        headers:
+          X-IOT-Runtime-Key: !!js process.env.IOT_MCP_RUNTIME_KEY
+        toolCallTimeoutMs: 60000
+        failOnStartupError: true
+        reconnect:
+          enabled: true
+          initialDelayMs: 500
+          maxDelayMs: 30000
+          maxAttempts: 10
+
+    - id: iot-ops-policy
+      name: './iot-ops-plugin.mjs'
+      config:
+        allowedTools: !!js JSON.parse(process.env.IOT_ALLOWED_TOOLS_JSON ?? '[]')

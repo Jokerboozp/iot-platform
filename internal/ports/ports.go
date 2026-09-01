@@ -96,11 +96,32 @@ type Repository interface {
 }
 
 type Archive interface {
-	PutRaw(context.Context, model.RawMessage) (model.RawArchiveIndex, error)
-	GetRaw(context.Context, model.RawArchiveIndex) (model.RawMessage, error)
 	PutObject(context.Context, string, string, io.Reader, int64, string) (string, error)
 	GetObject(context.Context, string, string) (io.ReadCloser, error)
 	Health(context.Context) error
+}
+
+// RawMessageStore keeps the raw device payload available for parsing, replay
+// and the daily object-storage backup. It is deliberately separate from
+// Archive: MinIO is an object store for completed backups and media, not the
+// per-message write path.
+type RawMessageStore interface {
+	PutRaw(context.Context, model.RawMessage) (model.RawArchiveIndex, error)
+	GetRaw(context.Context, model.RawArchiveIndex) (model.RawMessage, error)
+}
+
+// RawMessageDatabase is implemented by the PostgreSQL and ClickHouse
+// adapters. The raw store chooses one database per device according to its
+// configured or observed reporting frequency.
+type RawMessageDatabase interface {
+	SaveRawMessage(context.Context, model.RawMessage) error
+	GetRawMessage(context.Context, string, string) (model.RawMessage, error)
+}
+
+// RawMessageReader is used only for reading legacy MinIO raw objects created
+// before the database-backed raw log path was introduced.
+type RawMessageReader interface {
+	GetRaw(context.Context, model.RawArchiveIndex) (model.RawMessage, error)
 }
 
 type Handler func(context.Context, []byte) error
@@ -259,17 +280,24 @@ type KnowledgeBase interface {
 }
 
 type KnowledgeIndexInput struct {
-	TenantID   string
-	ProductID  string
-	Category   string
-	Tags       []string
-	DocumentID string
-	ChunkID    string
-	Content    []byte
+	TenantID       string
+	WorkflowID     string
+	ProductID      string
+	Category       string
+	Tags           []string
+	DocumentID     string
+	ChunkID        string
+	ChunkIndex     int
+	StartChar      int
+	EndChar        int
+	CharacterCount int
+	OverlapChars   int
+	Content        []byte
 }
 
 type KnowledgeSearchRequest struct {
 	TenantID   string
+	WorkflowID string
 	Question   string
 	ProductIDs []string
 	Categories []string
@@ -281,6 +309,7 @@ type KnowledgeSearchRequest struct {
 type KnowledgeHit struct {
 	DocumentID string   `json:"documentId,omitempty"`
 	ChunkID    string   `json:"chunkId,omitempty"`
+	WorkflowID string   `json:"workflowId,omitempty"`
 	ProductID  string   `json:"productId,omitempty"`
 	Category   string   `json:"category,omitempty"`
 	Tags       []string `json:"tags,omitempty"`
@@ -294,6 +323,13 @@ type KnowledgeHit struct {
 type FilteredKnowledgeBase interface {
 	IndexKnowledge(context.Context, KnowledgeIndexInput) error
 	SearchKnowledge(context.Context, KnowledgeSearchRequest) ([]KnowledgeHit, error)
+}
+
+// InspectableKnowledgeBase exposes the stored text slices without exposing
+// the high-dimensional embedding vector itself. It is used by the knowledge
+// management UI to explain how a document was indexed.
+type InspectableKnowledgeBase interface {
+	ListKnowledgeChunks(context.Context, string, string) ([]model.KnowledgeChunk, error)
 }
 
 type PlatformCatalog interface {

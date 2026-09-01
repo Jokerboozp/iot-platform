@@ -3,7 +3,7 @@
 This directory turns the official DeepSeek Harness JSON-RPC runtime into a
 small, manifest-driven IoT workflow service. The Harness source is vendored at
 `upstream/deepseek-harness` and pinned by `REVISION` to
-`b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`.
+`cd5ef8148158c3a752a658978873241fdf8e2bbc`.
 
 The public gateway listens on port `8091`. A separate MCP credential proxy
 listens only on `127.0.0.1:8092`; it is not an externally exposed port.
@@ -15,15 +15,18 @@ Build context must be the repository root:
 ```bash
 docker build \
   -f deploy/deepseek-harness/Dockerfile \
-  -t iot-deepseek-harness:b150a551 .
+  -t iot-deepseek-harness:cd5ef81 .
 ```
 
-The image installs `pnpm@11.7.0`, builds the official host libraries, verifies
-the pinned revision marker, and materializes the upstream `pnpm deploy`
-runtime carrier. Its build runs gateway tests, imports the real agent/MCP
-plugins, and completes a real SDK + Cordis + mock-MCP startup handshake. The
-gateway tests can also run without a Harness build because they inject a
-protocol-compatible fake:
+The image installs `pnpm@11.7.0`, builds the complete upstream package tree
+required by the unified `dsh` CLI, verifies the pinned revision marker, and
+materializes the upstream `pnpm deploy` runtime carrier. The sidecar launches
+`@deepseek-ai/dsh/lib/bin.js` with the `sdk-minimal` profile and applies the
+deployment-owned `cordis.yml` overlay. Each resident conversation receives an
+isolated `DSH_HOME`. The image build runs gateway tests, imports the real
+agent/MCP plugins, and completes a real SDK + Cordis + mock-MCP startup
+handshake. The gateway tests can also run without a Harness build because they
+inject a protocol-compatible fake:
 
 ```bash
 node --test deploy/deepseek-harness/gateway.test.mjs
@@ -44,7 +47,7 @@ docker run --rm \
   -e IOT_HARNESS_GATEWAY_TOKEN='replace-with-at-least-32-random-characters' \
   -e IOT_HARNESS_MCP_ALLOWED_ORIGINS='http://platform-api:8080' \
   -v iot-harness-data:/data \
-  iot-deepseek-harness:b150a551
+  iot-deepseek-harness:cd5ef81
 ```
 
 Important settings:
@@ -55,6 +58,7 @@ Important settings:
 | `IOT_HARNESS_MCP_PROXY_PORT` | `8092` | Loopback-only MCP proxy port |
 | `IOT_HARNESS_MCP_ALLOWED_ORIGINS` | `http://platform-api:8080` | Comma-separated exact upstream origins |
 | `IOT_HARNESS_SESSION_ROOT` | `/data/sessions` | JSONL persistence root |
+| `IOT_HARNESS_HOME` | `/data/runtime-home` | Base directory for per-conversation `DSH_HOME` state |
 | `IOT_HARNESS_WORKSPACE` | `/data/workspace` | Runtime workspace root |
 | `IOT_HARNESS_CONVERSATION_TTL_MS` | `600000` | Idle resident runtime lifetime |
 | `IOT_HARNESS_MAX_CACHED_CONVERSATIONS` | `32` | Resident runtime pool ceiling |

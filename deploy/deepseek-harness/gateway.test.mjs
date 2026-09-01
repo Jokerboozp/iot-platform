@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path'
 import { after, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { createGateway, loadPluginCatalog, runtimeNodeArgs } from './gateway.mjs'
+import { createGateway, loadPluginCatalog } from './gateway.mjs'
 import { apply as applyPolicy } from './iot-ops-plugin.mjs'
 
 const deploymentDir = dirname(fileURLToPath(import.meta.url))
@@ -32,7 +32,7 @@ async function startGateway(factory, options = {}) {
   const gateway = createGateway({
     gatewayToken,
     pluginDir: join(deploymentDir, 'plugins'),
-    cordisConfig: join(deploymentDir, 'cordis.yml'),
+    patchFile: join(deploymentDir, 'cordis.yml'),
     runtimeBin: fileURLToPath(import.meta.url),
     sdkClientModule: fileURLToPath(import.meta.url),
     runtimeCwd: deploymentDir,
@@ -157,13 +157,6 @@ test('gateway refuses internal tokens shorter than 32 characters', () => {
   )
 })
 
-test('runtime launch preserves pnpm dependency resolution from the carrier closure', () => {
-  assert.deepEqual(runtimeNodeArgs('/runtime/packaged-bin.js', '/runtime/cordis.yml'), [
-    '/runtime/packaged-bin.js',
-    '/runtime/cordis.yml',
-  ])
-})
-
 test('manifest security ceiling rejects a write-capable tool', async () => {
   const root = await mkdtemp(join(tmpdir(), 'iot-harness-manifest-'))
   temporaryDirectories.push(root)
@@ -241,6 +234,8 @@ test('stream emits only the public NDJSON event vocabulary and suppresses reason
   assert.match(factorySpec.proxyMcpUrl, /^http:\/\/127\.0\.0\.1:\d+\/mcp$/)
   assert.equal(factorySpec.runtimeAccessKey.length, 43)
   assert.ok(factorySpec.plugin.persona.includes('AI 运维助手'))
+  assert.equal(factorySpec.patchFile, join(deploymentDir, 'cordis.yml'))
+  assert.ok(factorySpec.harnessHome.endsWith(`\\${factorySpec.sessionId}`) || factorySpec.harnessHome.endsWith(`/${factorySpec.sessionId}`))
 })
 
 test('upstream MCP path is exactly /mcp/harness', async () => {

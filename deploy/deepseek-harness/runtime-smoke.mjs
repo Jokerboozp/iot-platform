@@ -7,9 +7,9 @@ import { pathToFileURL } from 'node:url'
 const harnessRoot = process.env.DSH_SOURCE_ROOT ?? '/harness'
 const runtimeRoot = process.env.DSH_RUNTIME_NODE_ROOT ?? join(harnessRoot, 'runtime-node')
 const deploymentRoot = process.env.DSH_DEPLOYMENT_ROOT ?? join(harnessRoot, 'examples', 'iot-ops-agent')
-const runtimeBin = join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh-sdk-jsonrpc-demo', 'lib', 'packaged-bin.js')
+const runtimeBin = join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
 const sdkClientModule = join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh-sdk-client', 'lib', 'index.js')
-const cordisConfig = join(deploymentRoot, 'cordis.yml')
+const patchFile = join(deploymentRoot, 'cordis.yml')
 
 const [{ McpServer }, { StreamableHTTPServerTransport }, { DeepSeekHarness }] = await Promise.all([
   import(pathToFileURL(join(runtimeRoot, 'node_modules', '@modelcontextprotocol', 'sdk', 'dist', 'esm', 'server', 'mcp.js')).href),
@@ -52,34 +52,34 @@ try {
   temporaryRoot = await mkdtemp(join(tmpdir(), 'iot-harness-runtime-smoke-'))
   const workspace = join(temporaryRoot, 'workspace')
   const sessionRoot = join(temporaryRoot, 'sessions')
-  await Promise.all([mkdir(workspace), mkdir(sessionRoot)])
+  const harnessHome = join(temporaryRoot, 'dsh-home')
+  await Promise.all([mkdir(workspace), mkdir(sessionRoot), mkdir(harnessHome)])
 
   harness = new DeepSeekHarness({
-    launch: {
-      command: process.execPath,
-      args: [runtimeBin, cordisConfig],
-      cwd: runtimeRoot,
-      env: {
-        HOME: temporaryRoot,
-        PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
-        TMPDIR: temporaryRoot,
-        DEEPSEEK_API_KEY: 'runtime-smoke-key-not-used-for-model-calls',
-        DSH_CORDIS_CONFIG: cordisConfig,
-        IOT_MCP_URL: `http://127.0.0.1:${address.port}/mcp`,
-        IOT_MCP_RUNTIME_KEY: 'runtime-smoke-loopback-key',
-        IOT_HARNESS_SESSION_ROOT: sessionRoot,
-        IOT_OPS_PERSONA: 'Read-only IoT operations startup verifier.',
-        IOT_ALLOWED_TOOLS_JSON: JSON.stringify(['mcp__iot__query_alarm_list']),
-      },
-      requestTimeoutMs: 15000,
-      shutdownTimeoutMs: 2000,
-      disposeEofGraceMs: 2000,
-      disposeGraceMs: 1000,
+    dshBin: runtimeBin,
+    profile: 'sdk-minimal',
+    patches: [patchFile],
+    dshHome: harnessHome,
+    processCwd: runtimeRoot,
+    env: {
+      HOME: temporaryRoot,
+      PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
+      TMPDIR: temporaryRoot,
+      DEEPSEEK_API_KEY: 'runtime-smoke-key-not-used-for-model-calls',
+      IOT_MCP_URL: `http://127.0.0.1:${address.port}/mcp`,
+      IOT_MCP_RUNTIME_KEY: 'runtime-smoke-loopback-key',
+      IOT_HARNESS_SESSION_ROOT: sessionRoot,
+      IOT_OPS_PERSONA: 'Read-only IoT operations startup verifier.',
+      IOT_ALLOWED_TOOLS_JSON: JSON.stringify(['mcp__iot__query_alarm_list']),
     },
     cwd: workspace,
     provider: 'deepseek-official',
     model: 'deepseek-v4-flash',
     maxTokens: 256,
+    requestTimeoutMs: 15000,
+    shutdownTimeoutMs: 2000,
+    disposeEofGraceMs: 2000,
+    disposeGraceMs: 1000,
   })
   await harness.start()
   process.stdout.write('DeepSeek Harness runtime carrier smoke passed\n')

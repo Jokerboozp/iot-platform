@@ -54,7 +54,7 @@ func (e *Engine) runReplay(ctx context.Context, req model.ReplayRequest) {
 		}
 		for _, idx := range indexes {
 			<-ticker.C
-			raw, err := e.Archive.GetRaw(ctx, idx)
+			raw, err := e.GetRaw(ctx, idx)
 			if err != nil {
 				e.Log.Error("read replay archive", "replayId", req.ID, "messageId", idx.MessageID, "bucket", idx.ObjectBucket, "key", idx.ObjectKey, "error", err)
 				req.Failed++

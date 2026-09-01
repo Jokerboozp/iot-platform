@@ -50,11 +50,9 @@ type Claims struct {
 	jwt.RegisteredClaims
 }
 type KnowledgeScope struct {
-	ProductIDs []string `json:"productIds,omitempty"`
-	Categories []string `json:"categories,omitempty"`
-	Tags       []string `json:"tags,omitempty"`
-	TopK       int      `json:"topK,omitempty"`
-	MinScore   float64  `json:"minScore,omitempty"`
+	WorkflowID string  `json:"workflowId,omitempty"`
+	TopK       int     `json:"topK,omitempty"`
+	MinScore   float64 `json:"minScore,omitempty"`
 }
 type ACLRule struct {
 	Permission string `json:"permission"`

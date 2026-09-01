@@ -1,4 +1,5 @@
 #!/usr/bin/env sh
+# Fetches the exact revision recorded by deploy/deepseek-harness/REVISION.
 set -eu
 
 script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"

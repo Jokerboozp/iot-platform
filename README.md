@@ -1,6 +1,6 @@
 # 消防 IoT 平台
 
-面向消防物联网场景的一体化管理平台。项目由 Go API、独立 Vue 3 Web、EMQX、PostgreSQL、Redis、ClickHouse、Redpanda、MinIO 以及可选 AI 运行时组成，覆盖设备与数据接入、协议解析、状态管理、告警、视频流预览、原始报文证据链、回放、AI 研判、MCP 和备份恢复。
+面向消防物联网场景的一体化管理平台。项目由 Go API、独立 Vue 3 Web、EMQX、PostgreSQL、Redis、ClickHouse、Redpanda、MinIO 以及可选 AI 运行时组成，覆盖设备与数据接入、协议解析、Kafka/MQTT 双通道转发、状态管理、告警、视频告警与摄像头元数据、原始报文证据链、回放、AI 研判、MCP 和备份恢复。
 
 当前代码库支持三种常用运行方式：使用 Docker Compose 启动前后端与基础设施；分开启动 Go API 和 Vue 前端进行本地开发；或只构建前端静态资源并交给现有 Nginx/Ingress 部署。文档按当前源码和部署配置编写；生产容量、灾备、TLS/ACL 和第三方平台验收仍需在目标环境单独完成。
 
@@ -99,8 +99,8 @@ curl http://127.0.0.1:8091/health
 - 没有代码或 Dockerfile 变更时，只执行 `docker compose up -d`。
 - 只修改后端时执行 `docker compose up -d --build platform-api`；只修改前端时执行
   `docker compose up -d --build platform-web`。
-- `backup-service`、DeepSeek Harness、ThingsPanel、Ollama 和 Weaviate 仅在需要时启用对应 profile；备份服务的
-  手动启动方式见[备份与恢复](#18-备份与恢复)。
+- DeepSeek Harness 和 ThingsPanel 仅在需要时启用对应 profile；`backup-service`、Ollama 与 Weaviate 随基础平台启动，
+  用于原始日志定时备份和本地持久化 Agent 知识库。备份配置见[备份与恢复](#18-备份与恢复)。
 - 不要日常使用 `--no-cache` 或 `--pull`；只有需要强制刷新基础镜像时再使用，否则会增加下载和构建量。
 
 查看占用并清理 7 天未使用的构建缓存：
@@ -310,7 +310,7 @@ docker build -t iot-platform-web:local ./iot_front
 如果前端容器与 API 不在同一个 Docker 网络，请先复制 `iot_front/nginx.conf` 为部署配置，再把其中 `/api/`、`/health/`、`/mcp` 和 SSE 路由的 `proxy_pass http://platform-api:8080` 改为实际 API 地址，然后挂载该配置启动：
 
 ```bash
-docker run -d --name iot-platform-web --restart unless-stopped -p 8080:8080 -e IOT_VIDEO_PREVIEW_CSP_SOURCES= -v "$PWD/nginx.standalone.conf:/etc/nginx/templates/default.conf.template:ro" iot-platform-web:local
+docker run -d --name iot-platform-web --restart unless-stopped -p 8080:8080 -v "$PWD/nginx.standalone.conf:/etc/nginx/templates/default.conf.template:ro" iot-platform-web:local
 ```
 
 Docker Desktop 访问宿主机 API 时可使用 `host.docker.internal`；Linux 需要增加 `--add-host=host.docker.internal:host-gateway`，或直接配置可达的 API 主机名。不要把 API 地址写成容器内的 `127.0.0.1`。
@@ -335,7 +335,7 @@ npm run build
 | `/health/` | Go API | 前端容器健康检查 |
 | `/mcp` | Go API | MCP 与流式响应，关闭代理缓冲 |
 
-可直接以 `iot_front/nginx.conf` 作为 Nginx 配置模板。视频预览域名还要同步配置 `IOT_VIDEO_PREVIEW_ALLOWED_ORIGINS` 和 `IOT_VIDEO_PREVIEW_CSP_SOURCES`。当前前端 API 调用是相对路径，不能只设置 `VITE_API_PROXY_TARGET` 就把生产前端改成跨域直连。
+可直接以 `iot_front/nginx.conf` 作为 Nginx 配置模板。当前摄像头页面只展示元数据，不需要配置视频预览域名或媒体 CSP。前端 API 调用是相对路径，不能只设置 `VITE_API_PROXY_TARGET` 就把生产前端改成跨域直连。
 
 ### 4.6 Kubernetes 前端部署
 
@@ -361,7 +361,7 @@ kubectl apply -f deploy/k8s/platform.yaml
 | 协议开发 | 协议包版本、JSON/Hex/JavaScript/Go Worker 解析器配置和样本调试 |
 | 协议接入助手 | 上传协议/点表，生成 Go 字段映射，表单修改字段，样本预览并发布；不生成 JavaScript |
 | 接入指南 | HTTP/MQTT 上报参数、设备凭证、Topic 和数据联调；不是重复的设备注册入口 |
-| 摄像头映射 | 摄像机与设备/空间关联、视频流预览 |
+| 摄像头映射 | 摄像头品牌、名称、点位、楼层/建筑/房间和设备关联；直播流由外部视频平台提供 |
 | 告警中心 | 告警查询、确认、抑制、恢复和关闭 |
 | 智能巡检 | 点击“立即巡检”后检查设备业务状态、数据新鲜度、活动告警和 AI 处置建议 |
 | 原始报文 | 证据链检索、下载、审计和回放 |
@@ -395,7 +395,7 @@ kubectl apply -f deploy/k8s/platform.yaml
 |---|---|---|
 | 属性上报 | `PROPERTY_REPORT` | 测点、开关量和当前状态值 |
 | 事件上报 | `EVENT_REPORT` | 一次性发生的复位、心跳或测试事件 |
-| 告警上报 | `ALARM_REPORT` | 设备明确上报的告警事件，是否生成平台告警仍由告警规则决定 |
+| 告警上报 | `ALARM_REPORT` | 设备明确上报的告警事件；无需告警规则即可生成平台告警，规则可额外提供分类、等级或联动动作 |
 | 状态变化 | `STATE_CHANGE` | 在线、离线或业务状态变化 |
 | 指令应答 | `COMMAND_REPLY` | 设备对平台指令的响应 |
 | 日志上报 | `LOG_REPORT` | 运行日志或诊断信息 |
@@ -418,18 +418,18 @@ kubectl apply -f deploy/k8s/platform.yaml
 |---|---|
 | 设备与产品 | 产品、协议包、设备注册、设备/网关凭证、发现设备转注册 |
 | 接入指南 | 管理端 REST、设备凭证 HTTP、MQTT 原始 Topic、设备数据联调 |
-| 原始证据链 | gzip JSONL 微批归档、SHA-256、幂等索引、单条精确恢复 |
-| 协议解析 | JSON/Hex 配置映射、受限 JavaScript 脚本、可上传 Go 协议 Worker、AI 协议接入助手、消防烟感/GB26875/Modbus 示例解析器，失败 Topic 与 DLQ |
-| 分层存储 | MinIO、Redpanda、ClickHouse、Redis、PostgreSQL、可选 Weaviate |
+| 原始证据链 | 按设备频率分层写入 PostgreSQL/ClickHouse、SHA-256、幂等索引、每日 gzip JSONL MinIO 备份、单条精确恢复 |
+| 协议解析 | JSON/Hex 配置映射、受限 JavaScript 脚本、可上传 Go 协议 Worker、AI 协议接入助手、消防烟感/GB26875/Modbus 示例解析器，失败重试与 DLQ |
+| 分层存储 | MinIO、Redpanda、ClickHouse、Redis、PostgreSQL、持久化 Weaviate |
 | 状态管理 | ONLINE、OFFLINE、SUSPECTED_OFFLINE 与多维离线判定 |
 | 规则与告警 | JSON/Gengine、物模型校验、冲突检测、告警生命周期和审计 |
 | 实时推送 | EMQX JWT、租户 Topic ACL、WebSocket 状态和告警推送 |
-| 视频 | HMAC Webhook、摄像头映射、设备/楼层/房间多对多关系、直连与大华适配器、海康官方 Artemis Go 客户端、ZLMediaKit HLS 预览、融合告警 |
+| 视频 | HMAC Webhook、摄像头元数据、摄像头到设备的一对多反向查询、设备告警带出摄像头信息、跨源融合 |
 | AI Provider | Eino 编排、Ollama、DeepSeek、OpenAI-compatible 适配器 |
 | AI 工作流 | DeepSeek Harness 源码运行时、SSE、工具卡片、轨迹、告警研判、知识库绑定、Agent 管理、设备巡检和取消、健康巡检 PDF |
 | MCP | Streamable HTTP、租户隔离、只读查询工具和调用审计 |
 | 回放 | DRY_RUN、REINGEST、DIFF、指定解析器版本和限速 |
-| 备份 | PostgreSQL/WAL、ClickHouse、Redis、MinIO-DR、校验与恢复演练 |
+| 备份 | 原始日志每日 MinIO 备份、PostgreSQL/WAL、ClickHouse、Redis、MinIO-DR、校验与恢复演练 |
 | 运维 | 健康检查、JSON 日志、Prometheus、Grafana、Loki、K8s 和压测器 |
 
 ## 7. 系统架构
@@ -451,14 +451,18 @@ kubectl apply -f deploy/k8s/platform.yaml
 
 ```text
 EMQX/REST
-  -> MinIO 或本地 gzip JSONL
-  -> PostgreSQL raw_archive_index
-  -> Redpanda iot.raw.message
+  -> 原始日志分层存储：低频 -> PostgreSQL raw_message_log；高频 -> ClickHouse iot_raw_message
+  -> PostgreSQL raw_archive_index（幂等索引与发布状态）
+  -> Redpanda iot.raw.message（内部解析队列）
   -> Parser Registry
-  -> 标准属性/事件/状态消息
-  -> PostgreSQL + ClickHouse + Redis
-  -> 规则与告警
-  -> EMQX 实时 Topic + AI/RAG 旁路分析
+  -> 解析失败：仅保留归档，可回放；不发布解析结果
+  -> 解析成功的标准消息
+     -> Kafka：iot.property.report / iot.event.report / iot.parsed.message
+     -> MQTT：/iot/parsed/{tenant}/{product}/{device}/{messageType}
+     -> PostgreSQL + ClickHouse + Redis、规则与告警
+  -> EMQX 告警/状态/AI/UI 实时 Topic + AI/RAG 旁路分析
+
+每天由 `backup-service` 在配置的时间（默认 `00:05`，`Asia/Shanghai`）读取前一天两个数据库中的全部原始日志，合并为一个 gzip JSONL 制品并上传 MinIO；设备每次上报不会再单独写 MinIO。JSONL 每行包含 `storage`（`postgres`/`clickhouse`）和完整 `message`，方便审计和恢复。
 ```
 
 ## 8. 项目目录
@@ -473,7 +477,7 @@ internal/core                 状态、规则、告警、视频、AI、回放
 internal/adapters             数据库、消息、对象存储、AI/RAG 适配器
 internal/httpapi              Gin REST API、JWT/RBAC、Webhook
 internal/mcpserver            平台 MCP 与 Harness 专用只读 MCP
-iot_front                    独立 Vue 3、shadcn-vue 视觉系统、Element Plus 兼容层、HLS.js、Nginx 前端项目
+iot_front                    独立 Vue 3、shadcn-vue 视觉系统、Element Plus 兼容层、Nginx 前端项目
 deploy/deepseek-harness       Harness 网关、插件清单和构建适配
 deploy/k8s                    Kubernetes 基线清单
 ops                           Prometheus、Grafana、Loki、EMQX 配置
@@ -511,12 +515,10 @@ Compose profiles：
 
 | Profile | 用途 | 启动方式 |
 |---|---|---|
-| 无 | 完整平台基础服务 | `docker compose up -d --build` |
+| 无 | 完整平台基础服务（包含 backup-service、Ollama、Weaviate） | `docker compose up -d --build` |
 | `gb26875` | 国标消防终端 TCP 接入 | `docker compose --profile gb26875 up -d --build` |
 | `harness` | DeepSeek Harness 插件工作流 | `docker compose --profile harness up -d --build` |
-| `ai` | Ollama 与 Weaviate | `docker compose --profile ai up -d --build` |
 | `thingspanel` | ThingsPanel 上游前后端 | `docker compose --profile thingspanel up -d --build` |
-| `backup` | 备份与恢复演练服务 | `docker compose --profile backup up -d --build backup-service` |
 
 ### GB/T 26875 设备接入示例
 
@@ -627,16 +629,17 @@ docker compose --profile harness logs -f deepseek-harness platform-api
 
 管理员进入“管理中心 → Agent 管理”后，还可以查看启用和禁用的完整清单。动态 Agent 支持 JSON 编辑、启用/禁用和删除；内置插件只读。保存或状态变更后不需要重新部署容器。
 
-### 工作流知识库绑定
+### Agent 知识库策略
 
-展开“AI 工作流 → 工作流知识库绑定”，可以按租户为当前插件配置：
+展开“AI 工作流 → Agent 知识库”，可以按租户为当前 Agent 配置：
 
-- 绑定一个或多个产品；留空表示当前租户的全部产品。
-- 限定知识分类和必须包含的标签。
+- 查看当前 Agent 已直接绑定的文档数量。
 - 选择按需检索、每次强制检索或完全禁用知识库。
 - 配置 TopK、最低相似度以及无证据时是否阻止回答。
 
-绑定不是只写入提示词。平台会将约束写入每次运行的短期 Harness Token，MCP 服务端会覆盖模型提交的产品、分类、标签、TopK 和阈值，防止模型扩大检索范围。“强制检索”会在进入 Harness 前预召回知识；“必须有证据”在无匹配结果时会停止运行。
+上传文档时必须填写 `workflowId`，文档索引也保存同一 Agent ID。平台会将该 ID 写入每次运行的短期 Harness Token，
+MCP 服务端只允许检索该 Agent 的文档；模型无法通过修改工具参数扩大范围。“强制检索”会在进入 Harness 前预召回知识；
+“必须有证据”在无匹配结果时会停止运行。
 
 这部分与 Dify 的知识库工作流理念相似，但实现仍属于本项目：DeepSeek Harness 负责插件运行，Go API 负责租户、绑定策略、检索授权和审计，不需要额外部署 Dify。
 
@@ -708,11 +711,17 @@ Ollama + Weaviate：
 ```bash
 IOT_OLLAMA_URL=http://ollama:11434 \
 IOT_WEAVIATE_URL=http://weaviate:8080 \
-docker compose --profile ai up -d --build
+docker compose up -d --build platform-api ollama weaviate
 
+# Weaviate 的本地向量化模型（首次部署必须拉取）
+docker compose exec ollama ollama pull nomic-embed-text
+# 可选：Ollama 作为对话 Provider 时再拉取对话模型
 docker compose exec ollama ollama pull qwen3:8b
 docker compose restart platform-api
 ```
+
+Compose 默认已经启动 Ollama 和 Weaviate；上面的命令只用于显式重建或补拉模型。Weaviate 数据保存在
+`weaviate-data` 命名卷，Ollama 模型保存在 `ollama-data` 命名卷。
 
 AI 页面“管理中心 → Provider 测试与配置”支持 DeepSeek、Ollama 和 OpenAI-compatible 连接测试。管理员可以添加自定义 OpenAI-compatible Provider，保存名称、Provider ID、Base URL 和模型配置到当前浏览器/租户的配置中；API Key 只在本次测试使用，不写入浏览器配置、数据库或审计日志。自定义 Provider 的 Base URL 来源必须加入 `IOT_AI_PROVIDER_TEST_ALLOWED_ORIGINS` 白名单，平台不会为了测试关闭 SSRF 防护。
 
@@ -721,60 +730,29 @@ AI 页面“管理中心 → Provider 测试与配置”支持 DeepSeek、Ollama
 进入左侧“知识库管理”页面可以：
 
 - 拖放或选择单个知识文档。
-- 可选关联产品 ID。
-- 设置知识分类与标签，供工作流绑定精确过滤。
+- 必须直接选择一个 Agent；文档不会再通过产品、分类和标签叠加筛选。
+- 设置知识分类与标签作为文档元数据，方便查看。
 - 上传原文件并自动提取、分片和建立索引。
 - 查看当前租户的文档、索引状态、分片数、大小和上传时间。
-- 直接跳转到“AI 工作流”验证知识检索。
+- 点击“详情”可以查看实际切片：切片序号、Unicode 字符范围、重叠字符数、切片正文和是否已向量化；详情接口为 `GET /api/v1/knowledge/documents/{id}`。
+- 进入“AI 工作流 → 管理中心 → Agent 知识库”调整该 Agent 的检索模式、TopK 和最低相似度。
 
 支持 PDF、DOCX、PPTX、XLSX、ODT、ODP、ODS、HTML/XML 和 UTF-8 文本，单文件最大 32 MiB。扫描版 PDF 需要先完成 OCR。
 
-未配置 `IOT_WEAVIATE_URL` 时使用本地内存索引：原文件和文档记录会持久保存，但 API 重启后检索索引需要重新建立。页面会显示相应警告；生产环境应启用 Weaviate 持久索引。
+当前分片规则是：先提取并清洗文件文本，再按固定窗口切片，每段最多 1200 个 Unicode 字符，默认重叠 200 个字符。
+字符范围使用 `[StartChar, EndChar)` 约定（起点包含、终点不包含），所以详情页可以直接核对每段在清洗后全文中的位置。
+Weaviate 持久化保存切片正文和这些元数据，并通过 `text2vec-ollama` 使用 `nomic-embed-text` 向量化；页面展示向量化状态和模型信息，不直接展开高维向量数组。
 
-## 14. 摄像头映射与视频流预览
+默认 Compose 使用持久化 Weaviate；页面会显示 `WEAVIATE 持久索引`。如果手动运行 API 且未配置
+`IOT_WEAVIATE_URL`，才会退回本地内存索引：原文件和文档记录会持久保存，但 API 重启后检索索引需要重新建立。
 
-摄像头映射用于把视频平台的 `cameraId` 与平台设备、楼层、房间和区域等空间信息关联。摄像头与这些对象通过规范化关系表实现多对多，既可从摄像头查看关联对象，也可通过关系接口按设备、楼层或房间反向查询摄像头。视频告警到达后，平台可以结合附近传感器状态、设备属性和当前告警完成跨源研判。
+## 14. 摄像头映射与视频告警
 
-浏览器预览支持：
+摄像头页面只维护外部视频平台的基础信息：品牌、摄像头名称、摄像头点位、建筑、楼层、房间和关联设备。
+一个设备可以关联多个摄像头，但一个摄像头最多关联一个设备。设备告警和视频告警会带出安全的摄像头元数据，供前端或外部视频平台定位直播流。
 
-- HLS：`.m3u8`
-- MP4
-- WebM
-
-浏览器不能直接播放 RTSP/RTMP。Compose 默认启动 ZLMediaKit，平台预览服务会通过 `addStreamProxy` 创建拉流代理并返回 HLS 播放地址；也可以直接配置已 allowlist 的 HLS/MP4/WebM 地址。官方 ZLMediaKit 的 HTTP API 和播放 URL 约定见 [HTTP API](https://github.com/ZLMediaKit/ZLMediaKit/wiki/MediaServer%E6%94%AF%E6%8C%81%E7%9A%84HTTP-API) 和 [播放 URL 规则](https://github.com/ZLMediaKit/ZLMediaKit/wiki/%E6%92%AD%E6%94%BEurl%E8%A7%84%E5%88%99)。
-
-摄像头接入方式有三种：直接直播地址、`dahua_sdk`、`hikvision_sdk`。海康方式由 Go
-进程直接调用官方 Artemis OpenAPI 的 `/artemis/api/video/v2/cameras/previewURLs`，用
-`IOT_VIDEO_HIKVISION_APP_KEY`/`IOT_VIDEO_HIKVISION_APP_SECRET` 签名，每次预览重新获取
-短时效地址；平台不调用或依赖已有 Java 服务，也不在摄像头表保存厂商密码。返回的
-RTSP/RTMP 地址再交给 ZLMediaKit 转换。配置和验收边界见
-[视频 SDK 适配器契约](docs/VIDEO_SDK_ADAPTER.md)。
-
-允许预览的媒体 Origin：
-
-```dotenv
-IOT_VIDEO_PREVIEW_ALLOWED_ORIGINS=https://video.example.internal,http://localhost:8888
-IOT_VIDEO_PREVIEW_CSP_SOURCES=https://video.example.internal http://localhost:8888
-```
-
-`IOT_VIDEO_PREVIEW_ALLOWED_ORIGINS` 使用逗号分隔的精确 Origin；`IOT_VIDEO_PREVIEW_CSP_SOURCES` 使用空格分隔。HLS 主播放列表、子播放列表和分片使用到的 Origin 都必须包含。
-
-ZLMediaKit 配置示例：
-
-```dotenv
-IOT_VIDEO_MEDIA_ALLOWED_HOSTS=camera.example.internal,dahua-sdk.internal,hikvision-sdk.internal
-IOT_VIDEO_ZLM_API_URL=http://zlm:80
-IOT_VIDEO_ZLM_PLAYBACK_BASE_URL=https://video.example.internal
-IOT_VIDEO_ZLM_SECRET=<与 ZLMediaKit api.secret 相同的随机值>
-IOT_VIDEO_ZLM_VHOST=__defaultVhost__
-IOT_VIDEO_ZLM_APP=iot
-IOT_VIDEO_DAHUA_SDK_URL=http://dahua-sdk.internal:8080/stream
-IOT_VIDEO_HIKVISION_API_URL=https://hikcentral.example.internal
-IOT_VIDEO_HIKVISION_APP_KEY=<Artemis AppKey>
-IOT_VIDEO_HIKVISION_APP_SECRET=<Artemis AppSecret>
-```
-
-未配置白名单时可以保存摄像头映射，但 API 会拒绝创建浏览器预览，防止利用媒体 URL 探测内网。
+平台不会解析、采集、代理或预览视频流，不启动 ZLMediaKit，也不调用海康/大华取流 SDK；摄像头表不保存
+直播地址和厂商凭据。外部视频平台负责根据 `cameraId` 或摄像头点位提供直播流，平台只负责告警关联和元数据定位。
 
 视频 Webhook 签名：
 
@@ -858,9 +836,9 @@ POST         /api/v1/ai/protocol-assistant/publish
 POST         /api/v1/ai/rule-draft
 POST         /api/v1/ai/reports
 GET/POST     /api/v1/knowledge/documents
+GET          /api/v1/knowledge/documents/{id}
 GET/POST/PUT /api/v1/integrations/video/cameras[/{id}]
 GET          /api/v1/integrations/video/relations?relationType=device&targetId={id}
-POST         /api/v1/integrations/video/cameras/{id}/preview
 POST         /api/v1/integrations/video/alarm
 POST         /api/v1/mqtt/token
 POST         /api/v1/device-mqtt/token
@@ -874,7 +852,7 @@ POST         /mcp/harness
 Redpanda/Kafka：
 
 ```text
-iot.raw.message             iot.parse.failed
+iot.raw.message             iot.parsed.message
 iot.property.report         iot.event.report
 iot.device.state            iot.video.alarm
 iot.alarm.raised            iot.alarm.recovered
@@ -888,6 +866,7 @@ EMQX：
 /external/raw/{tenantId}/{productId}/{deviceId}
 /jetlinks/raw/{tenantId}/{productId}/{deviceId}
 /external/video/alarm/{tenantId}/{cameraId}
+/iot/parsed/{tenantId}/{productId}/{deviceId}/{messageType}
 /iot/device/state/{tenantId}/{productId}/{deviceId}
 /iot/alarm/{eventType}/{cityCode}/{districtCode}/{buildingId}/{deviceType}/{deviceId}
 ```
@@ -914,18 +893,18 @@ Harness 使用独立的 `/mcp/harness`，仅接受平台签发的短期内部令
 
 ## 18. 备份与恢复
 
-`backup-service` 现在是可选服务，普通 `docker compose up -d` 不会启动它，也不会执行定时备份。容器还使用 `restart: "no"`，手动启动后 Docker 或主机重启也不会自动拉起。需要备份时手动启用 `backup` profile；启用后默认每天全量备份、每 15 分钟执行增量任务，覆盖 PostgreSQL/WAL、ClickHouse、Redis、MinIO、Redpanda/EMQX 配置和可选 Weaviate 快照。
+`backup-service` 现在随主 Compose 默认启动，并使用 `restart: unless-stopped`，主系统启动或容器异常退出后会自动拉起。启动后默认每天 `00:05`（`Asia/Shanghai`）备份前一天的全部原始日志到 MinIO。全量/增量基础设施备份仍保留为手动能力，不再由默认调度器周期执行。
 
 启动或停止备份服务：
 
 ```powershell
-docker compose --profile backup up -d --build backup-service
-docker compose --profile backup stop backup-service
+docker compose up -d --build
+docker compose stop backup-service
 ```
 
-已有环境如果之前启动过备份服务，需要先执行一次 `stop`；`backup-staging` 数据卷不会被自动删除，历史备份数据仍会保留。
+完整启动主系统时直接执行 `docker compose up -d --build` 即可；如需临时停止备份服务，执行 `docker compose stop backup-service`，后续再次执行 `docker compose up -d` 会恢复它。`backup-staging` 数据卷不会被自动删除，历史备份数据仍会保留。
 
-登录前端后进入“运行中心 → 备份中心”，可以查看全量、增量和恢复演练记录，打开任务详情查看 manifest 中的制品清单与 SHA-256。管理员可以在页面触发全量/增量备份、下载制品和执行非破坏性恢复演练；普通查看账号只能查看记录和文件元数据。页面通过 `platform-api` 代理访问 `backup-service`，浏览器不会接触备份管理令牌。
+登录前端后进入“运行中心 → 备份中心”，可以查看全量、增量、原始日志和恢复演练记录，打开任务详情查看 manifest 中的制品清单与 SHA-256。管理员可以在页面触发全量/增量/原始日志备份、下载制品和执行非破坏性恢复演练；普通查看账号只能查看记录和文件元数据。页面通过 `platform-api` 代理访问 `backup-service`，浏览器不会接触备份管理令牌。
 
 Compose 默认使用 `IOT_BACKUP_URL=http://backup-service:8090`，并将同一个 `IOT_BACKUP_ADMIN_TOKEN` 注入 API 和备份服务。若拆分部署，请让 Go API 能访问 `IOT_BACKUP_URL`，并保证两个服务的令牌一致；备份文件以 MinIO 中的 manifest 为准，不依赖浏览器访问 backup-service 的 8090 端口。
 
@@ -934,8 +913,11 @@ Compose 默认使用 `IOT_BACKUP_URL=http://backup-service:8090`，并将同一�
 ```powershell
 $backupHeaders = @{Authorization='Bearer change-me-backup-admin-token'}
 Invoke-RestMethod -Method Post 'http://localhost:8092/backup?type=FULL' -Headers $backupHeaders
+Invoke-RestMethod -Method Post 'http://localhost:8092/backup?type=RAW_LOGS' -Headers $backupHeaders
 Invoke-RestMethod -Method Post 'http://localhost:8092/restore/drill?backupId=latest' -Headers $backupHeaders
 ```
+
+调度时间可通过 `IOT_BACKUP_TIME` 和 `IOT_BACKUP_TIMEZONE` 配置；`RAW_LOGS` 手动触发默认也备份前一天。设备原始日志的分层阈值通过 `IOT_RAW_HIGH_FREQUENCY_INTERVAL_SEC` 配置，默认 60 秒：设备的 `reportIntervalSec` 或实际消息间隔不超过阈值时写入 ClickHouse，否则写入 PostgreSQL。单数据库部署会自动回退到可用数据库。
 
 恢复演练只读取制品、校验哈希并记录结果，不覆盖当前数据。生产恢复必须先在隔离环境验证。
 

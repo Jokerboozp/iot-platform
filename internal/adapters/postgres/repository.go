@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -276,6 +277,29 @@ func (r *Repository) SaveRawIndex(ctx context.Context, v model.RawArchiveIndex) 
 	tag, err := r.pool.Exec(ctx, `INSERT INTO raw_archive_index(tenant_id,product_id,device_id,message_id,protocol,payload_format,object_bucket,object_key,object_offset,payload_hash,payload_size,received_at,archived_at,published_at,publish_attempts,last_publish_error) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) ON CONFLICT DO NOTHING`, v.TenantID, v.ProductID, v.DeviceID, v.MessageID, v.Protocol, v.PayloadFormat, v.ObjectBucket, v.ObjectKey, v.ObjectOffset, v.PayloadHash, v.PayloadSize, v.ReceivedAt, v.ArchivedAt, v.PublishedAt, v.PublishAttempts, v.LastPublishError)
 	return tag.RowsAffected() == 1, err
 }
+
+func (r *Repository) SaveRawMessage(ctx context.Context, v model.RawMessage) error {
+	body, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	_, err = r.pool.Exec(ctx, `INSERT INTO raw_message_log(tenant_id,message_id,product_id,device_id,protocol,payload_format,payload_hash,payload_size,received_at,stored_at,body) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT DO NOTHING`, v.TenantID, v.MessageID, v.ProductID, v.DeviceID, v.Protocol, v.PayloadFormat, v.PayloadHash(), len(v.Payload), v.ReceivedAt, time.Now().UnixMilli(), body)
+	return err
+}
+
+func (r *Repository) GetRawMessage(ctx context.Context, tenant, messageID string) (model.RawMessage, error) {
+	var value model.RawMessage
+	var body []byte
+	err := r.pool.QueryRow(ctx, `SELECT body FROM raw_message_log WHERE tenant_id=$1 AND message_id=$2`, tenant, messageID).Scan(&body)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return value, ErrNotFound
+	}
+	if err == nil {
+		err = json.Unmarshal(body, &value)
+	}
+	return value, err
+}
+
 func (r *Repository) MarkRawPublished(ctx context.Context, tenant, messageID string, publishedAt int64, lastError string) error {
 	_, err := r.pool.Exec(ctx, `UPDATE raw_archive_index SET publish_attempts=publish_attempts+1,last_publish_error=$4,published_at=CASE WHEN $4='' THEN $3 ELSE published_at END WHERE tenant_id=$1 AND message_id=$2`, tenant, messageID, publishedAt, lastError)
 	return err
@@ -540,7 +564,7 @@ func (r *Repository) CountDeviceStates(ctx context.Context, tenant string, unreg
 		where += ` AND NOT EXISTS (SELECT 1 FROM device_registry dr WHERE dr.tenant_id=ds.tenant_id AND dr.id=ds.device_id)`
 	}
 	var total, online int
-	if err := r.pool.QueryRow(ctx, `SELECT count(*),count(*) FILTER (WHERE ds.business_status='ONLINE') FROM device_state ds `+where, tenant).Scan(&total, &online); err != nil {
+	if err := r.pool.QueryRow(ctx, `SELECT count(*),count(*) FILTER (WHERE ds.business_status IN ('ONLINE','ALARM')) FROM device_state ds `+where, tenant).Scan(&total, &online); err != nil {
 		return 0, 0, err
 	}
 	return total, online, nil
@@ -754,21 +778,29 @@ func (r *Repository) ListPendingVideoEvents(ctx context.Context, limit int) ([]m
 	return out, rows.Err()
 }
 
-const videoCameraMappingColumns = `tenant_id,camera_id,coalesce(camera_name,''),coalesce(ingest_mode,'direct'),coalesce(project_id,''),coalesce(city_code,''),coalesce(district_code,''),coalesce(building,''),coalesce(floor,''),coalesce(area_id,''),related_device_ids,related_floor_ids,related_room_ids,coalesce(video_platform_id,''),coalesce(stream_url,''),coalesce(stream_type,''),coalesce(sdk_endpoint,''),coalesce(sdk_camera_id,''),coalesce(sdk_credential_ref,''),enabled`
+const videoCameraMappingColumns = `tenant_id,camera_id,coalesce(camera_name,''),coalesce(brand,''),coalesce(camera_point,''),coalesce(device_id,''),coalesce(ingest_mode,'direct'),coalesce(project_id,''),coalesce(city_code,''),coalesce(district_code,''),coalesce(building,''),coalesce(floor,''),coalesce(room,''),coalesce(area_id,''),related_device_ids,related_floor_ids,related_room_ids,coalesce(video_platform_id,''),coalesce(stream_url,''),coalesce(stream_type,''),coalesce(sdk_endpoint,''),coalesce(sdk_camera_id,''),coalesce(sdk_credential_ref,''),enabled`
 
 func (r *Repository) SaveVideoCameraMapping(ctx context.Context, v model.VideoCameraMapping) error {
-	if v.IngestMode == "" {
-		v.IngestMode = "direct"
+	legacyDeviceIDs := cleanUniqueStrings(v.RelatedDeviceIDs)
+	if v.DeviceID == "" && len(legacyDeviceIDs) == 1 {
+		v.DeviceID = legacyDeviceIDs[0]
 	}
-	deviceIDs, _ := json.Marshal(v.RelatedDeviceIDs)
-	floorIDs, _ := json.Marshal(v.RelatedFloorIDs)
-	roomIDs, _ := json.Marshal(v.RelatedRoomIDs)
+	if len(legacyDeviceIDs) > 1 || v.DeviceID != "" && len(legacyDeviceIDs) == 1 && legacyDeviceIDs[0] != v.DeviceID {
+		return errors.New("a camera can be associated with at most one device")
+	}
+	deviceIDs := []string{}
+	if v.DeviceID != "" {
+		deviceIDs = []string{v.DeviceID}
+	}
+	deviceJSON, _ := json.Marshal(deviceIDs)
+	floorJSON, _ := json.Marshal([]string{})
+	roomJSON, _ := json.Marshal([]string{})
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `INSERT INTO video_camera_mapping(tenant_id,camera_id,camera_name,ingest_mode,project_id,city_code,district_code,building,floor,area_id,related_device_ids,related_floor_ids,related_room_ids,video_platform_id,stream_url,stream_type,sdk_endpoint,sdk_camera_id,sdk_credential_ref,enabled) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) ON CONFLICT(tenant_id,camera_id) DO UPDATE SET camera_name=excluded.camera_name,ingest_mode=excluded.ingest_mode,project_id=excluded.project_id,city_code=excluded.city_code,district_code=excluded.district_code,building=excluded.building,floor=excluded.floor,area_id=excluded.area_id,related_device_ids=excluded.related_device_ids,related_floor_ids=excluded.related_floor_ids,related_room_ids=excluded.related_room_ids,video_platform_id=excluded.video_platform_id,stream_url=excluded.stream_url,stream_type=excluded.stream_type,sdk_endpoint=excluded.sdk_endpoint,sdk_camera_id=excluded.sdk_camera_id,sdk_credential_ref=excluded.sdk_credential_ref,enabled=excluded.enabled`, v.TenantID, v.CameraID, v.CameraName, v.IngestMode, v.ProjectID, v.CityCode, v.DistrictCode, v.Building, v.Floor, v.AreaID, deviceIDs, floorIDs, roomIDs, v.VideoPlatformID, v.StreamURL, v.StreamType, v.SDKEndpoint, v.SDKCameraID, v.SDKCredentialRef, v.Enabled); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO video_camera_mapping(tenant_id,camera_id,camera_name,brand,camera_point,device_id,ingest_mode,project_id,city_code,district_code,building,floor,room,area_id,related_device_ids,related_floor_ids,related_room_ids,video_platform_id,stream_url,stream_type,sdk_endpoint,sdk_camera_id,sdk_credential_ref,enabled) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24) ON CONFLICT(tenant_id,camera_id) DO UPDATE SET camera_name=excluded.camera_name,brand=excluded.brand,camera_point=excluded.camera_point,device_id=excluded.device_id,ingest_mode=excluded.ingest_mode,project_id=excluded.project_id,city_code=excluded.city_code,district_code=excluded.district_code,building=excluded.building,floor=excluded.floor,room=excluded.room,area_id=excluded.area_id,related_device_ids=excluded.related_device_ids,related_floor_ids=excluded.related_floor_ids,related_room_ids=excluded.related_room_ids,video_platform_id=excluded.video_platform_id,stream_url=excluded.stream_url,stream_type=excluded.stream_type,sdk_endpoint=excluded.sdk_endpoint,sdk_camera_id=excluded.sdk_camera_id,sdk_credential_ref=excluded.sdk_credential_ref,enabled=excluded.enabled`, v.TenantID, v.CameraID, v.CameraName, v.Brand, v.CameraPoint, v.DeviceID, v.IngestMode, v.ProjectID, v.CityCode, v.DistrictCode, v.Building, v.Floor, v.Room, v.AreaID, deviceJSON, floorJSON, roomJSON, v.VideoPlatformID, v.StreamURL, v.StreamType, v.SDKEndpoint, v.SDKCameraID, v.SDKCredentialRef, v.Enabled); err != nil {
 		return err
 	}
 	if err = replaceVideoCameraRelationsTx(ctx, tx, v.TenantID, v.CameraID, videoRelations(v)); err != nil {
@@ -779,11 +811,14 @@ func (r *Repository) SaveVideoCameraMapping(ctx context.Context, v model.VideoCa
 func (r *Repository) scanVideoMapping(row rowScanner) (model.VideoCameraMapping, error) {
 	var v model.VideoCameraMapping
 	var related, floors, rooms []byte
-	err := row.Scan(&v.TenantID, &v.CameraID, &v.CameraName, &v.IngestMode, &v.ProjectID, &v.CityCode, &v.DistrictCode, &v.Building, &v.Floor, &v.AreaID, &related, &floors, &rooms, &v.VideoPlatformID, &v.StreamURL, &v.StreamType, &v.SDKEndpoint, &v.SDKCameraID, &v.SDKCredentialRef, &v.Enabled)
+	err := row.Scan(&v.TenantID, &v.CameraID, &v.CameraName, &v.Brand, &v.CameraPoint, &v.DeviceID, &v.IngestMode, &v.ProjectID, &v.CityCode, &v.DistrictCode, &v.Building, &v.Floor, &v.Room, &v.AreaID, &related, &floors, &rooms, &v.VideoPlatformID, &v.StreamURL, &v.StreamType, &v.SDKEndpoint, &v.SDKCameraID, &v.SDKCredentialRef, &v.Enabled)
 	if err == nil {
 		_ = json.Unmarshal(related, &v.RelatedDeviceIDs)
 		_ = json.Unmarshal(floors, &v.RelatedFloorIDs)
 		_ = json.Unmarshal(rooms, &v.RelatedRoomIDs)
+		if v.DeviceID == "" && len(v.RelatedDeviceIDs) == 1 {
+			v.DeviceID = v.RelatedDeviceIDs[0]
+		}
 	}
 	return v, err
 }
@@ -846,19 +881,28 @@ func replaceVideoCameraRelationsTx(ctx context.Context, tx pgx.Tx, tenant, camer
 	if _, err := tx.Exec(ctx, `DELETE FROM video_camera_relation WHERE tenant_id=$1 AND camera_id=$2`, tenant, camera); err != nil {
 		return err
 	}
+	deviceID := ""
 	for _, relation := range relations {
-		if relation.TargetID == "" || (relation.RelationType != "device" && relation.RelationType != "floor" && relation.RelationType != "room") {
+		if relation.TargetID == "" || relation.RelationType != "device" {
 			continue
 		}
+		if deviceID != "" && deviceID != relation.TargetID {
+			return errors.New("a camera can be associated with at most one device")
+		}
+		deviceID = relation.TargetID
 		if _, err := tx.Exec(ctx, `INSERT INTO video_camera_relation(tenant_id,camera_id,relation_type,target_id) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`, tenant, camera, relation.RelationType, relation.TargetID); err != nil {
 			return err
 		}
 	}
-	deviceIDs, floorIDs, roomIDs := relationIDs(relations)
+	deviceIDs := []string{}
+	if deviceID != "" {
+		deviceIDs = []string{deviceID}
+	}
+	floorIDs, roomIDs := []string{}, []string{}
 	deviceJSON, _ := json.Marshal(deviceIDs)
 	floorJSON, _ := json.Marshal(floorIDs)
 	roomJSON, _ := json.Marshal(roomIDs)
-	if _, err := tx.Exec(ctx, `UPDATE video_camera_mapping SET related_device_ids=$3,related_floor_ids=$4,related_room_ids=$5 WHERE tenant_id=$1 AND camera_id=$2`, tenant, camera, deviceJSON, floorJSON, roomJSON); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE video_camera_mapping SET device_id=$3,related_device_ids=$4,related_floor_ids=$5,related_room_ids=$6 WHERE tenant_id=$1 AND camera_id=$2`, tenant, camera, deviceID, deviceJSON, floorJSON, roomJSON); err != nil {
 		return err
 	}
 	return nil
@@ -897,15 +941,33 @@ func (r *Repository) ListVideoCameraRelationsByTarget(ctx context.Context, tenan
 }
 
 func videoRelations(v model.VideoCameraMapping) []model.VideoCameraRelation {
-	out := make([]model.VideoCameraRelation, 0, len(v.RelatedDeviceIDs)+len(v.RelatedFloorIDs)+len(v.RelatedRoomIDs))
-	for _, id := range v.RelatedDeviceIDs {
-		out = append(out, model.VideoCameraRelation{TenantID: v.TenantID, CameraID: v.CameraID, RelationType: "device", TargetID: id})
+	deviceID := strings.TrimSpace(v.DeviceID)
+	if deviceID == "" {
+		legacy := cleanUniqueStrings(v.RelatedDeviceIDs)
+		if len(legacy) == 1 {
+			deviceID = legacy[0]
+		}
 	}
-	for _, id := range v.RelatedFloorIDs {
-		out = append(out, model.VideoCameraRelation{TenantID: v.TenantID, CameraID: v.CameraID, RelationType: "floor", TargetID: id})
+	if deviceID == "" {
+		return nil
 	}
-	for _, id := range v.RelatedRoomIDs {
-		out = append(out, model.VideoCameraRelation{TenantID: v.TenantID, CameraID: v.CameraID, RelationType: "room", TargetID: id})
+	out := []model.VideoCameraRelation{{TenantID: v.TenantID, CameraID: v.CameraID, RelationType: "device", TargetID: deviceID}}
+	return out
+}
+
+func cleanUniqueStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
 	}
 	return out
 }
@@ -945,11 +1007,11 @@ func (r *Repository) GetAIAnalysis(ctx context.Context, tenant, id string) (mode
 }
 func (r *Repository) SaveKnowledgeDoc(ctx context.Context, v model.KnowledgeDoc) error {
 	b, _ := json.Marshal(v.Metadata)
-	_, err := r.pool.Exec(ctx, `INSERT INTO ai_knowledge_doc(id,tenant_id,product_id,category,tags,object_bucket,object_key,filename,status,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(id) DO UPDATE SET product_id=excluded.product_id,category=excluded.category,tags=excluded.tags,status=excluded.status,metadata=excluded.metadata`, v.ID, v.TenantID, v.ProductID, v.Category, v.Tags, v.ObjectBucket, v.ObjectKey, v.Filename, v.Status, b)
+	_, err := r.pool.Exec(ctx, `INSERT INTO ai_knowledge_doc(id,tenant_id,workflow_id,product_id,category,tags,object_bucket,object_key,filename,status,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(id) DO UPDATE SET workflow_id=excluded.workflow_id,product_id=excluded.product_id,category=excluded.category,tags=excluded.tags,status=excluded.status,metadata=excluded.metadata`, v.ID, v.TenantID, v.WorkflowID, v.ProductID, v.Category, v.Tags, v.ObjectBucket, v.ObjectKey, v.Filename, v.Status, b)
 	return err
 }
 func (r *Repository) ListKnowledgeDocs(ctx context.Context, tenant string) ([]model.KnowledgeDoc, error) {
-	rows, err := r.pool.Query(ctx, `SELECT id,tenant_id,coalesce(product_id,''),coalesce(category,''),coalesce(tags,'{}'),object_bucket,object_key,filename,status,metadata,(extract(epoch from created_at)*1000)::bigint FROM ai_knowledge_doc WHERE tenant_id=$1 ORDER BY created_at DESC,id DESC`, tenant)
+	rows, err := r.pool.Query(ctx, `SELECT id,tenant_id,coalesce(workflow_id,''),coalesce(product_id,''),coalesce(category,''),coalesce(tags,'{}'),object_bucket,object_key,filename,status,metadata,(extract(epoch from created_at)*1000)::bigint FROM ai_knowledge_doc WHERE tenant_id=$1 ORDER BY created_at DESC,id DESC`, tenant)
 	if err != nil {
 		return nil, err
 	}
@@ -958,7 +1020,7 @@ func (r *Repository) ListKnowledgeDocs(ctx context.Context, tenant string) ([]mo
 	for rows.Next() {
 		var v model.KnowledgeDoc
 		var metadata []byte
-		if err = rows.Scan(&v.ID, &v.TenantID, &v.ProductID, &v.Category, &v.Tags, &v.ObjectBucket, &v.ObjectKey, &v.Filename, &v.Status, &metadata, &v.CreatedAt); err != nil {
+		if err = rows.Scan(&v.ID, &v.TenantID, &v.WorkflowID, &v.ProductID, &v.Category, &v.Tags, &v.ObjectBucket, &v.ObjectKey, &v.Filename, &v.Status, &metadata, &v.CreatedAt); err != nil {
 			return nil, err
 		}
 		if len(metadata) > 0 {
@@ -976,7 +1038,7 @@ func (r *Repository) ListKnowledgeDocsPage(ctx context.Context, tenant string, l
 	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM ai_knowledge_doc WHERE tenant_id=$1`, tenant).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := r.pool.Query(ctx, `SELECT id,tenant_id,coalesce(product_id,''),coalesce(category,''),coalesce(tags,'{}'),object_bucket,object_key,filename,status,metadata,(extract(epoch from created_at)*1000)::bigint FROM ai_knowledge_doc WHERE tenant_id=$1 ORDER BY created_at DESC,id DESC LIMIT $2 OFFSET $3`, tenant, limit, offset)
+	rows, err := r.pool.Query(ctx, `SELECT id,tenant_id,coalesce(workflow_id,''),coalesce(product_id,''),coalesce(category,''),coalesce(tags,'{}'),object_bucket,object_key,filename,status,metadata,(extract(epoch from created_at)*1000)::bigint FROM ai_knowledge_doc WHERE tenant_id=$1 ORDER BY created_at DESC,id DESC LIMIT $2 OFFSET $3`, tenant, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -985,7 +1047,7 @@ func (r *Repository) ListKnowledgeDocsPage(ctx context.Context, tenant string, l
 	for rows.Next() {
 		var item model.KnowledgeDoc
 		var metadata []byte
-		if err = rows.Scan(&item.ID, &item.TenantID, &item.ProductID, &item.Category, &item.Tags, &item.ObjectBucket, &item.ObjectKey, &item.Filename, &item.Status, &metadata, &item.CreatedAt); err != nil {
+		if err = rows.Scan(&item.ID, &item.TenantID, &item.WorkflowID, &item.ProductID, &item.Category, &item.Tags, &item.ObjectBucket, &item.ObjectKey, &item.Filename, &item.Status, &metadata, &item.CreatedAt); err != nil {
 			return nil, 0, err
 		}
 		if len(metadata) > 0 {

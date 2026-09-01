@@ -82,8 +82,8 @@ func (s *Server) runBackup(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if kind != "FULL" && kind != "INCREMENTAL" {
-		problem(w, http.StatusUnprocessableEntity, "type must be FULL or INCREMENTAL")
+	if kind != "FULL" && kind != "INCREMENTAL" && kind != "RAW_LOGS" {
+		problem(w, http.StatusUnprocessableEntity, "type must be FULL, INCREMENTAL or RAW_LOGS")
 		return
 	}
 	query := url.Values{"type": []string{kind}}

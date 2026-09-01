@@ -2,8 +2,7 @@ name: iot-platform
 
 # 单文件部署入口：
 #   docker compose up -d --build
-# 可选 AI：
-#   docker compose --profile ai up -d --build
+# 本地知识库：默认启动持久化 Weaviate + Ollama（数据保存在命名卷）。
 # 所有 ${VAR:-default} 均可由 shell 环境变量或可选 .env 覆盖。
 
 x-service-defaults: &service-defaults
@@ -29,21 +28,11 @@ services:
       IOT_VIDEO_PLATFORM_SECRETS: ${IOT_VIDEO_PLATFORM_SECRETS:-video-platform-1:local-video-secret-change-me}
       IOT_VIDEO_PLATFORM_TENANTS: ${IOT_VIDEO_PLATFORM_TENANTS:-video-platform-1:tenant_001}
       IOT_VIDEO_MEDIA_ALLOWED_HOSTS: ${IOT_VIDEO_MEDIA_ALLOWED_HOSTS:-}
-      IOT_VIDEO_PREVIEW_ALLOWED_ORIGINS: ${IOT_VIDEO_PREVIEW_ALLOWED_ORIGINS:-}
-      IOT_VIDEO_ZLM_API_URL: ${IOT_VIDEO_ZLM_API_URL:-http://zlm:80}
-      IOT_VIDEO_ZLM_PLAYBACK_BASE_URL: ${IOT_VIDEO_ZLM_PLAYBACK_BASE_URL:-http://localhost:8090}
-      IOT_VIDEO_ZLM_SECRET: ${IOT_VIDEO_ZLM_SECRET:-local-zlm-secret-change-me}
-      IOT_VIDEO_ZLM_VHOST: ${IOT_VIDEO_ZLM_VHOST:-__defaultVhost__}
-      IOT_VIDEO_ZLM_APP: ${IOT_VIDEO_ZLM_APP:-iot}
-      IOT_VIDEO_DAHUA_SDK_URL: ${IOT_VIDEO_DAHUA_SDK_URL:-}
-      IOT_VIDEO_DAHUA_SDK_TOKEN: ${IOT_VIDEO_DAHUA_SDK_TOKEN:-}
-      IOT_VIDEO_HIKVISION_API_URL: ${IOT_VIDEO_HIKVISION_API_URL:-}
-      IOT_VIDEO_HIKVISION_APP_KEY: ${IOT_VIDEO_HIKVISION_APP_KEY:-}
-      IOT_VIDEO_HIKVISION_APP_SECRET: ${IOT_VIDEO_HIKVISION_APP_SECRET:-}
       IOT_POSTGRES_DSN: postgres://iot:${POSTGRES_PASSWORD:-local-iot-postgres-change-me}@postgres:5432/iot?sslmode=disable
       IOT_REDIS_ADDR: redis:6379
       IOT_REDIS_PASSWORD: ${REDIS_PASSWORD:-local-iot-redis-change-me}
       IOT_CLICKHOUSE_URL: http://iot:${CLICKHOUSE_PASSWORD:-local-iot-clickhouse-change-me}@clickhouse:8123?database=iot
+      IOT_RAW_HIGH_FREQUENCY_INTERVAL_SEC: ${IOT_RAW_HIGH_FREQUENCY_INTERVAL_SEC:-60}
       IOT_MINIO_ENDPOINT: minio:9000
       IOT_MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-iotadmin}
       IOT_MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-local-iot-minio-change-me}
@@ -64,7 +53,7 @@ services:
       IOT_AI_HARNESS_MCP_URL: ${IOT_AI_HARNESS_MCP_URL:-http://platform-api:8080/mcp/harness}
       IOT_AI_HARNESS_MODEL: ${IOT_AI_HARNESS_MODEL:-deepseek-v4-flash}
       IOT_AI_HARNESS_TIMEOUT: ${IOT_AI_HARNESS_TIMEOUT:-90s}
-      IOT_WEAVIATE_URL: ${IOT_WEAVIATE_URL:-}
+      IOT_WEAVIATE_URL: ${IOT_WEAVIATE_URL:-http://weaviate:8080}
       IOT_BACKUP_URL: ${IOT_BACKUP_URL:-http://backup-service:8090}
       IOT_BACKUP_ADMIN_TOKEN: ${IOT_BACKUP_ADMIN_TOKEN:-change-me-backup-admin-token}
       IOT_THINGSPANEL_URL: ${IOT_THINGSPANEL_URL:-}
@@ -81,7 +70,7 @@ services:
       redpanda-init: {condition: service_completed_successfully}
       clickhouse: {condition: service_healthy}
       emqx: {condition: service_healthy}
-      zlm: {condition: service_started}
+      weaviate: {condition: service_healthy}
 
   platform-web:
     <<: *service-defaults
@@ -89,31 +78,9 @@ services:
     build:
       context: ./iot_front
       dockerfile: Dockerfile
-    environment:
-      IOT_VIDEO_PREVIEW_CSP_SOURCES: ${IOT_VIDEO_PREVIEW_CSP_SOURCES:-}
     ports: ["${IOT_WEB_PORT:-8080}:8080"]
     depends_on:
       platform-api: {condition: service_started}
-
-  zlm:
-    <<: *service-defaults
-    image: ${IOT_ZLM_IMAGE:-zlmediakit/zlmediakit:master}
-    environment:
-      IOT_VIDEO_ZLM_SECRET: ${IOT_VIDEO_ZLM_SECRET:-local-zlm-secret-change-me}
-    command:
-      - sh
-      - -ec
-      - |
-        sed -i "s|^secret=.*|secret=$${IOT_VIDEO_ZLM_SECRET}|" /opt/media/conf/config.ini
-        exec ./MediaServer -s default.pem -c ../conf/config.ini -l 0
-    ports:
-      - "${IOT_ZLM_RTMP_PORT:-1935}:1935"
-      - "${IOT_ZLM_HTTP_PORT:-8090}:80"
-      - "${IOT_ZLM_HTTPS_PORT:-8443}:443"
-      - "${IOT_ZLM_RTSP_PORT:-8554}:554"
-      - "${IOT_ZLM_RTP_PORT:-10000}:10000"
-      - "${IOT_ZLM_RTP_PORT:-10000}:10000/udp"
-      - "${IOT_ZLM_WEBRTC_PORT:-8000}:8000/udp"
 
   gb26875-gateway:
     <<: *service-defaults
@@ -145,6 +112,7 @@ services:
       IOT_HARNESS_PORT: "8091"
       IOT_HARNESS_GATEWAY_TOKEN: ${IOT_AI_HARNESS_TOKEN:-local-harness-gateway-token-change-me-now}
       IOT_HARNESS_SESSION_ROOT: /data/sessions
+      IOT_HARNESS_HOME: /data/runtime-home
       IOT_HARNESS_WORKSPACE: /data/workspace
       IOT_HARNESS_PLUGIN_DIR: /data/plugins
       IOT_HARNESS_PLUGIN_SEED_DIR: /harness/examples/iot-ops-agent/plugins
@@ -348,7 +316,7 @@ services:
     entrypoint: ["/bin/bash", "-ec"]
     command:
       - |
-        for topic in iot.raw.message iot.parse.failed iot.property.report iot.event.report iot.device.state iot.video.alarm iot.alarm.raised iot.alarm.recovered iot.alarm.confirmed iot.alarm.ai-analysis iot.ui-action iot.replay.request; do
+        for topic in iot.raw.message iot.parse.failed iot.parsed.message iot.property.report iot.event.report iot.device.state iot.video.alarm iot.alarm.raised iot.alarm.recovered iot.alarm.confirmed iot.alarm.ai-analysis iot.ui-action iot.replay.request; do
           rpk -X brokers=redpanda:9092 topic create "$$topic" --partitions 12 --replicas 1 || true
         done
     networks: [iot]
@@ -432,8 +400,7 @@ services:
 
   backup-service:
     <<: *service-defaults
-    profiles: [backup]
-    restart: "no"
+    restart: unless-stopped
     image: ${IOT_BACKUP_IMAGE:-iot-platform-backup:local}
     build:
       context: .
@@ -445,7 +412,7 @@ services:
         COPY . .
         RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/backup-service ./cmd/backup-service
         FROM postgres:17-alpine
-        RUN apk add --no-cache redis
+        RUN apk add --no-cache redis tzdata
         COPY --from=build /out/backup-service /usr/local/bin/backup-service
         ENTRYPOINT ["backup-service"]
     environment:
@@ -462,8 +429,8 @@ services:
       IOT_REDPANDA_ADMIN_URL: http://redpanda:9644
       IOT_WEAVIATE_URL: ${IOT_WEAVIATE_URL:-}
       IOT_BACKUP_CONFIG_PATHS: /sources/config,/sources/emqx
-      IOT_BACKUP_INTERVAL: ${IOT_BACKUP_INTERVAL:-24h}
-      IOT_BACKUP_INCREMENTAL_INTERVAL: ${IOT_BACKUP_INCREMENTAL_INTERVAL:-15m}
+      IOT_BACKUP_TIME: ${IOT_BACKUP_TIME:-00:05}
+      IOT_BACKUP_TIMEZONE: ${IOT_BACKUP_TIMEZONE:-Asia/Shanghai}
       IOT_BACKUP_ADMIN_TOKEN: ${IOT_BACKUP_ADMIN_TOKEN:-change-me-backup-admin-token}
     ports: ["127.0.0.1:${IOT_BACKUP_HTTP_PORT:-8092}:8090"]
     volumes:
@@ -479,13 +446,11 @@ services:
   ollama:
     <<: *service-defaults
     image: ollama/ollama:0.11.4
-    profiles: [ai]
     volumes: ["ollama-data:/root/.ollama"]
 
   weaviate:
     <<: *service-defaults
     image: cr.weaviate.io/semitechnologies/weaviate:1.32.8
-    profiles: [ai]
     environment:
       QUERY_DEFAULTS_LIMIT: "25"
       AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
@@ -498,6 +463,12 @@ services:
     volumes: ["weaviate-data:/var/lib/weaviate"]
     depends_on:
       ollama: {condition: service_started}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8080/v1/.well-known/ready >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 20s
 
 configs:
   prometheus-main:

@@ -90,7 +90,6 @@ func (s *Server) routes() {
 	s.router.GET("/api/v1/integrations/video/relations", s.authorize("viewer"), s.endpoint(s.videoRelations))
 	s.router.POST("/api/v1/integrations/video/cameras", s.authorize("operator"), s.endpoint(s.saveVideoCamera))
 	s.router.PUT("/api/v1/integrations/video/cameras/:id", s.authorize("operator"), s.endpoint(s.saveVideoCamera, "id"))
-	s.router.POST("/api/v1/integrations/video/cameras/:id/preview", s.authorize("viewer"), s.endpoint(s.previewVideoCamera, "id"))
 	s.router.POST("/api/v1/device-ingest/:deviceId", s.endpoint(s.deviceIngest, "deviceId"))
 	s.router.GET("/api/v1/products", s.authorize("viewer"), s.endpoint(s.products))
 	s.router.POST("/api/v1/products", s.authorize("operator"), s.endpoint(s.saveProduct))
@@ -153,6 +152,7 @@ func (s *Server) routes() {
 	s.router.POST("/api/v1/ai/rule-draft", s.authorize("operator"), s.endpoint(s.aiRuleDraft))
 	s.router.POST("/api/v1/ai/reports", s.authorize("viewer"), s.endpoint(s.aiReport))
 	s.router.GET("/api/v1/knowledge/documents", s.authorize("viewer"), s.endpoint(s.knowledgeDocs))
+	s.router.GET("/api/v1/knowledge/documents/:id", s.authorize("viewer"), s.endpoint(s.knowledgeDocumentDetail, "id"))
 	s.router.POST("/api/v1/knowledge/documents", s.authorize("operator"), s.endpoint(s.knowledgeUpload))
 	s.router.POST("/api/v1/mqtt/token", s.authorize("viewer"), s.endpoint(s.mqttToken))
 	s.router.POST("/api/v1/mqtt/load-token", s.authorize("admin"), s.endpoint(s.mqttLoadToken))
@@ -207,7 +207,11 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	checks := map[string]string{}
 	status := 200
-	for name, check := range map[string]func(context.Context) error{"repository": s.engine.Repo.Health, "archive": s.engine.Archive.Health, "eventBus": s.engine.Bus.Health, "realtime": s.engine.Realtime.Health} {
+	checksToRun := map[string]func(context.Context) error{"repository": s.engine.Repo.Health, "archive": s.engine.Archive.Health, "eventBus": s.engine.Bus.Health, "realtime": s.engine.Realtime.Health}
+	if s.engine.KB != nil {
+		checksToRun["knowledge"] = s.engine.KB.Health
+	}
+	for name, check := range checksToRun {
 		if err := check(ctx); err != nil {
 			checks[name] = err.Error()
 			status = 503
@@ -814,7 +818,7 @@ func (s *Server) rawDetail(w http.ResponseWriter, r *http.Request) {
 		problem(w, 404, "raw message not found")
 		return
 	}
-	raw, err := s.engine.Archive.GetRaw(r.Context(), idx)
+	raw, err := s.engine.GetRaw(r.Context(), idx)
 	if err != nil {
 		problem(w, 500, "raw archive could not be read")
 		return
@@ -832,7 +836,7 @@ func (s *Server) downloadRaw(w http.ResponseWriter, r *http.Request) {
 		problem(w, 404, "raw message not found")
 		return
 	}
-	raw, err := s.engine.Archive.GetRaw(r.Context(), idx)
+	raw, err := s.engine.GetRaw(r.Context(), idx)
 	if err != nil {
 		problem(w, 500, "raw archive could not be read")
 		return
@@ -896,7 +900,7 @@ func (s *Server) downloadRawBatch(w http.ResponseWriter, r *http.Request) {
 			problem(w, 413, "selected raw messages exceed the 100 MiB batch limit")
 			return
 		}
-		raw, err := s.engine.Archive.GetRaw(r.Context(), idx)
+		raw, err := s.engine.GetRaw(r.Context(), idx)
 		if err != nil {
 			problem(w, 500, "raw archive could not be read: "+id)
 			return
@@ -1152,6 +1156,11 @@ func (s *Server) alarms(w http.ResponseWriter, r *http.Request) {
 		problem(w, 500, err.Error())
 		return
 	}
+	for index := range items {
+		if cameras, cameraErr := s.engine.ListCameraSummaries(r.Context(), items[index].TenantID, items[index].DeviceID); cameraErr == nil {
+			items[index].Cameras = cameras
+		}
+	}
 	total, err := s.engine.Repo.CountAlarms(r.Context(), filter)
 	if err != nil {
 		problem(w, 500, err.Error())
@@ -1164,6 +1173,9 @@ func (s *Server) alarm(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		problem(w, 404, "alarm not found")
 		return
+	}
+	if cameras, cameraErr := s.engine.ListCameraSummaries(r.Context(), v.TenantID, v.DeviceID); cameraErr == nil {
+		v.Cameras = cameras
 	}
 	write(w, 200, v)
 }
@@ -1619,13 +1631,10 @@ func (s *Server) workflowKnowledgeBinding(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var in struct {
-		ProductIDs    []string `json:"productIds"`
-		Categories    []string `json:"categories"`
-		Tags          []string `json:"tags"`
-		RetrievalMode string   `json:"retrievalMode"`
-		TopK          int      `json:"topK"`
-		MinScore      float64  `json:"minScore"`
-		NoMatchPolicy string   `json:"noMatchPolicy"`
+		RetrievalMode string  `json:"retrievalMode"`
+		TopK          int     `json:"topK"`
+		MinScore      float64 `json:"minScore"`
+		NoMatchPolicy string  `json:"noMatchPolicy"`
 	}
 	if decode(w, r, &in) != nil {
 		return
@@ -1636,14 +1645,16 @@ func (s *Server) workflowKnowledgeBinding(w http.ResponseWriter, r *http.Request
 	}
 	binding := model.WorkflowKnowledgeBinding{
 		TenantID: c.TenantID, WorkflowID: workflowID,
-		ProductIDs: cleanStringList(in.ProductIDs, 32, 128), Categories: cleanStringList(in.Categories, 16, 40), Tags: cleanStringList(in.Tags, 16, 40),
+		// Knowledge documents are directly associated with a workflow/Agent;
+		// this binding stores only retrieval policy, not another filter layer.
+		ProductIDs: nil, Categories: nil, Tags: nil,
 		RetrievalMode: in.RetrievalMode, TopK: in.TopK, MinScore: in.MinScore, NoMatchPolicy: in.NoMatchPolicy, UpdatedAt: time.Now().UnixMilli(),
 	}
 	if err := s.engine.Repo.SaveWorkflowKnowledgeBinding(r.Context(), binding); err != nil {
 		problem(w, 500, err.Error())
 		return
 	}
-	s.audit(r, "ai.workflow.knowledge-binding.save", "ai-workflow", workflowID, map[string]any{"retrievalMode": binding.RetrievalMode, "topK": binding.TopK, "products": len(binding.ProductIDs), "categories": len(binding.Categories), "tags": len(binding.Tags)})
+	s.audit(r, "ai.workflow.knowledge-binding.save", "ai-workflow", workflowID, map[string]any{"retrievalMode": binding.RetrievalMode, "topK": binding.TopK})
 	write(w, 200, binding)
 }
 
@@ -1743,7 +1754,7 @@ func (s *Server) runAIWorkflow(ctx context.Context, c auth.Claims, question, wor
 		scopes = filteredScopes
 		question += "\n\n[平台知识策略] 此工作流已禁用知识库，不得调用知识库工具。"
 	} else {
-		knowledgeScope = &auth.KnowledgeScope{ProductIDs: binding.ProductIDs, Categories: binding.Categories, Tags: binding.Tags, TopK: binding.TopK, MinScore: binding.MinScore}
+		knowledgeScope = &auth.KnowledgeScope{WorkflowID: binding.WorkflowID, TopK: binding.TopK, MinScore: binding.MinScore}
 		question += workflowKnowledgeInstruction(binding)
 	}
 	if (binding.RetrievalMode == "always" || binding.NoMatchPolicy == "require-evidence") && s.engine.KB == nil {
@@ -1781,23 +1792,15 @@ func (s *Server) runAIWorkflow(ctx context.Context, c auth.Claims, question, wor
 }
 
 func workflowKnowledgeInstruction(binding model.WorkflowKnowledgeBinding) string {
-	payload, _ := json.Marshal(map[string]any{"mode": binding.RetrievalMode, "productIds": binding.ProductIDs, "categories": binding.Categories, "tags": binding.Tags, "topK": binding.TopK, "minScore": binding.MinScore, "noMatchPolicy": binding.NoMatchPolicy})
-	return "\n\n[平台知识策略] " + string(payload) + "。调用 query_knowledge_base 时必须遵守这些过滤条件；服务端也会强制收紧参数。"
+	payload, _ := json.Marshal(map[string]any{"mode": binding.RetrievalMode, "workflowId": binding.WorkflowID, "topK": binding.TopK, "minScore": binding.MinScore, "noMatchPolicy": binding.NoMatchPolicy})
+	return "\n\n[平台知识策略] " + string(payload) + "。知识文档已直接绑定当前 Agent，只能检索该 Agent 的文档；服务端会强制收紧范围。"
 }
 
 func (s *Server) searchWorkflowKnowledge(ctx context.Context, tenantID, question string, binding model.WorkflowKnowledgeBinding) ([]ports.KnowledgeHit, error) {
 	if filtered, ok := s.engine.KB.(ports.FilteredKnowledgeBase); ok {
-		return filtered.SearchKnowledge(ctx, ports.KnowledgeSearchRequest{TenantID: tenantID, Question: question, ProductIDs: binding.ProductIDs, Categories: binding.Categories, Tags: binding.Tags, Limit: binding.TopK, MinScore: binding.MinScore})
+		return filtered.SearchKnowledge(ctx, ports.KnowledgeSearchRequest{TenantID: tenantID, WorkflowID: binding.WorkflowID, Question: question, Limit: binding.TopK, MinScore: binding.MinScore})
 	}
-	items, err := s.engine.KB.Search(ctx, tenantID, question, binding.TopK)
-	if err != nil {
-		return nil, err
-	}
-	hits := make([]ports.KnowledgeHit, 0, len(items))
-	for _, content := range items {
-		hits = append(hits, ports.KnowledgeHit{Content: content, Score: 1})
-	}
-	return hits, nil
+	return nil, errors.New("workflow-bound knowledge search is not supported by the configured index")
 }
 
 func knowledgeEvidenceText(hits []ports.KnowledgeHit, maximum int) string {
@@ -1960,6 +1963,72 @@ func (s *Server) knowledgeDocs(w http.ResponseWriter, r *http.Request) {
 	}
 	writeList(w, 200, items, total, pagination, map[string]any{"indexMode": indexMode, "persistentIndex": persistent})
 }
+
+func (s *Server) knowledgeDocumentDetail(w http.ResponseWriter, r *http.Request) {
+	documentID := strings.TrimSpace(r.PathValue("id"))
+	if documentID == "" {
+		problem(w, http.StatusUnprocessableEntity, "document id is required")
+		return
+	}
+	documents, err := s.engine.Repo.ListKnowledgeDocs(r.Context(), claims(r).TenantID)
+	if err != nil {
+		problem(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	var document model.KnowledgeDoc
+	for _, item := range documents {
+		if item.ID == documentID {
+			document = item
+			break
+		}
+	}
+	if document.ID == "" {
+		problem(w, http.StatusNotFound, "knowledge document not found")
+		return
+	}
+	inspector, ok := s.engine.KB.(ports.InspectableKnowledgeBase)
+	if !ok {
+		problem(w, http.StatusNotImplemented, "the configured knowledge index does not expose stored chunks")
+		return
+	}
+	chunks, err := inspector.ListKnowledgeChunks(r.Context(), claims(r).TenantID, document.ID)
+	if err != nil {
+		problem(w, http.StatusBadGateway, "load indexed chunks: "+err.Error())
+		return
+	}
+	write(w, http.StatusOK, map[string]any{
+		"document": document,
+		"index":    knowledgeIndexDetails(s, document, chunks),
+		"chunks":   chunks,
+	})
+}
+
+func knowledgeIndexDetails(s *Server, document model.KnowledgeDoc, chunks []model.KnowledgeChunk) map[string]any {
+	persistent := strings.TrimSpace(s.cfg.WeaviateURL) != ""
+	index := map[string]any{
+		"mode":           "local-memory",
+		"persistent":     persistent,
+		"vectorizer":     "local-token-similarity",
+		"embeddingModel": "",
+		"chunkCount":     len(chunks),
+		"extractedChars": document.Metadata["characters"],
+		"chunking": map[string]any{
+			"strategy":         "fixed-window-overlap",
+			"size":             1200,
+			"overlap":          200,
+			"unit":             "Unicode 字符（rune/code point）",
+			"offsetConvention": "StartChar 包含，EndChar 不包含",
+			"normalization":    "先提取文件文本，再清洗 XML/HTML 标签、空白并去除首尾空白",
+		},
+	}
+	if persistent {
+		index["mode"] = "weaviate"
+		index["vectorizer"] = "text2vec-ollama"
+		index["embeddingModel"] = "nomic-embed-text"
+	}
+	return index
+}
+
 func (s *Server) knowledgeUpload(w http.ResponseWriter, r *http.Request) {
 	const maxDocumentBytes = 32 << 20
 	if s.engine.KB == nil {
@@ -1996,6 +2065,11 @@ func (s *Server) knowledgeUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	id := fmt.Sprintf("doc_%d", time.Now().UnixNano())
 	c := claims(r)
+	workflowID := strings.TrimSpace(r.FormValue("workflowId"))
+	if workflowID == "" || len(workflowID) > 128 {
+		problem(w, 422, "workflowId is required so every document is associated with an Agent")
+		return
+	}
 	productID := r.FormValue("productId")
 	category := strings.TrimSpace(r.FormValue("category"))
 	tags := cleanStringList(strings.Split(r.FormValue("tags"), ","), 16, 40)
@@ -2005,7 +2079,7 @@ func (s *Server) knowledgeUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	filename := strings.NewReplacer("/", "_", "\\", "_", "..", "_").Replace(h.Filename)
 	bucket := "iot-knowledge-docs"
-	objectKey := fmt.Sprintf("%s/%s/%s/%s", c.TenantID, productID, id, filename)
+	objectKey := fmt.Sprintf("%s/agents/%s/%s/%s", c.TenantID, workflowID, id, filename)
 	if _, err = s.engine.Archive.PutObject(r.Context(), bucket, objectKey, bytes.NewReader(data), int64(len(data)), h.Header.Get("Content-Type")); err != nil {
 		problem(w, 502, "store document: "+err.Error())
 		return
@@ -2015,7 +2089,7 @@ func (s *Server) knowledgeUpload(w http.ResponseWriter, r *http.Request) {
 		problem(w, 422, extractErr.Error())
 		return
 	}
-	chunks := core.ChunkKnowledgeText(textContent, 1200, 200)
+	chunks := core.ChunkKnowledgeTextDetailed(textContent, 1200, 200)
 	if len(chunks) == 0 {
 		problem(w, 422, "document contains no indexable text")
 		return
@@ -2023,16 +2097,16 @@ func (s *Server) knowledgeUpload(w http.ResponseWriter, r *http.Request) {
 	for i, chunk := range chunks {
 		chunkID := fmt.Sprintf("%s-chunk-%04d", id, i+1)
 		if filtered, ok := s.engine.KB.(ports.FilteredKnowledgeBase); ok {
-			err = filtered.IndexKnowledge(r.Context(), ports.KnowledgeIndexInput{TenantID: c.TenantID, ProductID: productID, Category: category, Tags: tags, DocumentID: id, ChunkID: chunkID, Content: []byte(chunk)})
+			err = filtered.IndexKnowledge(r.Context(), ports.KnowledgeIndexInput{TenantID: c.TenantID, WorkflowID: workflowID, ProductID: productID, Category: category, Tags: tags, DocumentID: id, ChunkID: chunkID, ChunkIndex: chunk.Index, StartChar: chunk.StartChar, EndChar: chunk.EndChar, CharacterCount: chunk.CharacterCount, OverlapChars: chunk.OverlapChars, Content: []byte(chunk.Text)})
 		} else {
-			err = s.engine.KB.Index(r.Context(), c.TenantID, productID, chunkID, []byte(chunk))
+			err = errors.New("workflow-bound knowledge indexing is not supported by the configured index")
 		}
 		if err != nil {
 			problem(w, 502, err.Error())
 			return
 		}
 	}
-	doc := model.KnowledgeDoc{ID: id, TenantID: c.TenantID, ProductID: productID, Category: category, Tags: tags, ObjectBucket: bucket, ObjectKey: objectKey, Filename: h.Filename, Status: "INDEXED", Metadata: map[string]any{"size": len(data), "contentType": h.Header.Get("Content-Type"), "chunks": len(chunks), "characters": len([]rune(textContent))}, CreatedAt: time.Now().UnixMilli()}
+	doc := model.KnowledgeDoc{ID: id, TenantID: c.TenantID, WorkflowID: workflowID, ProductID: productID, Category: category, Tags: tags, ObjectBucket: bucket, ObjectKey: objectKey, Filename: h.Filename, Status: "INDEXED", Metadata: map[string]any{"size": len(data), "contentType": h.Header.Get("Content-Type"), "chunks": len(chunks), "characters": len([]rune(textContent)), "chunking": map[string]any{"strategy": "fixed-window-overlap", "size": 1200, "overlap": 200, "unit": "unicode-code-points", "offsetConvention": "start-inclusive,end-exclusive"}}, CreatedAt: time.Now().UnixMilli()}
 	if err = s.engine.Repo.SaveKnowledgeDoc(r.Context(), doc); err != nil {
 		problem(w, 500, err.Error())
 		return
@@ -2041,7 +2115,7 @@ func (s *Server) knowledgeUpload(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) mqttToken(w http.ResponseWriter, r *http.Request) {
 	c := claims(r)
-	scope := []string{fmt.Sprintf("/iot/alarm/%s/#", c.TenantID), fmt.Sprintf("/iot/device/state/%s/#", c.TenantID), fmt.Sprintf("/iot/ui-action/%s", c.TenantID)}
+	scope := []string{fmt.Sprintf("/iot/parsed/%s/#", c.TenantID), fmt.Sprintf("/iot/alarm/%s/#", c.TenantID), fmt.Sprintf("/iot/device/state/%s/#", c.TenantID), fmt.Sprintf("/iot/ui-action/%s", c.TenantID)}
 	acl := make([]auth.ACLRule, 0, len(scope))
 	for _, topic := range scope {
 		acl = append(acl, auth.ACLRule{Permission: "allow", Action: "subscribe", Topic: topic})
@@ -2178,29 +2252,34 @@ func (s *Server) videoCameras(w http.ResponseWriter, r *http.Request) {
 		problem(w, 500, err.Error())
 		return
 	}
-	canConfigure := claims(r).Role == "admin" || claims(r).Role == "operator"
 	for index := range items {
-		items[index].StreamConfigured = strings.TrimSpace(items[index].StreamURL) != "" || strings.TrimSpace(items[index].SDKCameraID) != ""
-		if s.engine.VideoPreview != nil {
-			items[index].PreviewEligible = s.engine.VideoPreview.Eligible(items[index], s.cfg.VideoPreviewOrigins)
-		} else {
-			streamType, streamErr := resolveBrowserStreamType(items[index].StreamURL, items[index].StreamType)
-			browserType := streamType == "hls" || streamType == "mp4" || streamType == "webm" || streamType == "native"
-			items[index].PreviewEligible = items[index].Enabled && streamErr == nil && browserType && streamOriginAllowed(items[index].StreamURL, s.cfg.VideoPreviewOrigins)
-		}
-		if !canConfigure {
-			items[index].StreamURL = ""
-			items[index].SDKEndpoint = ""
-			items[index].SDKCredentialRef = ""
-		}
+		// The platform stores camera metadata only. Live stream lookup and
+		// playback stay in the external video platform, so never return legacy
+		// stream or vendor credential fields from this endpoint.
+		items[index].IngestMode = ""
+		items[index].ProjectID = ""
+		items[index].CityCode = ""
+		items[index].DistrictCode = ""
+		items[index].AreaID = ""
+		items[index].RelatedDeviceIDs = nil
+		items[index].RelatedFloorIDs = nil
+		items[index].RelatedRoomIDs = nil
+		items[index].VideoPlatformID = ""
+		items[index].StreamURL = ""
+		items[index].StreamType = ""
+		items[index].SDKEndpoint = ""
+		items[index].SDKCameraID = ""
+		items[index].SDKCredentialRef = ""
+		items[index].StreamConfigured = false
+		items[index].PreviewEligible = false
 	}
 	writeList(w, 200, items, total, pagination, nil)
 }
 func (s *Server) videoRelations(w http.ResponseWriter, r *http.Request) {
 	relationType := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("relationType")))
 	targetID := strings.TrimSpace(r.URL.Query().Get("targetId"))
-	if !oneOf(relationType, "device", "floor", "room") || targetID == "" {
-		problem(w, http.StatusUnprocessableEntity, "relationType must be device, floor or room and targetId is required")
+	if relationType != "device" || targetID == "" {
+		problem(w, http.StatusUnprocessableEntity, "only device relation is supported and targetId is required")
 		return
 	}
 	relations, err := s.engine.Repo.ListVideoCameraRelationsByTarget(r.Context(), claims(r).TenantID, relationType, targetID)
@@ -2220,162 +2299,57 @@ func (s *Server) saveVideoCamera(w http.ResponseWriter, r *http.Request) {
 	if id := r.PathValue("id"); id != "" {
 		v.CameraID = id
 	}
+	v.CameraID = strings.TrimSpace(v.CameraID)
+	v.CameraName = strings.TrimSpace(v.CameraName)
 	if v.CameraID == "" || v.CameraName == "" {
 		problem(w, 422, "cameraId and cameraName are required")
 		return
 	}
-	v.IngestMode = strings.ToLower(strings.TrimSpace(v.IngestMode))
-	if v.IngestMode == "" {
-		v.IngestMode = "direct"
-	}
-	if !oneOf(v.IngestMode, "direct", "dahua_sdk", "hikvision_sdk") {
-		problem(w, 422, "ingestMode must be direct, dahua_sdk or hikvision_sdk")
+	// Accept one legacy relatedDeviceIds value during migration, but reject
+	// multiple values so the camera -> device cardinality is unambiguous.
+	legacyDeviceIDs := cleanStringList(v.RelatedDeviceIDs, 128, 128)
+	if len(legacyDeviceIDs) > 1 {
+		problem(w, 422, "a camera can be associated with at most one device")
 		return
 	}
-	v.RelatedDeviceIDs = cleanStringList(v.RelatedDeviceIDs, 128, 128)
-	v.RelatedFloorIDs = cleanStringList(v.RelatedFloorIDs, 128, 128)
-	v.RelatedRoomIDs = cleanStringList(v.RelatedRoomIDs, 128, 128)
-	if v.Floor != "" {
-		v.RelatedFloorIDs = cleanStringList(append(v.RelatedFloorIDs, v.Floor), 128, 128)
+	v.DeviceID = strings.TrimSpace(v.DeviceID)
+	if v.DeviceID == "" && len(legacyDeviceIDs) == 1 {
+		v.DeviceID = legacyDeviceIDs[0]
 	}
-	if v.IngestMode == "direct" && v.StreamURL == "" {
-		problem(w, 422, "direct ingest requires streamUrl")
-		return
-	}
-	if v.IngestMode != "direct" && strings.TrimSpace(v.SDKCameraID) == "" {
-		problem(w, 422, "SDK ingest requires sdkCameraId")
-		return
-	}
-	if v.StreamURL != "" {
-		streamType, streamErr := resolveBrowserStreamType(v.StreamURL, v.StreamType)
-		if streamErr != nil {
-			problem(w, 422, streamErr.Error())
+	if v.DeviceID != "" {
+		if _, deviceErr := s.engine.Repo.GetManagedDevice(r.Context(), c.TenantID, v.DeviceID); deviceErr != nil {
+			problem(w, 422, "deviceId is not registered in the current tenant")
 			return
 		}
-		v.StreamType = streamType
 	}
+	v.Brand = strings.TrimSpace(v.Brand)
+	v.CameraPoint = strings.TrimSpace(v.CameraPoint)
+	v.Building = strings.TrimSpace(v.Building)
+	v.Floor = strings.TrimSpace(v.Floor)
+	v.Room = strings.TrimSpace(v.Room)
+	// Clear legacy relation and stream fields on every save. The video
+	// platform remains the source of truth for live playback.
+	v.RelatedDeviceIDs = nil
+	v.RelatedFloorIDs = nil
+	v.RelatedRoomIDs = nil
+	v.IngestMode = ""
+	v.ProjectID = ""
+	v.CityCode = ""
+	v.DistrictCode = ""
+	v.AreaID = ""
+	v.VideoPlatformID = ""
+	v.StreamURL = ""
+	v.StreamType = ""
+	v.SDKEndpoint = ""
+	v.SDKCameraID = ""
+	v.SDKCredentialRef = ""
 	v.UpdatedAt = time.Now().UnixMilli()
 	if err := s.engine.Repo.SaveVideoCameraMapping(r.Context(), v); err != nil {
 		problem(w, 500, err.Error())
 		return
 	}
-	s.audit(r, "video.camera.save", "video-camera", v.CameraID, map[string]any{"areaId": v.AreaID, "enabled": v.Enabled})
+	s.audit(r, "video.camera.save", "video-camera", v.CameraID, map[string]any{"deviceId": v.DeviceID, "enabled": v.Enabled})
 	write(w, map[bool]int{true: 200, false: 201}[r.Method == http.MethodPut], v)
-}
-func (s *Server) previewVideoCamera(w http.ResponseWriter, r *http.Request) {
-	v, err := s.engine.Repo.GetVideoCameraMapping(r.Context(), claims(r).TenantID, r.PathValue("id"))
-	if err != nil {
-		problem(w, 404, "camera not found")
-		return
-	}
-	if !v.Enabled {
-		problem(w, 422, "camera is disabled")
-		return
-	}
-	if s.engine.VideoPreview != nil {
-		preview, previewErr := s.engine.VideoPreview.Preview(r.Context(), v)
-		if previewErr != nil {
-			problem(w, http.StatusUnprocessableEntity, previewErr.Error())
-			return
-		}
-		if !streamOriginAllowed(preview.PlaybackURL, s.cfg.VideoPreviewOrigins) {
-			problem(w, http.StatusUnprocessableEntity, "video playback origin is not allowlisted for browser preview")
-			return
-		}
-		write(w, http.StatusOK, preview)
-		return
-	}
-	if !streamOriginAllowed(v.StreamURL, s.cfg.VideoPreviewOrigins) {
-		problem(w, 422, "camera stream origin is not allowlisted for browser preview")
-		return
-	}
-	streamType, err := resolveBrowserStreamType(v.StreamURL, v.StreamType)
-	if err != nil {
-		problem(w, 422, err.Error())
-		return
-	}
-	if streamType == "rtsp" || streamType == "rtmp" || streamType == "webrtc" {
-		problem(w, 422, "browser preview requires an HLS, MP4 or WebM stream; convert RTSP/RTMP/WebRTC through a media gateway first")
-		return
-	}
-	write(w, 200, map[string]any{"cameraId": v.CameraID, "cameraName": v.CameraName, "playbackUrl": v.StreamURL, "streamType": streamType})
-}
-func resolveBrowserStreamType(rawURL, configured string) (string, error) {
-	if strings.TrimSpace(rawURL) == "" {
-		return "", fmt.Errorf("camera stream URL is not configured")
-	}
-	u, err := url.Parse(rawURL)
-	if err != nil || u.Host == "" {
-		return "", fmt.Errorf("camera stream URL is invalid")
-	}
-	scheme := strings.ToLower(u.Scheme)
-	if scheme != "http" && scheme != "https" && scheme != "rtsp" && scheme != "rtmp" && scheme != "webrtc" {
-		return "", fmt.Errorf("unsupported camera stream URL scheme %q", scheme)
-	}
-	streamType := strings.ToLower(strings.TrimSpace(configured))
-	if streamType == "" {
-		lower := strings.ToLower(u.Path)
-		switch {
-		case scheme == "rtsp", scheme == "rtmp", scheme == "webrtc":
-			streamType = scheme
-		case strings.HasSuffix(lower, ".m3u8") || strings.EqualFold(u.Query().Get("format"), "hls"):
-			streamType = "hls"
-		case strings.HasSuffix(lower, ".mp4"):
-			streamType = "mp4"
-		case strings.HasSuffix(lower, ".webm"):
-			streamType = "webm"
-		default:
-			streamType = "native"
-		}
-	}
-	nonHTTPType := streamType == "rtsp" || streamType == "rtmp" || streamType == "webrtc"
-	nonHTTPScheme := scheme == "rtsp" || scheme == "rtmp" || scheme == "webrtc"
-	if nonHTTPScheme && streamType != scheme || !nonHTTPScheme && nonHTTPType {
-		return "", fmt.Errorf("camera stream type %q is incompatible with URL scheme %q", streamType, scheme)
-	}
-	switch streamType {
-	case "hls", "mp4", "webm", "native", "rtsp", "rtmp", "webrtc":
-		return streamType, nil
-	default:
-		return "", fmt.Errorf("unsupported camera stream type %q", streamType)
-	}
-}
-func streamOriginAllowed(rawURL string, allowed []string) bool {
-	target, valid := normalizedStreamOrigin(rawURL)
-	if !valid {
-		return false
-	}
-	for _, candidate := range allowed {
-		origin, ok := normalizedStreamOrigin(candidate)
-		if ok && origin == target {
-			return true
-		}
-	}
-	return false
-}
-func normalizedStreamOrigin(rawURL string) (string, bool) {
-	u, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil || u.Hostname() == "" || u.User != nil {
-		return "", false
-	}
-	scheme := strings.ToLower(u.Scheme)
-	switch scheme {
-	case "http", "https", "rtsp", "rtmp", "webrtc":
-	default:
-		return "", false
-	}
-	host := strings.ToLower(u.Hostname())
-	if strings.Contains(host, ":") {
-		host = "[" + host + "]"
-	}
-	port := u.Port()
-	if port == "80" && scheme == "http" || port == "443" && scheme == "https" {
-		port = ""
-	}
-	if port != "" {
-		host += ":" + port
-	}
-	return scheme + "://" + host, true
 }
 func randomHex(size int) string {
 	b := make([]byte, size)

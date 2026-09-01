@@ -49,6 +49,10 @@ func New(ctx context.Context, base string, repo ports.Repository) (*Repository, 
 	if _, err = r.query(ctx, schema, nil); err != nil {
 		return nil, err
 	}
+	rawSchema := `CREATE TABLE IF NOT EXISTS iot_raw_message (tenant_id String, message_id String, product_id String, device_id String, protocol String, payload_format String, payload_hash String, payload_size UInt64, received_at Int64, body String) ENGINE=MergeTree PARTITION BY toYYYYMM(fromUnixTimestamp64Milli(received_at)) ORDER BY (tenant_id,device_id,received_at,message_id)`
+	if _, err = r.query(ctx, rawSchema, nil); err != nil {
+		return nil, err
+	}
 	return r, nil
 }
 func (r *Repository) SaveStandardMessage(ctx context.Context, v model.StandardMessage) error {
@@ -69,6 +73,46 @@ func (r *Repository) SaveStandardMessageIfAbsent(ctx context.Context, v model.St
 	_, err = r.query(ctx, "INSERT INTO iot_telemetry FORMAT JSONEachRow", b)
 	return true, err
 }
+
+func (r *Repository) SaveRawMessage(ctx context.Context, v model.RawMessage) error {
+	body, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	row := map[string]any{"tenant_id": v.TenantID, "message_id": v.MessageID, "product_id": v.ProductID, "device_id": v.DeviceID, "protocol": v.Protocol, "payload_format": v.PayloadFormat, "payload_hash": v.PayloadHash(), "payload_size": len(v.Payload), "received_at": v.ReceivedAt, "body": string(body)}
+	data, _ := json.Marshal(row)
+	data = append(data, '\n')
+	_, err = r.query(ctx, "INSERT INTO iot_raw_message FORMAT JSONEachRow", data)
+	return err
+}
+
+func (r *Repository) GetRawMessage(ctx context.Context, tenant, messageID string) (model.RawMessage, error) {
+	data, err := r.query(ctx, fmt.Sprintf(`SELECT body FROM iot_raw_message WHERE tenant_id=%s AND message_id=%s LIMIT 1 FORMAT JSONEachRow`, quote(tenant), quote(messageID)), nil)
+	if err != nil {
+		return model.RawMessage{}, err
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var row struct {
+			Body string `json:"body"`
+		}
+		if err = json.Unmarshal([]byte(line), &row); err != nil {
+			return model.RawMessage{}, err
+		}
+		if row.Body == "" {
+			continue
+		}
+		var value model.RawMessage
+		if err = json.Unmarshal([]byte(row.Body), &value); err != nil {
+			return model.RawMessage{}, err
+		}
+		return value, nil
+	}
+	return model.RawMessage{}, fmt.Errorf("raw message not found")
+}
+
 func (r *Repository) ClaimStandardMessage(ctx context.Context, v model.StandardMessage) (bool, bool, error) {
 	shouldProcess, created, err := r.Repository.ClaimStandardMessage(ctx, v)
 	if err != nil || !shouldProcess || !created {

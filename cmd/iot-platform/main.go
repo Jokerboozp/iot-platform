@@ -20,9 +20,9 @@ import (
 	minioadapter "iot-platform/internal/adapters/minio"
 	mqttadapter "iot-platform/internal/adapters/mqtt"
 	"iot-platform/internal/adapters/postgres"
+	"iot-platform/internal/adapters/rawstore"
 	redisadapter "iot-platform/internal/adapters/redis"
 	thingspaneladapter "iot-platform/internal/adapters/thingspanel"
-	videoadapter "iot-platform/internal/adapters/video"
 	"iot-platform/internal/auth"
 	"iot-platform/internal/config"
 	"iot-platform/internal/core"
@@ -39,16 +39,22 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	var repo ports.Repository = memory.NewRepository()
+	var postgresRaw, clickHouseRaw ports.RawMessageDatabase
+	if raw, ok := repo.(ports.RawMessageDatabase); ok {
+		postgresRaw = raw
+	}
 	if cfg.PostgresDSN != "" {
 		r, err := postgres.New(ctx, cfg.PostgresDSN)
 		fatal(log, "initialize postgres", err)
 		repo = r
+		postgresRaw = r
 		log.Info("repository enabled", "adapter", "postgres")
 	}
 	if cfg.ClickHouseURL != "" {
 		r, clickErr := clickhouseadapter.New(ctx, cfg.ClickHouseURL, repo)
 		fatal(log, "initialize clickhouse", clickErr)
 		repo = r
+		clickHouseRaw = r
 		log.Info("telemetry storage enabled", "adapter", "clickhouse")
 	}
 	if cfg.RedisAddr != "" {
@@ -104,25 +110,19 @@ func main() {
 	}
 	parsers := parser.NewRegistry(parser.GB26875Parser{}, parser.ConfigurableJSONParser{}, parser.ConfigurableHexParser{}, parser.ModbusCoilParser{}, parser.JavaScriptParser{}, parser.ExternalParser{Root: cfg.DataDir}, parser.FireSmokeHexParser{}, parser.ModbusParser{}, parser.JSONParser{})
 	engine := core.New(repo, archivePort, bus, realtime, parsers, log)
+	var legacyRaw ports.RawMessageReader
+	if reader, ok := archivePort.(ports.RawMessageReader); ok {
+		legacyRaw = reader
+	}
+	engine.RawStore = rawstore.New(rawstore.Config{
+		PostgreSQL:               postgresRaw,
+		ClickHouse:               clickHouseRaw,
+		Resolver:                 repo,
+		Legacy:                   legacyRaw,
+		HighFrequencyIntervalSec: cfg.RawHighFrequencyIntervalSec,
+	})
 	engine.VideoMediaAllowedHosts = cfg.VideoMediaHosts
 	engine.RequireVideoCameraMapping = !cfg.DevMode
-	var hikvisionResolver videoadapter.StreamResolver
-	if cfg.HikvisionVideoAPIURL != "" || cfg.HikvisionAppKey != "" || cfg.HikvisionAppSecret != "" {
-		resolver, resolverErr := videoadapter.NewHikvisionArtemis(videoadapter.HikvisionArtemisConfig{
-			BaseURL: cfg.HikvisionVideoAPIURL, AppKey: cfg.HikvisionAppKey, AppSecret: cfg.HikvisionAppSecret,
-		})
-		fatal(log, "initialize official Hikvision Go adapter", resolverErr)
-		hikvisionResolver = resolver
-	}
-	videoPreview, videoPreviewErr := videoadapter.New(videoadapter.Config{
-		ZLMAPIURL: cfg.VideoZLMAPIURL, ZLMPlaybackBaseURL: cfg.VideoZLMPlaybackURL, ZLMSecret: cfg.VideoZLMSecret,
-		ZLMVhost: cfg.VideoZLMVhost, ZLMApp: cfg.VideoZLMApp,
-		DahuaSDKURL: cfg.DahuaVideoSDKURL, DahuaSDKToken: cfg.DahuaVideoSDKToken,
-		HikvisionAPIURL: cfg.HikvisionVideoAPIURL, HikvisionResolver: hikvisionResolver,
-		AllowedSourceHosts: cfg.VideoMediaHosts,
-	})
-	fatal(log, "initialize video preview", videoPreviewErr)
-	engine.VideoPreview = videoPreview
 	engine.Metrics = registry
 	aiPlugins := aiadapter.NewProviderRegistry()
 	engine.AIPlugins = aiPlugins

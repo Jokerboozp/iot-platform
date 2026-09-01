@@ -62,7 +62,7 @@ func TestRuleDraftValidatesThingModelAndConflicts(t *testing.T) {
 	if _, _, err = engine.ValidateRuleDraft(ctx, draft); err == nil || !strings.Contains(err.Error(), "not available") {
 		t.Fatalf("expected unavailable camera action to fail, got %v", err)
 	}
-	if err = repo.SaveVideoCameraMapping(ctx, model.VideoCameraMapping{TenantID: "t1", CameraID: "camera-1", StreamURL: "https://media.example/live.m3u8", Enabled: true}); err != nil {
+	if err = repo.SaveVideoCameraMapping(ctx, model.VideoCameraMapping{TenantID: "t1", CameraID: "camera-1", CameraName: "camera-1", Brand: "测试品牌", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	draft.Actions = []model.RuleAction{{Type: "OPEN_CAMERA", CameraID: "camera-1"}, {Type: "OPEN_PAGE", Page: "alarms"}}
@@ -90,6 +90,21 @@ func TestOfficeKnowledgeExtractionAndChunking(t *testing.T) {
 	chunks := ChunkKnowledgeText(strings.Repeat(text, 20), 80, 10)
 	if len(chunks) < 2 {
 		t.Fatalf("expected multiple overlapping chunks, got %d", len(chunks))
+	}
+}
+
+func TestKnowledgeChunkDetailsUseUnicodeOffsetsAndOverlap(t *testing.T) {
+	text := "甲乙丙丁戊己庚辛壬癸"
+	chunks := ChunkKnowledgeTextDetailed(text, 6, 2)
+	if len(chunks) != 2 {
+		t.Fatalf("expected two chunks, got %#v", chunks)
+	}
+	first, second := chunks[0], chunks[1]
+	if first.Index != 1 || first.StartChar != 0 || first.EndChar != 6 || first.CharacterCount != 6 || first.OverlapChars != 0 || first.Text != "甲乙丙丁戊己" {
+		t.Fatalf("unexpected first chunk %#v", first)
+	}
+	if second.Index != 2 || second.StartChar != 4 || second.EndChar != 10 || second.CharacterCount != 6 || second.OverlapChars != 2 || second.Text != "戊己庚辛壬癸" {
+		t.Fatalf("unexpected second chunk %#v", second)
 	}
 }
 

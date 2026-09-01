@@ -16,7 +16,7 @@ async function sourceText(directory = new URL('src/', root)) {
 
 test('management controls and Chinese labels remain available', async () => {
   const source = await sourceText()
-  for (const label of ['查看详情', '批量下载', '未注册设备', '一键注册', '摄像头映射', '保存规则', '火灾风险', '紧急', '活动中', '疑似离线']) {
+  for (const label of ['查看详情', '批量下载', '未注册设备', '一键注册', '摄像头映射', '保存规则', '火灾风险', '紧急', '活动中', '告警中', '疑似离线']) {
     assert.match(source, new RegExp(label), `missing label: ${label}`)
   }
 })
@@ -31,29 +31,43 @@ test('shared controls keep file pickers and text actions visibly shaped', async 
   assert.match(`${assistant}\n${protocols}`, /<input type="file"/)
 })
 
-test('video preview and AI provider playground remain available', async () => {
+test('camera metadata and AI provider playground remain available', async () => {
   const source = await sourceText()
-  for (const label of ['视频流预览', '浏览器可直接预览 HLS', 'Provider 测试与配置', '添加自定义 Provider', '保存到当前租户', '连接并测试插件', 'DEEPSEEK HARNESS', 'AI 工作流', '运行轨迹', '工具调用']) {
+  for (const label of ['摄像头点位', '不解析、拉取或预览视频流', 'Provider 测试与配置', '添加自定义 Provider', '保存到当前租户', '连接并测试插件', 'DEEPSEEK HARNESS', 'AI 工作流', '运行轨迹', '工具调用']) {
     assert.match(source, new RegExp(label), `missing feature label: ${label}`)
   }
-  const packageJson = JSON.parse(await readFile(new URL('package.json', root), 'utf8'))
-  assert.ok(packageJson.dependencies?.['hls.js'], 'hls.js is required for browser HLS playback')
+  const cameraView = await readFile(new URL('src/views/CameraMappingsView.vue', root), 'utf8')
+  assert.doesNotMatch(cameraView, /VideoStreamPlayer|autoPreview|openPreview|streamUrl|hls\.js/)
   assert.match(source, /\.provider-select-row\s*\{[^}]*width:100%;[^}]*min-width:0;/, 'provider selector row must fill the Element Plus form content width')
 })
 
 test('knowledge management uploads files and lists tenant documents', async () => {
   const app = await readFile(new URL('src/App.vue', root), 'utf8')
   const view = await readFile(new URL('src/views/KnowledgeView.vue', root), 'utf8')
-  for (const label of ['知识库管理', '上传知识文档', '上传并建立索引', '已上传文档', '打开 AI 工作流']) {
+  for (const label of ['Agent 知识库', '上传知识文档', '上传并建立索引', '已上传文档', '打开 AI 工作流', '知识文档详情与切片', '索引与切片规则', '字符范围', '切片内容', '向量化']) {
     assert.match(`${app}\n${view}`, new RegExp(label), `missing knowledge UI label: ${label}`)
   }
   assert.match(view, /api\((?:'|`)[^'`]*\/api\/v1\/knowledge\/documents(?:\?|['`])/)
   assert.match(view, /method:'POST', body:form/)
   assert.match(view, /new FormData\(\)/)
   assert.match(view, /persistentIndex/)
-  assert.match(view, /api\((?:'|`)[^'`]*\/api\/v1\/products(?:\?|['`])/)
-  assert.match(view, /<el-select v-model="productId" filterable clearable/)
+  assert.match(view, /api\((?:'|`)[^'`]*\/api\/v1\/ai\/workflows(?:\?|['`])/)
+  assert.match(view, /form\.append\('workflowId', workflowId\.value\)/)
+  assert.match(view, /<el-select v-model="workflowId"/)
+  assert.match(view, /api\(`\/api\/v1\/knowledge\/documents\/\$\{encodeURIComponent\(document\.id\)\}`\)/)
+  assert.match(view, /固定窗口 \+ 重叠/)
+  assert.match(view, /row\.startChar/)
+  assert.match(view, /row\.overlapChars/)
+  assert.match(view, /row\.vectorized/)
   for (const label of ['知识分类', '知识标签', '告警处置 SOP']) assert.match(view, new RegExp(label), `missing knowledge metadata UI: ${label}`)
+})
+
+test('knowledge statistic cards use readable foreground colors', async () => {
+  const view = await readFile(new URL('src/views/KnowledgeView.vue', root), 'utf8')
+  const statsStyle = view.match(/\.knowledge-stats span,\.knowledge-stats small \{[^}]+\}/)?.[0]
+  assert.ok(statsStyle, 'knowledge statistic label style must remain explicit')
+  assert.match(statsStyle, /color:var\(--muted-foreground\)/)
+  assert.doesNotMatch(statsStyle, /color:var\(--muted\)/)
 })
 
 test('AI workbench uses cancellable SSE workflows and stable message keys', async () => {
@@ -75,7 +89,7 @@ test('AI workbench uses cancellable SSE workflows and stable message keys', asyn
   assert.doesNotMatch(aiView, /conversationId\.value\s*=\s*event\.conversationId/)
   assert.doesNotMatch(aiView, /model:[^\n]*runtime\.value\.active/)
   assert.match(aiView, /conversationId\.value\s*=\s*makeId\('conversation'\)/)
-  for (const label of ['工作流知识库绑定', '强制检索', '最低相似度', '无匹配知识时', '保存知识库绑定']) assert.match(aiView, new RegExp(label), `missing workflow knowledge binding UI: ${label}`)
+  for (const label of ['Agent 知识库', '强制检索', '最低相似度', '无匹配知识时', '保存知识库绑定']) assert.match(aiView, new RegExp(label), `missing workflow knowledge binding UI: ${label}`)
   for (const label of ['通过 JSON 创建 Agent', 'Agent Manifest JSON', '校验并创建 Agent', '保存后立即进入工作流列表']) assert.match(aiView, new RegExp(label), `missing dynamic Agent UI: ${label}`)
   for (const field of ['schemaVersion','id','name','description','version','enabled','persona','defaultModel','maxTokens','capabilities','allowedTools']) assert.match(aiView, new RegExp(`name:'${field}'`), `missing Agent field documentation: ${field}`)
   assert.match(aiView, /JSON 标准不支持注释/)
@@ -98,6 +112,38 @@ test('AI workbench uses cancellable SSE workflows and stable message keys', asyn
   assert.match(aiView, /provider:custom \? 'openai-compatible' : sandbox\.provider/)
   assert.match(apiSource, /text\/event-stream/)
   assert.match(sseSource, /getReader\(\)/)
+})
+
+test('AI chat sizes sent question bubbles to content until the readable max width', async () => {
+  const aiView = await readFile(new URL('src/views/AiView.vue', root), 'utf8')
+  const messageContentStyle = aiView.match(/\.message-content \{[^}]+\}/)?.[0]
+  const userContentStyle = aiView.match(/\.message-row\.user \.message-content \{[^}]+\}/)?.[0]
+  const userMessageStyle = aiView.match(/\.message-row\.user \.chat-message \{[^}]+\}/)?.[0]
+  assert.ok(messageContentStyle, 'AI message content width must remain explicit')
+  assert.ok(userContentStyle, 'AI user message content width must remain explicit')
+  assert.ok(userMessageStyle, 'AI user chat message width must remain explicit')
+  assert.match(messageContentStyle, /width:100%/)
+  assert.match(userContentStyle, /width:fit-content/)
+  assert.match(userContentStyle, /max-width:min\(82%,760px\)/)
+  assert.doesNotMatch(userContentStyle, /width:100%/)
+  assert.match(userMessageStyle, /width:fit-content/)
+  assert.match(userMessageStyle, /max-width:100%/)
+})
+
+test('AI answers render safe Markdown in chat and health inspection', async () => {
+  const markdown = await import('../src/markdown.js')
+  const html = markdown.renderMarkdown('# 标题\n\n- **重点**\n\n`code`')
+  assert.match(html, /<h1>标题<\/h1>/)
+  assert.match(html, /<ul>[\s\S]*<strong>重点<\/strong>[\s\S]*<\/ul>/)
+  assert.match(html, /<code>code<\/code>/)
+  const unsafeHtml = markdown.renderMarkdown('<script>alert(1)</script>')
+  assert.match(unsafeHtml, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/)
+  assert.doesNotMatch(unsafeHtml, /<script>/)
+
+  const aiView = await readFile(new URL('src/views/AiView.vue', root), 'utf8')
+  const inspectionView = await readFile(new URL('src/views/HealthInspectionView.vue', root), 'utf8')
+  assert.match(aiView, /<MarkdownContent[^>]*:source="message\.text"/)
+  assert.match(inspectionView, /<MarkdownContent[^>]*:source="report\.aiAdvice"/)
 })
 
 test('switching away from the add-custom Provider hides its profile editor', async () => {
@@ -144,6 +190,7 @@ test('test device workbench provisions a fixture and sends editable data and ala
   assert.match(view, /alarm.*true/)
   assert.match(view, /localStorage/)
   assert.match(view, /不会自动创建告警规则/)
+  assert.match(view, /告警会直接进入告警中心/)
   assert.doesNotMatch(view, /系统生成的高温烟雾规则/)
   assert.match(app, /action\.type === 'OPEN_PAGE'/)
   assert.match(app, /openPage\(action\.page\)/)
@@ -167,7 +214,7 @@ test('backup center exposes history, artifact downloads and restore drills', asy
   const app = await readFile(new URL('src/App.vue', root), 'utf8')
   const view = await readFile(new URL('src/views/BackupsView.vue', root), 'utf8')
   const labels = await readFile(new URL('src/labels.js', root), 'utf8')
-  for (const marker of ['备份中心', '立即全量备份', '立即增量备份', '详情 / 文件', '恢复演练', '下载 manifest.json', '备份文件']) {
+  for (const marker of ['备份中心', '立即全量备份', '立即增量备份', '立即备份原始日志', '详情 / 文件', '恢复演练', '下载 manifest.json', '备份文件']) {
     assert.match(`${app}\n${view}`, new RegExp(marker), `missing backup center marker: ${marker}`)
   }
   assert.match(labels, /backupTypes/)
@@ -224,8 +271,8 @@ test('Agent automation drafts and allowlisted UI actions remain wired end to end
   assert.match(app, /\/ui-action\//)
   assert.match(app, /action\.type === 'OPEN_CAMERA'/)
   assert.match(app, /allowedPages/)
-  assert.match(cameras, /detail\.autoPreview/)
-  assert.match(cameras, /await openPreview\(target\)/)
+  assert.match(cameras, /detail\.cameraId/)
+  assert.doesNotMatch(cameras, /autoPreview|openPreview|VideoStreamPlayer/)
 })
 
 test('AI conversation history survives view recreation and stays tenant scoped', async () => {
@@ -263,7 +310,7 @@ test('frontend builds independently and proxies backend routes', async () => {
   for (const route of ['/api/', '/health/', '/mcp']) assert.ok(nginx.includes(route), `nginx is missing ${route}`)
   assert.ok(nginx.includes('platform-api:8080'))
   assert.match(nginx, /location = \/api\/v1\/ai\/chat\/stream\s*\{[\s\S]*?proxy_buffering off;[\s\S]*?proxy_cache off;[\s\S]*?gzip off;[\s\S]*?proxy_read_timeout 3600s;[\s\S]*?proxy_set_header Connection "";/)
-  assert.match(nginx, /IOT_VIDEO_PREVIEW_CSP_SOURCES/)
+  assert.doesNotMatch(nginx, /IOT_VIDEO_PREVIEW_CSP_SOURCES/)
   assert.doesNotMatch(nginx, /connect-src[^;]*\bhttp:\s+https:/)
 })
 

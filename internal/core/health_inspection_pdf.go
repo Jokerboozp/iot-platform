@@ -451,6 +451,8 @@ func inspectionBusinessStatus(value string) string {
 	switch strings.ToUpper(strings.TrimSpace(value)) {
 	case "ONLINE":
 		return "在线"
+	case "ALARM":
+		return "告警中"
 	case "OFFLINE":
 		return "离线"
 	case "SUSPECTED_OFFLINE":
@@ -494,6 +496,8 @@ func inspectionBusinessColor(value string) inspectionPDFColor {
 	switch strings.ToUpper(strings.TrimSpace(value)) {
 	case "ONLINE":
 		return inspectionPDFGreen
+	case "ALARM":
+		return inspectionPDFRed
 	case "OFFLINE", "SUSPECTED_OFFLINE":
 		return inspectionPDFRed
 	default:

@@ -8,17 +8,21 @@ import { api, formatTime, notifyError, session } from '../api'
 const emit = defineEmits(['navigate'])
 const uploadRef = ref(null)
 const documents = ref([])
-const products = ref([])
+const agents = ref([])
 const loading = ref(false)
 const uploading = ref(false)
 const uploadDialog = ref(false)
 const detailDialog = ref(false)
 const selectedDocument = ref(null)
+const selectedDetail = ref(null)
+const detailLoading = ref(false)
+const detailError = ref('')
 const selectedFile = ref(null)
-const productId = ref('')
+const workflowId = ref('')
 const category = ref('manual')
 const tags = ref([])
 const runtime = ref({ indexMode:'', persistentIndex:false })
+const agentError = ref('')
 const page = ref(1)
 const pageSize = ref(20)
 const total = ref(0)
@@ -27,7 +31,15 @@ const canUpload = computed(() => session.role === 'admin' || session.role === 'o
 const indexedCount = computed(() => documents.value.filter(item => item.status === 'INDEXED').length)
 const totalChunks = computed(() => documents.value.reduce((sum, item) => sum + Number(item.metadata?.chunks || 0), 0))
 const totalSize = computed(() => documents.value.reduce((sum, item) => sum + Number(item.metadata?.size || 0), 0))
+const selectedAgent = computed(() => agents.value.find(item => (item.id || item.workflowId) === workflowId.value))
 
+function agentKey(item) { return item?.id || item?.workflowId || '' }
+function agentName(item) { return item?.name || item?.label || agentKey(item) || '未命名 Agent' }
+function agentLabel(id) {
+  if (!id) return '未关联 Agent'
+  const agent = agents.value.find(item => agentKey(item) === id)
+  return agent ? agentName(agent) : id
+}
 function formatBytes(value) {
   const size = Number(value || 0)
   if (size < 1024) return `${size} B`
@@ -37,38 +49,37 @@ function formatBytes(value) {
 
 async function load() {
   loading.value = true
+  agentError.value = ''
   try {
-    const [data, productData] = await Promise.all([
+    const [documentResult, agentResult] = await Promise.allSettled([
       api(`/api/v1/knowledge/documents?page=${page.value}&pageSize=${pageSize.value}`),
-      api('/api/v1/products?page=1&pageSize=100')
+      api('/api/v1/ai/workflows?page=1&pageSize=100')
     ])
-    documents.value = Array.isArray(data.items) ? data.items : []
-    total.value = Number(data.total ?? data.count ?? documents.value.length)
-    products.value = Array.isArray(productData.items) ? productData.items : []
-    runtime.value = { indexMode:data.indexMode || '', persistentIndex:Boolean(data.persistentIndex) }
+    if (documentResult.status === 'fulfilled') {
+      const data = documentResult.value
+      documents.value = Array.isArray(data.items) ? data.items : []
+      total.value = Number(data.total ?? data.count ?? documents.value.length)
+      runtime.value = { indexMode:data.indexMode || '', persistentIndex:Boolean(data.persistentIndex) }
+    } else {
+      throw documentResult.reason
+    }
+    if (agentResult.status === 'fulfilled') agents.value = Array.isArray(agentResult.value.items) ? agentResult.value.items.filter(item => item.enabled !== false) : []
+    else agentError.value = agentResult.reason?.message || 'Agent 列表读取失败'
+    if (!workflowId.value && agents.value.length) workflowId.value = agentKey(agents.value[0])
   } catch (error) {
-    notifyError(error)
+    if (error?.message?.includes('workflows')) agentError.value = error.message
+    else notifyError(error)
   } finally {
     loading.value = false
   }
 }
 
-function changePage(value) {
-  page.value = value
-  load()
-}
-
-function changePageSize(value) {
-  pageSize.value = value
-  page.value = 1
-  load()
-}
-
+function changePage(value) { page.value = value; load() }
+function changePageSize(value) { pageSize.value = value; page.value = 1; load() }
 function openUpload() {
   if (!canUpload.value) return
   uploadDialog.value = true
 }
-
 function chooseFile(file) {
   if (Number(file.size || file.raw?.size || 0) > 32 * 1024 * 1024) {
     selectedFile.value = null
@@ -78,36 +89,38 @@ function chooseFile(file) {
   }
   selectedFile.value = file.raw || null
 }
-
-function removeFile() {
-  selectedFile.value = null
-}
-
-function rejectExtra() {
-  ElMessage.warning('每次只能上传一个知识库文件')
-}
-
-function showDocument(document) {
+function removeFile() { selectedFile.value = null }
+function rejectExtra() { ElMessage.warning('每次只能上传一个知识库文件') }
+async function showDocument(document) {
   selectedDocument.value = document
+  selectedDetail.value = null
+  detailError.value = ''
   detailDialog.value = true
+  detailLoading.value = true
+  try {
+    const detail = await api(`/api/v1/knowledge/documents/${encodeURIComponent(document.id)}`)
+    selectedDocument.value = detail.document || document
+    selectedDetail.value = detail
+  } catch (error) {
+    detailError.value = error.message || '知识切片详情读取失败'
+  } finally {
+    detailLoading.value = false
+  }
 }
 
 async function upload() {
-  if (!selectedFile.value) {
-    ElMessage.warning('请先选择知识库文件')
-    return
-  }
+  if (!workflowId.value) return ElMessage.warning('请选择要关联的 Agent')
+  if (!selectedFile.value) return ElMessage.warning('请先选择知识库文件')
   uploading.value = true
   try {
     const form = new FormData()
     form.append('file', selectedFile.value)
-    if (productId.value.trim()) form.append('productId', productId.value.trim())
+    form.append('workflowId', workflowId.value)
     if (category.value.trim()) form.append('category', category.value.trim())
     if (tags.value.length) form.append('tags', tags.value.join(','))
     const created = await api('/api/v1/knowledge/documents', { method:'POST', body:form })
-    ElMessage.success(`知识库已索引：${created.filename}`)
+    ElMessage.success(`知识库已索引并绑定到 ${agentLabel(created.workflowId)}`)
     selectedFile.value = null
-    productId.value = ''
     category.value = 'manual'
     tags.value = []
     uploadRef.value?.clearFiles()
@@ -125,74 +138,67 @@ onMounted(load)
 
 <template>
   <section class="knowledge-hero">
-    <div>
-      <span>RAG KNOWLEDGE</span>
-      <h3>知识库管理</h3>
-      <p>上传消防规范、设备手册和处置 SOP，供 DeepSeek Harness 的受控知识检索工具使用。</p>
-    </div>
-    <div class="hero-actions">
-      <el-tag :type="runtime.persistentIndex ? 'success' : 'warning'" effect="dark">{{ runtime.persistentIndex ? 'WEAVIATE 持久索引' : '本地内存索引' }}</el-tag>
-      <el-button type="primary" plain @click="emit('navigate','ai')">打开 AI 工作流</el-button>
-    </div>
+    <div><span>AGENT KNOWLEDGE</span><h3>Agent 知识库</h3><p>每份文档直接绑定一个 Agent；Agent 只能检索自己的文档，避免再配置一层复杂的产品/分类筛选。</p></div>
+    <div class="hero-actions"><el-tag :type="runtime.persistentIndex ? 'success' : 'warning'" effect="dark">{{ runtime.persistentIndex ? 'WEAVIATE 持久索引' : '本地内存索引' }}</el-tag><el-button type="primary" plain @click="emit('navigate','ai')">打开 AI 工作流</el-button></div>
   </section>
 
-  <el-alert v-if="!runtime.persistentIndex" title="当前使用本地内存索引：文档原文和记录会保存，但 API 重启后检索索引需要重新建立。生产环境请启用 Weaviate。" type="warning" :closable="false" show-icon />
+  <el-alert v-if="agentError" :title="agentError" type="warning" :closable="false" show-icon />
+  <el-alert v-if="!runtime.persistentIndex" title="当前索引不是持久化向量库；文档记录会保存，但重启后检索索引需要重新建立。请启动本地 Weaviate。" type="warning" :closable="false" show-icon />
 
-  <div class="knowledge-stats">
-    <el-card shadow="never" class="surface-card"><span>知识文档</span><strong>{{ total }}</strong><small>当前租户</small></el-card>
-    <el-card shadow="never" class="surface-card"><span>已完成索引</span><strong>{{ indexedCount }}</strong><small>可供 AI 检索</small></el-card>
-    <el-card shadow="never" class="surface-card"><span>内容分片</span><strong>{{ totalChunks }}</strong><small>{{ formatBytes(totalSize) }}</small></el-card>
-  </div>
+  <div class="knowledge-stats"><el-card shadow="never" class="surface-card"><span>知识文档</span><strong>{{ total }}</strong><small>当前租户</small></el-card><el-card shadow="never" class="surface-card"><span>已完成索引</span><strong>{{ indexedCount }}</strong><small>可供 Agent 检索</small></el-card><el-card shadow="never" class="surface-card"><span>内容分片</span><strong>{{ totalChunks }}</strong><small>{{ formatBytes(totalSize) }}</small></el-card></div>
 
-  <div class="page-toolbar knowledge-toolbar">
-    <el-button type="primary" :disabled="!canUpload" @click="openUpload">上传知识文档</el-button>
-    <el-button :loading="loading" @click="load">刷新</el-button>
-    <span>共 {{ total }} 份文档，详情操作位于列表右侧。</span>
-  </div>
+  <div class="page-toolbar knowledge-toolbar"><el-button type="primary" :disabled="!canUpload" @click="openUpload">上传并绑定 Agent</el-button><el-button :loading="loading" @click="load">刷新</el-button><span>共 {{ total }} 份文档，上传时必须选择或输入一个 Agent ID。</span></div>
 
   <el-card shadow="never" class="surface-card table-card documents-card">
-    <template #header><div class="card-header"><div><strong>已上传文档</strong><small>仅显示当前租户的知识库记录</small></div><el-tag effect="plain">{{ runtime.indexMode || 'INDEX' }}</el-tag></div></template>
+    <template #header><div class="card-header"><div><strong>已上传文档</strong><small>文档和 Agent 归属持久化保存</small></div><el-tag effect="plain">{{ runtime.indexMode || 'INDEX' }}</el-tag></div></template>
     <el-table v-loading="loading" :data="documents" stripe>
-      <el-table-column label="文档" min-width="240">
-        <template #default="{ row }"><div class="document-name"><el-icon><Collection /></el-icon><span><b>{{ row.filename }}</b><small>{{ row.id }}</small></span></div></template>
-      </el-table-column>
-      <el-table-column label="范围" min-width="180"><template #default="{ row }"><b>{{ row.productId || '通用知识' }}</b><small class="subline">{{ row.category || '未分类' }}</small><div class="tag-line"><el-tag v-for="tag in row.tags || []" :key="tag" size="small" effect="plain">{{ tag }}</el-tag></div></template></el-table-column>
+      <el-table-column label="文档" min-width="240"><template #default="{ row }"><div class="document-name"><el-icon><Collection /></el-icon><span><b>{{ row.filename }}</b><small>{{ row.id }}</small></span></div></template></el-table-column>
+      <el-table-column label="关联 Agent" min-width="190"><template #default="{ row }"><b>{{ agentLabel(row.workflowId) }}</b><small class="subline">{{ row.workflowId || '未关联' }}</small></template></el-table-column>
       <el-table-column label="索引" width="105" align="center"><template #default="{ row }"><el-tag :type="row.status === 'INDEXED' ? 'success' : 'warning'">{{ row.status }}</el-tag></template></el-table-column>
       <el-table-column label="分片 / 大小" width="120" align="right"><template #default="{ row }">{{ row.metadata?.chunks || 0 }}<small class="subline">{{ formatBytes(row.metadata?.size) }}</small></template></el-table-column>
       <el-table-column label="上传时间" min-width="160"><template #default="{ row }">{{ formatTime(row.createdAt) }}</template></el-table-column>
       <el-table-column label="操作" width="110" fixed="right" align="center"><template #default="{ row }"><div class="table-actions"><el-button plain type="primary" @click="showDocument(row)">详情</el-button></div></template></el-table-column>
       <template #empty><el-empty description="暂无知识库文档" /></template>
     </el-table>
-    <div class="list-pagination">
-      <el-pagination v-model:current-page="page" v-model:page-size="pageSize" :total="total" :page-sizes="[20, 50, 100]" layout="total, sizes, prev, pager, next, jumper" @current-change="changePage" @size-change="changePageSize" />
-    </div>
+    <div class="list-pagination"><el-pagination v-model:current-page="page" v-model:page-size="pageSize" :total="total" :page-sizes="[20, 50, 100]" layout="total, sizes, prev, pager, next, jumper" @current-change="changePage" @size-change="changePageSize" /></div>
   </el-card>
 
-  <el-dialog v-model="uploadDialog" title="上传知识文档" width="min(650px, 94vw)">
-    <el-alert v-if="!canUpload" title="当前账号只有查看权限，上传需要管理员或运维人员角色。" type="info" :closable="false" show-icon />
-    <el-upload ref="uploadRef" drag :auto-upload="false" :disabled="!canUpload || uploading" :limit="1" accept=".pdf,.docx,.pptx,.xlsx,.odt,.odp,.ods,.txt,.md,.csv,.json,.html,.htm,.xml" :on-change="chooseFile" :on-remove="removeFile" :on-exceed="rejectExtra">
-      <el-icon class="upload-icon"><UploadFilled /></el-icon>
-      <div class="el-upload__text">拖放文件到这里，或<em>点击选择</em></div>
-      <template #tip><div class="el-upload__tip">支持 PDF、Office、OpenDocument、HTML/XML 和 UTF-8 文本；扫描版 PDF 需要先完成 OCR。</div></template>
-    </el-upload>
+  <el-dialog v-model="uploadDialog" title="上传知识文档并绑定 Agent" width="min(650px, 94vw)">
+    <el-upload ref="uploadRef" drag :auto-upload="false" :disabled="!canUpload || uploading" :limit="1" accept=".pdf,.docx,.pptx,.xlsx,.odt,.odp,.ods,.txt,.md,.csv,.json,.html,.htm,.xml" :on-change="chooseFile" :on-remove="removeFile" :on-exceed="rejectExtra"><el-icon class="upload-icon"><UploadFilled /></el-icon><div class="el-upload__text">拖放文件到这里，或<em>点击选择</em></div><template #tip><div class="el-upload__tip">支持 PDF、Office、OpenDocument、HTML/XML 和 UTF-8 文本；扫描版 PDF 需要先完成 OCR。</div></template></el-upload>
     <el-form label-position="top" class="top-gap">
-      <el-form-item label="关联产品（可选）"><el-select v-model="productId" filterable clearable :disabled="!canUpload || uploading" placeholder="不选择表示通用知识"><el-option v-for="product in products" :key="product.id" :label="`${product.name || product.id} · ${product.id}`" :value="product.id" /></el-select><small class="field-tip">产品列表来自当前租户；不选择时，文档可作为通用知识被工作流检索。</small></el-form-item>
-      <div class="metadata-grid"><el-form-item label="知识分类"><el-select v-model="category" :disabled="!canUpload || uploading"><el-option label="设备手册" value="manual" /><el-option label="告警处置 SOP" value="alarm-sop" /><el-option label="运维维修" value="maintenance" /><el-option label="消防规范" value="regulation" /><el-option label="常见问题" value="faq" /></el-select></el-form-item><el-form-item label="知识标签"><el-select v-model="tags" multiple filterable allow-create default-first-option :disabled="!canUpload || uploading" placeholder="输入标签后回车" /></el-form-item></div>
+      <el-form-item label="关联 Agent（必选）"><el-select v-model="workflowId" filterable allow-create default-first-option :disabled="uploading" placeholder="选择或输入 Agent ID"><el-option v-for="agent in agents" :key="agentKey(agent)" :label="`${agentName(agent)} · ${agentKey(agent)}`" :value="agentKey(agent)" /></el-select><small class="field-tip">上传后检索服务端会强制使用这个 Agent ID，不会跨 Agent 检索；未启动 Harness 时也可以先输入计划使用的 Agent ID。</small></el-form-item>
+      <div class="metadata-grid"><el-form-item label="知识分类（可选）"><el-select v-model="category" :disabled="uploading"><el-option label="设备手册" value="manual" /><el-option label="告警处置 SOP" value="alarm-sop" /><el-option label="运维维修" value="maintenance" /><el-option label="消防规范" value="regulation" /><el-option label="常见问题" value="faq" /></el-select></el-form-item><el-form-item label="知识标签（可选）"><el-select v-model="tags" multiple filterable allow-create default-first-option :disabled="uploading" placeholder="输入标签后回车" /></el-form-item></div>
     </el-form>
-    <template #footer><el-button @click="uploadDialog=false">取消</el-button><el-button type="primary" :loading="uploading" :disabled="!canUpload || !selectedFile" @click="upload">上传并建立索引</el-button></template>
+    <template #footer><el-button @click="uploadDialog=false">取消</el-button><el-button type="primary" :loading="uploading" :disabled="!canUpload || !selectedFile || !workflowId" @click="upload">上传并建立索引</el-button></template>
   </el-dialog>
 
-  <el-dialog v-model="detailDialog" title="知识文档详情" width="min(620px, 94vw)">
-    <el-descriptions v-if="selectedDocument" :column="1" border>
-      <el-descriptions-item label="文件名">{{ selectedDocument.filename }}</el-descriptions-item>
-      <el-descriptions-item label="文档 ID">{{ selectedDocument.id }}</el-descriptions-item>
-      <el-descriptions-item label="关联产品">{{ selectedDocument.productId || '通用知识' }}</el-descriptions-item>
-      <el-descriptions-item label="知识分类">{{ selectedDocument.category || '未分类' }}</el-descriptions-item>
-      <el-descriptions-item label="索引状态">{{ selectedDocument.status }}</el-descriptions-item>
-      <el-descriptions-item label="内容统计">{{ selectedDocument.metadata?.chunks || 0 }} 个分片 / {{ formatBytes(selectedDocument.metadata?.size) }}</el-descriptions-item>
-      <el-descriptions-item label="标签">{{ (selectedDocument.tags || []).join('、') || '无' }}</el-descriptions-item>
-      <el-descriptions-item label="上传时间">{{ formatTime(selectedDocument.createdAt) }}</el-descriptions-item>
-    </el-descriptions>
+  <el-dialog v-model="detailDialog" title="知识文档详情与切片" width="min(1080px, 96vw)">
+    <el-alert v-if="detailError" :title="detailError" type="error" :closable="false" show-icon />
+    <div v-loading="detailLoading" class="detail-body">
+      <el-descriptions v-if="selectedDocument" :column="2" border>
+        <el-descriptions-item label="文件名">{{ selectedDocument.filename }}</el-descriptions-item>
+        <el-descriptions-item label="文档 ID">{{ selectedDocument.id }}</el-descriptions-item>
+        <el-descriptions-item label="关联 Agent">{{ agentLabel(selectedDocument.workflowId) }}（{{ selectedDocument.workflowId || '未关联' }}）</el-descriptions-item>
+        <el-descriptions-item label="索引状态">{{ selectedDocument.status }}</el-descriptions-item>
+        <el-descriptions-item label="知识分类">{{ selectedDocument.category || '未分类' }}</el-descriptions-item>
+        <el-descriptions-item label="内容统计">{{ selectedDocument.metadata?.chunks || 0 }} 个分片 / {{ formatBytes(selectedDocument.metadata?.size) }}</el-descriptions-item>
+        <el-descriptions-item label="标签">{{ (selectedDocument.tags || []).join('、') || '无' }}</el-descriptions-item>
+        <el-descriptions-item label="上传时间">{{ formatTime(selectedDocument.createdAt) }}</el-descriptions-item>
+      </el-descriptions>
+      <div v-if="selectedDetail?.index" class="chunk-policy">
+        <div class="chunk-policy-title"><strong>索引与切片规则</strong><el-tag size="small" type="success" effect="plain">{{ selectedDetail.index.mode }}</el-tag><el-tag size="small" effect="plain">{{ selectedDetail.index.vectorizer }}</el-tag><el-tag v-if="selectedDetail.index.embeddingModel" size="small" type="success" effect="plain">{{ selectedDetail.index.embeddingModel }}</el-tag></div>
+        <div class="chunk-policy-grid"><span>切片策略<strong>{{ selectedDetail.index.chunking?.strategy === 'fixed-window-overlap' ? '固定窗口 + 重叠' : selectedDetail.index.chunking?.strategy }}</strong></span><span>窗口<strong>{{ selectedDetail.index.chunking?.size }} 字符</strong></span><span>重叠<strong>{{ selectedDetail.index.chunking?.overlap }} 字符</strong></span><span>提取文本<strong>{{ selectedDetail.index.extractedChars || 0 }} 字符</strong></span><span>实际分片<strong>{{ selectedDetail.index.chunkCount }}</strong></span></div>
+        <small>{{ selectedDetail.index.chunking?.normalization || '先提取并清洗文本，再进行固定窗口切片。' }}；字符范围采用左闭右开：StartChar 包含，EndChar 不包含。页面不展示高维向量本身，只展示切片文本和向量化状态。</small>
+      </div>
+      <el-table v-if="selectedDetail" :data="selectedDetail.chunks || []" stripe border class="chunk-table">
+        <el-table-column label="#" prop="index" width="58" align="center" />
+        <el-table-column label="字符范围" width="138"><template #default="{ row }">[{{ row.startChar }}, {{ row.endChar }})<small class="subline">{{ row.characterCount }} 字符</small></template></el-table-column>
+        <el-table-column label="重叠" width="72" align="center"><template #default="{ row }">{{ row.overlapChars || 0 }}</template></el-table-column>
+        <el-table-column label="向量化" width="92" align="center"><template #default="{ row }"><el-tag :type="row.vectorized ? 'success' : 'info'" size="small">{{ row.vectorized ? '已完成' : '非向量索引' }}</el-tag></template></el-table-column>
+        <el-table-column label="切片内容" min-width="480"><template #default="{ row }"><div class="chunk-content">{{ row.content }}</div><small class="subline">{{ row.chunkId }}</small></template></el-table-column>
+        <template #empty><el-empty description="索引中没有可查看的切片" :image-size="56" /></template>
+      </el-table>
+    </div>
     <template #footer><el-button @click="detailDialog=false">关闭</el-button></template>
   </el-dialog>
 </template>
@@ -201,15 +207,11 @@ onMounted(load)
 .knowledge-hero { min-height:112px; margin-bottom:14px; padding:20px 22px; display:flex; align-items:center; justify-content:space-between; gap:20px; color:#fff; background:linear-gradient(125deg,#0d2850,#1554ad 68%,#1677ff); border-radius:6px; overflow:hidden; position:relative; }
 .knowledge-hero::after { content:""; width:220px; height:220px; position:absolute; right:-70px; top:-115px; border:1px solid rgba(255,255,255,.16); border-radius:50%; box-shadow:0 0 0 42px rgba(255,255,255,.035),0 0 0 84px rgba(255,255,255,.025); }
 .knowledge-hero>div { position:relative; z-index:1; }.knowledge-hero span { color:rgba(255,255,255,.68); font-size:9px; font-weight:700; letter-spacing:.16em; }.knowledge-hero h3 { margin:5px 0; font-size:22px; }.knowledge-hero p { margin:0; color:rgba(255,255,255,.72); font-size:12px; }.hero-actions { display:flex; align-items:center; gap:9px; }.hero-actions .el-button { color:#fff; background:rgba(255,255,255,.08); border-color:rgba(255,255,255,.28); }
-.knowledge-stats { margin:14px 0; display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }.knowledge-stats .el-card :deep(.el-card__body) { min-height:92px; display:grid; grid-template-columns:1fr auto; align-items:center; gap:2px 14px; }.knowledge-stats span,.knowledge-stats small { color:var(--muted); font-size:11px; }.knowledge-stats strong { grid-row:1/3; grid-column:2; color:#1554ad; font-size:28px; }.knowledge-stats small { grid-column:1; }
-.knowledge-toolbar { margin-top:2px; }.upload-icon { color:#1677ff; font-size:38px; }.field-tip { display:block; margin-top:5px; color:var(--muted); font-size:10px; line-height:1.5; }.metadata-grid { display:grid; grid-template-columns:.8fr 1.2fr; gap:10px; }.tag-line { display:flex; flex-wrap:wrap; gap:3px; margin-top:4px; }.document-name { display:flex; align-items:center; gap:9px; }.document-name>.el-icon { width:30px; height:30px; flex:none; color:#1677ff; background:#eaf3ff; border-radius:4px; }.document-name span { min-width:0; }.document-name b { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.document-name small { display:block; margin-top:3px; color:var(--muted); font-size:9px; word-break:break-all; }
+.knowledge-stats { margin:14px 0; display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }.knowledge-stats .el-card :deep(.el-card__body) { min-height:92px; display:grid; grid-template-columns:1fr auto; align-items:center; gap:2px 14px; }.knowledge-stats span,.knowledge-stats small { color:var(--muted-foreground); font-size:11px; }.knowledge-stats strong { grid-row:1/3; grid-column:2; color:#1554ad; font-size:28px; }.knowledge-stats small { grid-column:1; }
+.knowledge-toolbar { margin-top:2px; }.upload-icon { color:#1677ff; font-size:38px; }.field-tip { display:block; margin-top:5px; color:#475569; font-size:10px; line-height:1.5; }.metadata-grid { display:grid; grid-template-columns:.8fr 1.2fr; gap:10px; }.document-name { display:flex; align-items:center; gap:9px; }.document-name>.el-icon { width:30px; height:30px; flex:none; color:#1677ff; background:#eaf3ff; border-radius:4px; }.document-name span { min-width:0; }.document-name b { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.document-name small { display:block; margin-top:3px; color:#475569; font-size:9px; word-break:break-all; }
+.detail-body { min-height:180px; }.chunk-policy { margin-top:14px; padding:14px; border:1px solid #dbeafe; border-radius:6px; background:#f8fbff; }.chunk-policy-title { display:flex; align-items:center; flex-wrap:wrap; gap:7px; }.chunk-policy-title strong { margin-right:auto; color:#16345f; }.chunk-policy-grid { display:grid; grid-template-columns:repeat(5,1fr); gap:8px; margin:12px 0 9px; }.chunk-policy-grid span { display:flex; flex-direction:column; gap:3px; color:#64748b; font-size:10px; }.chunk-policy-grid strong { color:#16345f; font-size:13px; }.chunk-policy>small { color:#475569; line-height:1.6; }.chunk-table { margin-top:14px; }.chunk-table :deep(.el-table__cell) { vertical-align:top; }.chunk-content { max-height:180px; overflow:auto; white-space:pre-wrap; word-break:break-word; color:#1e293b; line-height:1.6; font-size:12px; }.subline { display:block; margin-top:4px; color:#64748b; font-size:10px; word-break:break-all; }
 @media (max-width:640px) { .knowledge-hero { align-items:flex-start; flex-direction:column; }.knowledge-hero p { line-height:1.6; }.hero-actions { width:100%; justify-content:space-between; }.knowledge-stats { grid-template-columns:1fr; }.documents-card { overflow:hidden; }.metadata-grid { grid-template-columns:1fr; } }
-
-/* Keep secondary copy readable on the light knowledge surfaces. */
-.knowledge-stats span,
-.knowledge-stats small,
-.field-tip,
-.document-name small { color:#475569; }
-:deep(.el-upload__text),
-:deep(.el-upload__tip) { color:#475569; }
+:deep(.el-dialog__body) { overflow-x:hidden; }
+:deep(.el-table .cell) { white-space:normal; }
+:deep(.el-upload__text), :deep(.el-upload__tip) { color:#475569; }
 </style>

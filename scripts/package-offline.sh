@@ -12,6 +12,7 @@ include_thingspanel=0
 include_gb26875=0
 full=0
 ollama_model="qwen3:8b"
+ollama_embedding_model="nomic-embed-text"
 skip_ollama_model=0
 
 usage() {
@@ -26,7 +27,8 @@ usage() {
   --include-harness      打包 DeepSeek Harness
   --include-thingspanel  打包 ThingsPanel
   --include-gb26875      部署时同时启动 GB/T 26875 网关
-  --ollama-model MODEL   需要一起打包的 Ollama 模型，默认 qwen3:8b
+  --ollama-model MODEL   需要一起打包的 Ollama 对话模型，默认 qwen3:8b
+  --ollama-embedding-model MODEL  Weaviate 向量模型，默认 nomic-embed-text
   --skip-ollama-model    只打包 AI 镜像，不打包模型卷
   --full                 启用全部可选组件
   -h, --help             显示帮助
@@ -93,7 +95,7 @@ validate_env() {
     POSTGRES_PASSWORD REDIS_PASSWORD CLICKHOUSE_PASSWORD
     MINIO_ROOT_PASSWORD MINIO_DR_ROOT_PASSWORD IOT_JWT_SECRET
     IOT_ADMIN_USER IOT_ADMIN_PASSWORD IOT_ADMIN_TENANTS
-    IOT_VIDEO_PLATFORM_SECRETS IOT_BACKUP_ADMIN_TOKEN IOT_VIDEO_ZLM_SECRET
+    IOT_VIDEO_PLATFORM_SECRETS IOT_BACKUP_ADMIN_TOKEN
     EMQX_DASHBOARD_USER EMQX_DASHBOARD_PASSWORD
     GRAFANA_ADMIN_USER GRAFANA_ADMIN_PASSWORD
   )
@@ -122,7 +124,6 @@ write_env() {
     local jwt_secret="$(random_hex 32)"
     local admin_password="Admin-$(random_hex 12)"
     local video_secret="$(random_hex 24)"
-    local zlm_secret="$(random_hex 24)"
     local harness_token="$(random_hex 32)"
     local backup_token="$(random_hex 32)"
     local emqx_password="Emqx-$(random_hex 12)"
@@ -154,14 +155,6 @@ IOT_ADMIN_PASSWORD=$admin_password
 IOT_ADMIN_TENANTS=tenant_001
 IOT_VIDEO_PLATFORM_SECRETS=video-platform-1:$video_secret
 IOT_VIDEO_MEDIA_ALLOWED_HOSTS=
-IOT_VIDEO_PREVIEW_ALLOWED_ORIGINS=
-IOT_VIDEO_PREVIEW_CSP_SOURCES=
-IOT_VIDEO_ZLM_API_URL=http://zlm:80
-IOT_VIDEO_ZLM_PLAYBACK_BASE_URL=http://localhost:8090
-IOT_VIDEO_ZLM_SECRET=$zlm_secret
-IOT_VIDEO_ZLM_VHOST=__defaultVhost__
-IOT_VIDEO_ZLM_APP=iot
-IOT_ZLM_IMAGE=zlmediakit/zlmediakit:master
 IOT_OLLAMA_URL=$ollama_url
 IOT_OLLAMA_MODEL=$ollama_model
 IOT_AI_PROVIDER=$ai_provider
@@ -178,8 +171,9 @@ IOT_AI_HARNESS_MODEL=deepseek-v4-flash
 IOT_AI_HARNESS_TIMEOUT=90s
 IOT_WEAVIATE_URL=$weaviate_url
 IOT_BACKUP_ADMIN_TOKEN=$backup_token
-IOT_BACKUP_INTERVAL=24h
-IOT_BACKUP_INCREMENTAL_INTERVAL=15m
+IOT_RAW_HIGH_FREQUENCY_INTERVAL_SEC=60
+IOT_BACKUP_TIME=00:05
+IOT_BACKUP_TIMEZONE=Asia/Shanghai
 IOT_MQTT_WEBSOCKET_PUBLIC_URL=
 IOT_THINGSPANEL_URL=
 IOT_THINGSPANEL_USER=
@@ -205,7 +199,6 @@ Redis 密码：$redis_password
 ClickHouse 密码：$clickhouse_password
 MinIO 主密码：$minio_password
 MinIO 灾备密码：$minio_dr_password
-ZLMediaKit API Secret：$zlm_secret
 EOF
   fi
 
@@ -252,6 +245,7 @@ while [[ $# -gt 0 ]]; do
     --include-thingspanel) include_thingspanel=1; shift ;;
     --include-gb26875) include_gb26875=1; shift ;;
     --ollama-model) ollama_model="${2:-}"; shift 2 ;;
+    --ollama-embedding-model) ollama_embedding_model="${2:-}"; shift 2 ;;
     --skip-ollama-model) skip_ollama_model=1; shift ;;
     --full) full=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -294,13 +288,12 @@ add_profile() {
   profiles+=("$1")
   compose_profile_args+=(--profile "$1")
 }
-(( include_ai )) && add_profile ai
 (( include_harness )) && add_profile harness
 (( include_thingspanel )) && add_profile thingspanel
 (( include_gb26875 )) && add_profile gb26875
 
 pull_services=(
-  zlm postgres postgres-wal-init redis minio minio-dr redpanda redpanda-init
+  postgres postgres-wal-init redis minio minio-dr redpanda redpanda-init
   clickhouse emqx prometheus grafana loki
 )
 run_docker compose pull "${pull_services[@]}"
@@ -309,19 +302,22 @@ run_docker compose build --pull platform-api platform-web backup-service
 ollama_archive=""
 ollama_volume_name=""
 if (( include_ai )); then
-  run_docker compose --profile ai pull ollama weaviate
+  run_docker compose pull ollama weaviate
   if (( ! skip_ollama_model )); then
-    run_docker compose --profile ai up -d ollama
+    run_docker compose up -d ollama
     ollama_ready=0
     for _ in $(seq 1 30); do
-      if docker compose --profile ai exec -T ollama ollama list >/dev/null 2>&1; then
+      if docker compose exec -T ollama ollama list >/dev/null 2>&1; then
         ollama_ready=1
         break
       fi
       sleep 2
     done
     (( ollama_ready )) || die "Ollama 容器未在规定时间内就绪"
-    run_docker compose --profile ai exec -T ollama ollama pull "$ollama_model"
+    run_docker compose exec -T ollama ollama pull "$ollama_model"
+    if [[ -n "$ollama_embedding_model" && "$ollama_embedding_model" != "$ollama_model" ]]; then
+      run_docker compose exec -T ollama ollama pull "$ollama_embedding_model"
+    fi
     ollama_volume_name="$(docker volume ls --filter label=com.docker.compose.volume=ollama-data --format '{{.Name}}' | head -n 1)"
     ollama_volume_name="${ollama_volume_name:-iot-platform_ollama-data}"
     run_docker run --rm \
@@ -414,6 +410,7 @@ cat > "$bundle_root/manifest.json" <<EOF
   "envFile": ".env.offline",
   "composeFiles": ["compose.yaml", "compose.offline.yaml"],
   "ollamaModel": $ollama_model_json,
+  "ollamaEmbeddingModel": $(if [[ -n "$ollama_archive" ]]; then printf '"%s"' "$ollama_embedding_model"; else printf 'null'; fi),
   "ollamaArchive": $ollama_archive_json,
   "ollamaVolume": $ollama_volume_json,
   "generatedCredentials": $([[ "$generated_credentials" = 1 ]] && echo true || echo false)

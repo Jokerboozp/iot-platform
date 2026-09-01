@@ -18,6 +18,7 @@ var ErrNotFound = errors.New("not found")
 type Repository struct {
 	mu                sync.RWMutex
 	raw               map[string]model.RawArchiveIndex
+	rawMessages       map[string]model.RawMessage
 	standard          map[string]model.StandardMessage
 	standardProcessed map[string]bool
 	rulePending       map[string]int64
@@ -40,7 +41,7 @@ type Repository struct {
 }
 
 func NewRepository() *Repository {
-	return &Repository{raw: map[string]model.RawArchiveIndex{}, standard: map[string]model.StandardMessage{}, standardProcessed: map[string]bool{}, rulePending: map[string]int64{}, states: map[string]model.DeviceState{}, rules: map[string]model.AlarmRule{}, alarms: map[string]model.Alarm{}, video: map[string]model.VideoAlarmEvent{}, videoMappings: map[string]model.VideoCameraMapping{}, videoRelations: map[string][]model.VideoCameraRelation{}, ai: map[string]model.AIAnalysis{}, knowledge: map[string]model.KnowledgeDoc{}, workflowKnowledge: map[string]model.WorkflowKnowledgeBinding{}, replays: map[string]model.ReplayRequest{}, products: map[string]model.Product{}, protocols: map[string]model.ProtocolPackage{}, devices: map[string]model.ManagedDevice{}}
+	return &Repository{raw: map[string]model.RawArchiveIndex{}, rawMessages: map[string]model.RawMessage{}, standard: map[string]model.StandardMessage{}, standardProcessed: map[string]bool{}, rulePending: map[string]int64{}, states: map[string]model.DeviceState{}, rules: map[string]model.AlarmRule{}, alarms: map[string]model.Alarm{}, video: map[string]model.VideoAlarmEvent{}, videoMappings: map[string]model.VideoCameraMapping{}, videoRelations: map[string][]model.VideoCameraRelation{}, ai: map[string]model.AIAnalysis{}, knowledge: map[string]model.KnowledgeDoc{}, workflowKnowledge: map[string]model.WorkflowKnowledgeBinding{}, replays: map[string]model.ReplayRequest{}, products: map[string]model.Product{}, protocols: map[string]model.ProtocolPackage{}, devices: map[string]model.ManagedDevice{}}
 }
 
 func key(parts ...string) string { return strings.Join(parts, "\x00") }
@@ -194,6 +195,27 @@ func (r *Repository) SaveRawIndex(_ context.Context, v model.RawArchiveIndex) (b
 	r.raw[key(v.TenantID, v.MessageID)] = v
 	return true, nil
 }
+
+func (r *Repository) SaveRawMessage(_ context.Context, v model.RawMessage) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := key(v.TenantID, v.MessageID)
+	if _, exists := r.rawMessages[key]; !exists {
+		r.rawMessages[key] = clone(v)
+	}
+	return nil
+}
+
+func (r *Repository) GetRawMessage(_ context.Context, tenant, messageID string) (model.RawMessage, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	v, ok := r.rawMessages[key(tenant, messageID)]
+	if !ok {
+		return model.RawMessage{}, ErrNotFound
+	}
+	return clone(v), nil
+}
+
 func (r *Repository) MarkRawPublished(_ context.Context, tenant, messageID string, publishedAt int64, lastError string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -453,7 +475,7 @@ func (r *Repository) CountDeviceStates(_ context.Context, tenant string, unregis
 			}
 		}
 		total++
-		if state.BusinessStatus == "ONLINE" {
+		if state.BusinessStatus == "ONLINE" || state.BusinessStatus == "ALARM" {
 			online++
 		}
 	}
@@ -626,18 +648,20 @@ func (r *Repository) ListPendingVideoEvents(_ context.Context, limit int) ([]mod
 	return out, nil
 }
 func (r *Repository) SaveVideoCameraMapping(_ context.Context, v model.VideoCameraMapping) error {
+	legacyDeviceIDs := uniqueStrings(v.RelatedDeviceIDs)
+	if v.DeviceID == "" && len(legacyDeviceIDs) == 1 {
+		v.DeviceID = legacyDeviceIDs[0]
+	}
+	if len(legacyDeviceIDs) > 1 || v.DeviceID != "" && len(legacyDeviceIDs) == 1 && legacyDeviceIDs[0] != v.DeviceID {
+		return errors.New("a camera can be associated with at most one device")
+	}
+	v.RelatedDeviceIDs, v.RelatedFloorIDs, v.RelatedRoomIDs = nil, nil, nil
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.videoMappings[key(v.TenantID, v.CameraID)] = clone(v)
-	relations := make([]model.VideoCameraRelation, 0, len(v.RelatedDeviceIDs)+len(v.RelatedFloorIDs)+len(v.RelatedRoomIDs))
-	for _, target := range v.RelatedDeviceIDs {
-		relations = append(relations, model.VideoCameraRelation{TenantID: v.TenantID, CameraID: v.CameraID, RelationType: "device", TargetID: target})
-	}
-	for _, target := range v.RelatedFloorIDs {
-		relations = append(relations, model.VideoCameraRelation{TenantID: v.TenantID, CameraID: v.CameraID, RelationType: "floor", TargetID: target})
-	}
-	for _, target := range v.RelatedRoomIDs {
-		relations = append(relations, model.VideoCameraRelation{TenantID: v.TenantID, CameraID: v.CameraID, RelationType: "room", TargetID: target})
+	relations := make([]model.VideoCameraRelation, 0, 1)
+	if v.DeviceID != "" {
+		relations = append(relations, model.VideoCameraRelation{TenantID: v.TenantID, CameraID: v.CameraID, RelationType: "device", TargetID: v.DeviceID})
 	}
 	r.videoRelations[key(v.TenantID, v.CameraID)] = clone(relations)
 	return nil
@@ -674,23 +698,22 @@ func (r *Repository) ReplaceVideoCameraRelations(_ context.Context, tenant, came
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	copyRelations := make([]model.VideoCameraRelation, 0, len(relations))
+	deviceID := ""
 	for _, relation := range relations {
+		if relation.RelationType != "device" || strings.TrimSpace(relation.TargetID) == "" {
+			continue
+		}
+		if deviceID != "" && deviceID != relation.TargetID {
+			return errors.New("a camera can be associated with at most one device")
+		}
+		deviceID = relation.TargetID
 		relation.TenantID, relation.CameraID = tenant, camera
 		copyRelations = append(copyRelations, relation)
 	}
 	r.videoRelations[key(tenant, camera)] = clone(copyRelations)
 	if mapping, ok := r.videoMappings[key(tenant, camera)]; ok {
+		mapping.DeviceID = deviceID
 		mapping.RelatedDeviceIDs, mapping.RelatedFloorIDs, mapping.RelatedRoomIDs = nil, nil, nil
-		for _, relation := range copyRelations {
-			switch relation.RelationType {
-			case "device":
-				mapping.RelatedDeviceIDs = append(mapping.RelatedDeviceIDs, relation.TargetID)
-			case "floor":
-				mapping.RelatedFloorIDs = append(mapping.RelatedFloorIDs, relation.TargetID)
-			case "room":
-				mapping.RelatedRoomIDs = append(mapping.RelatedRoomIDs, relation.TargetID)
-			}
-		}
 		r.videoMappings[key(tenant, camera)] = clone(mapping)
 	}
 	return nil
@@ -734,6 +757,23 @@ func (r *Repository) SaveKnowledgeDoc(_ context.Context, v model.KnowledgeDoc) e
 	defer r.mu.Unlock()
 	r.knowledge[key(v.TenantID, v.ID)] = v
 	return nil
+}
+
+func uniqueStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 func (r *Repository) ListKnowledgeDocs(_ context.Context, tenant string) ([]model.KnowledgeDoc, error) {
 	r.mu.RLock()

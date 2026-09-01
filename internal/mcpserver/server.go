@@ -82,7 +82,7 @@ func newServer(engine *core.Engine, harness bool, endpoint string) http.Handler 
 		v, err := engine.Repo.ListAlarms(ctx, ports.AlarmFilter{TenantID: tenant, DeviceID: req.GetString("deviceId", ""), Limit: limit})
 		return auditedResult(ctx, engine, "query_similar_alarms", map[string]any{"deviceId": req.GetString("deviceId", "")}, v, err)
 	})
-	s.AddTool(mcp.NewTool("query_knowledge_base", mcp.WithDescription("按当前租户、产品、分类和标签检索设备手册、SOP 与维修知识"), mcp.WithString("question", mcp.Required()), mcp.WithArray("productIds", mcp.WithStringItems()), mcp.WithArray("categories", mcp.WithStringItems()), mcp.WithArray("tags", mcp.WithStringItems()), mcp.WithNumber("limit"), mcp.WithNumber("minScore")), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	s.AddTool(mcp.NewTool("query_knowledge_base", mcp.WithDescription("按当前 Agent 直接绑定的知识文档检索设备手册、SOP 与维修知识"), mcp.WithString("question", mcp.Required()), mcp.WithString("workflowId", mcp.Required()), mcp.WithNumber("limit"), mcp.WithNumber("minScore")), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		tenant, err := tenantForTool(ctx, auth.ScopeQueryKnowledgeBase, harness)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
@@ -94,14 +94,10 @@ func newServer(engine *core.Engine, harness bool, endpoint string) http.Handler 
 		if harness {
 			limit = boundedLimit(limit, 5, 20)
 		}
-		products := req.GetStringSlice("productIds", nil)
-		categories := req.GetStringSlice("categories", nil)
-		tags := req.GetStringSlice("tags", nil)
+		workflowID := req.GetString("workflowId", "")
 		minScore := req.GetFloat("minScore", 0)
 		if c, ok := auth.ClaimsFromContext(ctx); ok && c.TokenUse == "harness" && c.Knowledge != nil {
-			products = append([]string(nil), c.Knowledge.ProductIDs...)
-			categories = append([]string(nil), c.Knowledge.Categories...)
-			tags = append([]string(nil), c.Knowledge.Tags...)
+			workflowID = c.Knowledge.WorkflowID
 			if c.Knowledge.TopK > 0 && limit > c.Knowledge.TopK {
 				limit = c.Knowledge.TopK
 			}
@@ -109,13 +105,12 @@ func newServer(engine *core.Engine, harness bool, endpoint string) http.Handler 
 				minScore = c.Knowledge.MinScore
 			}
 		}
-		input := map[string]any{"question": req.GetString("question", ""), "productIds": products, "categories": categories, "tags": tags, "limit": limit, "minScore": minScore}
+		input := map[string]any{"question": req.GetString("question", ""), "workflowId": workflowID, "limit": limit, "minScore": minScore}
 		if filtered, ok := engine.KB.(ports.FilteredKnowledgeBase); ok {
-			v, searchErr := filtered.SearchKnowledge(ctx, ports.KnowledgeSearchRequest{TenantID: tenant, Question: req.GetString("question", ""), ProductIDs: products, Categories: categories, Tags: tags, Limit: limit, MinScore: minScore})
+			v, searchErr := filtered.SearchKnowledge(ctx, ports.KnowledgeSearchRequest{TenantID: tenant, WorkflowID: workflowID, Question: req.GetString("question", ""), Limit: limit, MinScore: minScore})
 			return auditedResult(ctx, engine, "query_knowledge_base", input, v, searchErr)
 		}
-		v, err := engine.KB.Search(ctx, tenant, req.GetString("question", ""), limit)
-		return auditedResult(ctx, engine, "query_knowledge_base", input, v, err)
+		return auditedResult(ctx, engine, "query_knowledge_base", input, nil, fmt.Errorf("workflow-bound knowledge search is not supported by the configured index"))
 	})
 	s.AddTool(mcp.NewTool("create_rule_draft", mcp.WithDescription("把自然语言条件与页面动作转换为规则，并自动保存为禁用草稿；不会启用或执行，必须由用户人工确认"), mcp.WithString("inputText", mcp.Required())), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		tenant, err := tenantForTool(ctx, auth.ScopeCreateRuleDraft, harness)
@@ -246,13 +241,13 @@ func buildSystemOverview(ctx context.Context, engine *core.Engine, tenant string
 			recent24h++
 		}
 	}
-	cameraEnabled, previewReady := 0, 0
+	cameraEnabled, linkedDevices := 0, 0
 	for _, item := range cameras {
 		if item.Enabled {
 			cameraEnabled++
 		}
-		if item.Enabled && strings.TrimSpace(item.StreamURL) != "" {
-			previewReady++
+		if item.Enabled && strings.TrimSpace(item.DeviceID) != "" {
+			linkedDevices++
 		}
 	}
 	indexedDocs, chunks := 0, 0
@@ -288,7 +283,7 @@ func buildSystemOverview(ctx context.Context, engine *core.Engine, tenant string
 		"devices":          map[string]any{"total": len(devices), "byStatus": deviceStatus, "byRole": deviceRole, "autoRegistered": autoRegistered, "reported": reported, "neverReported": max(0, len(devices)-reported), "discoveredUnregistered": discovered, "connectionStatus": connectionStatus, "dataStatus": dataStatus, "businessStatus": businessStatus, "latestSeenAt": latestSeenAt},
 		"alarms":           map[string]any{"loaded": len(alarms), "truncated": len(alarms) == 10000, "active": active, "highRiskActive": highActive, "triggeredLast24h": recent24h, "byStatus": alarmStatus, "byLevel": alarmLevel, "bySource": alarmSource},
 		"rules":            map[string]any{"total": len(rules), "enabled": ruleEnabled, "disabled": len(rules) - ruleEnabled},
-		"cameras":          map[string]any{"total": len(cameras), "enabled": cameraEnabled, "streamConfigured": previewReady},
+		"cameras":          map[string]any{"total": len(cameras), "enabled": cameraEnabled, "linkedDevices": linkedDevices},
 		"knowledge":        map[string]any{"documents": len(documents), "indexed": indexedDocs, "chunks": chunks},
 	}, nil
 }

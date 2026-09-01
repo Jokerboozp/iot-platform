@@ -1,5 +1,7 @@
 // Mirrors the source repository's deployStaging follow-up in
 // scripts/build-exe-for-python-sdk.ts, without packaging a standalone binary.
+// The current carrier entry is the unified `dsh` CLI; the former
+// dsh-sdk-jsonrpc-demo packaged-bin entry was removed upstream.
 import { cp, lstat, mkdir, readFile, readdir, realpath, rm } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
@@ -70,7 +72,7 @@ while (remaining !== undefined) {
 const missing = directDependencies.filter(dependency => !existsSync(join(nodeModules, dependency)))
 if (missing.length > 0) throw new Error(`runtime carrier dependencies remain missing: ${missing.join(', ')}`)
 
-const entry = join(nodeModules, '@deepseek-ai', 'dsh-sdk-jsonrpc-demo', 'lib', 'packaged-bin.js')
+const entry = join(nodeModules, '@deepseek-ai', 'dsh', 'lib', 'bin.js')
 if (!existsSync(entry)) throw new Error(`runtime carrier entry is missing: ${entry}`)
 
 process.stdout.write(

@@ -17,6 +17,72 @@ import (
 	"iot-platform/internal/ports"
 )
 
+type recordingBus struct {
+	*local.Bus
+	topics []string
+}
+
+func (b *recordingBus) Publish(ctx context.Context, topic, key string, payload []byte) error {
+	b.topics = append(b.topics, topic)
+	return b.Bus.Publish(ctx, topic, key, payload)
+}
+
+func hasTopic(topics []string, wanted string) bool {
+	for _, topic := range topics {
+		if topic == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func TestParsedMessageFanoutRequiresSuccessfulParsing(t *testing.T) {
+	ctx := context.Background()
+	repo := memory.NewRepository()
+	archive, err := local.NewArchive(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bus := &recordingBus{Bus: local.NewBus()}
+	realtime := local.NewRealtime()
+	e := New(repo, archive, bus, realtime, parser.NewRegistry(parser.JSONParser{}), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err = e.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	normal := model.RawMessage{MessageID: "raw_fanout_normal", TenantID: "t1", ProductID: "json_sensor", DeviceID: "device_fanout", Protocol: "json", PayloadFormat: "json", ReceivedAt: 1000, Payload: json.RawMessage(`{"properties":{"temperature":23}}`)}
+	if _, _, err = e.IngestRaw(ctx, normal); err != nil {
+		t.Fatal(err)
+	}
+	if !hasTopic(bus.topics, model.TopicRaw) || !hasTopic(bus.topics, model.TopicPropertyReport) {
+		t.Fatalf("normal parsed message did not reach Kafka topics: %#v", bus.topics)
+	}
+	foundParsedMQTT := false
+	for _, published := range realtime.Messages {
+		if published.Topic == "/iot/parsed/t1/json_sensor/device_fanout/PROPERTY_REPORT" {
+			foundParsedMQTT = true
+			break
+		}
+	}
+	if !foundParsedMQTT {
+		t.Fatalf("normal parsed message did not reach MQTT: %#v", realtime.Messages)
+	}
+	event := model.RawMessage{MessageID: "raw_fanout_event", TenantID: "t1", ProductID: "json_sensor", DeviceID: "device_fanout", Protocol: "json", PayloadFormat: "json", ReceivedAt: 1001, Payload: json.RawMessage(`{"event":{"type":"FAULT"}}`)}
+	if _, _, err = e.IngestRaw(ctx, event); err != nil {
+		t.Fatal(err)
+	}
+	if !hasTopic(bus.topics, model.TopicEventReport) {
+		t.Fatalf("event parsed message did not reach Kafka event topic: %#v", bus.topics)
+	}
+	failure := model.RawMessage{MessageID: "raw_fanout_failure", TenantID: "t1", ProductID: "json_sensor", DeviceID: "device_fanout", Protocol: "json", PayloadFormat: "json", ReceivedAt: 1002, Payload: json.RawMessage(`[]`)}
+	before := len(realtime.Messages)
+	if _, _, err = e.IngestRaw(ctx, failure); err != nil {
+		t.Fatal(err)
+	}
+	if len(realtime.Messages) != before || hasTopic(bus.topics, model.TopicParseFailed) {
+		t.Fatalf("parse failure was forwarded: topics=%#v realtime=%#v", bus.topics, realtime.Messages)
+	}
+}
+
 func TestRawToAlarmPipeline(t *testing.T) {
 	ctx := context.Background()
 	repo := memory.NewRepository()
@@ -32,7 +98,7 @@ func TestRawToAlarmPipeline(t *testing.T) {
 	if err = e.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err = repo.SaveVideoCameraMapping(ctx, model.VideoCameraMapping{TenantID: "t1", CameraID: "camera-001", CameraName: "一号摄像头", StreamURL: "https://media.example/live.m3u8", Enabled: true}); err != nil {
+	if err = repo.SaveVideoCameraMapping(ctx, model.VideoCameraMapping{TenantID: "t1", CameraID: "camera-001", CameraName: "一号摄像头", Brand: "海康", CameraPoint: "东侧入口", DeviceID: "device_1", Building: "A", Floor: "1", Room: "大厅", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	rule := model.AlarmRule{ID: "r1", TenantID: "t1", Name: "高温烟雾", AlarmType: "FIRE", Level: "HIGH", Enabled: true, Conditions: []model.RuleCondition{{Field: "temperature", Operator: ">", Value: 80}, {Field: "smoke", Operator: "eq", Value: true}}, Actions: []model.RuleAction{{Type: "OPEN_CAMERA", CameraID: "camera-001"}}}
@@ -49,6 +115,13 @@ func TestRawToAlarmPipeline(t *testing.T) {
 	}
 	if alarms[0].TriggerCount != 1 {
 		t.Fatalf("unexpected alarm %#v", alarms[0])
+	}
+	if len(alarms[0].Cameras) != 1 || alarms[0].Cameras[0].CameraID != "camera-001" || alarms[0].Cameras[0].Brand != "海康" {
+		t.Fatalf("alarm did not resolve associated camera metadata: %#v", alarms[0].Cameras)
+	}
+	state, err := repo.GetDeviceState(ctx, "t1", "device_1")
+	if err != nil || state.BusinessStatus != "ALARM" {
+		t.Fatalf("matching alarm did not update device business status: state=%#v err=%v", state, err)
 	}
 	if _, created, err := e.IngestRaw(ctx, raw); err != nil || created {
 		t.Fatalf("duplicate created=%v err=%v", created, err)
@@ -147,6 +220,9 @@ func TestAlarmCannotBeAcknowledgedTwice(t *testing.T) {
 	}
 	e := New(repo, archive, local.NewBus(), local.NewRealtime(), parser.NewRegistry(parser.JSONParser{}), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	alarm := model.Alarm{ID: "alarm_ack_once", TenantID: "t1", DeviceID: "device_1", AlarmType: "FIRE", AlarmLevel: "HIGH", Status: "ACTIVE", Source: "device"}
+	if err = repo.UpsertDeviceState(ctx, model.DeviceState{TenantID: "t1", ProductID: "sensor", DeviceID: "device_1", BusinessStatus: "ONLINE"}); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err = repo.UpsertAlarm(ctx, alarm); err != nil {
 		t.Fatal(err)
 	}
@@ -158,6 +234,10 @@ func TestAlarmCannotBeAcknowledgedTwice(t *testing.T) {
 	if first.Status != "ACKED" {
 		t.Fatalf("first acknowledgement did not update status: %#v", first)
 	}
+	state, err := repo.GetDeviceState(ctx, "t1", "device_1")
+	if err != nil || state.BusinessStatus != "ALARM" {
+		t.Fatalf("acknowledged alarm did not keep device in ALARM state: state=%#v err=%v", state, err)
+	}
 	if _, err = e.SetAlarmStatus(ctx, "t1", alarm.ID, "ACKED", "operator"); err == nil {
 		t.Fatal("second acknowledgement should be rejected")
 	}
@@ -168,5 +248,12 @@ func TestAlarmCannotBeAcknowledgedTwice(t *testing.T) {
 	}
 	if persisted.Status != "ACKED" || persisted.AckedAt != first.AckedAt {
 		t.Fatalf("second acknowledgement changed the alarm: %#v", persisted)
+	}
+	if _, err = e.SetAlarmStatus(ctx, "t1", alarm.ID, "CLOSED", "operator"); err != nil {
+		t.Fatal(err)
+	}
+	state, err = repo.GetDeviceState(ctx, "t1", "device_1")
+	if err != nil || state.BusinessStatus != "ONLINE" {
+		t.Fatalf("closed alarm did not return device to ONLINE state: state=%#v err=%v", state, err)
 	}
 }

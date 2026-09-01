@@ -44,22 +44,25 @@ bash ./scripts/package-offline-linux.sh --env-file ./.env.production
 
 加入本地 Ollama + Weaviate，并把指定模型一起打包：
 
+Weaviate 使用 `nomic-embed-text` 建立本地向量索引；离线包需要同时带上该嵌入模型和对话模型。
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\package-offline-windows.ps1 `
   -IncludeAi `
-  -OllamaModel qwen3:8b
+  -OllamaModel qwen3:8b `
+  -OllamaEmbeddingModel nomic-embed-text
 ```
 
 macOS：
 
 ```bash
-bash ./scripts/package-offline-macos.sh --include-ai --ollama-model qwen3:8b
+bash ./scripts/package-offline-macos.sh --include-ai --ollama-model qwen3:8b --ollama-embedding-model nomic-embed-text
 ```
 
 Linux：
 
 ```bash
-bash ./scripts/package-offline-linux.sh --include-ai --ollama-model qwen3:8b
+bash ./scripts/package-offline-linux.sh --include-ai --ollama-model qwen3:8b --ollama-embedding-model nomic-embed-text
 ```
 
 加入 Harness 或 ThingsPanel：
@@ -120,7 +123,7 @@ bash ./scripts/package-offline-linux.sh --full
 
 `-Full` 只表示镜像和文件全部打包。DeepSeek Harness 运行时仍需要可访问的模型服务；真正完全无外网时，应使用 `-IncludeAi` 的本地 Ollama，并且提前打包模型卷。
 
-如果不传 `-EnvFile`，脚本会生成随机数据库密码、JWT 密钥、管理员密码、EMQX/Grafana 密码、备份 Token 和 ZLMediaKit API Secret，写入 `.env.offline`，并把查看凭据写入 `OFFLINE-CREDENTIALS.txt`。离线包包含密钥，必须通过受控介质传输并限制文件权限。`IOT_VIDEO_ZLM_PLAYBACK_BASE_URL` 必须改成浏览器实际可访问的 ZLMediaKit Origin；默认的 `http://localhost:8090` 只适用于浏览器和部署服务器在同一台机器的场景。
+如果不传 `-EnvFile`，脚本会生成随机数据库密码、JWT 密钥、管理员密码、EMQX/Grafana 密码和备份 Token，写入 `.env.offline`，并把查看凭据写入 `OFFLINE-CREDENTIALS.txt`。离线包包含密钥，必须通过受控介质传输并限制文件权限。平台不负责直播流获取；外部视频平台仍需独立配置并向平台发送视频告警。
 
 脚本会为运行镜像固定以下离线标签：
 
@@ -128,7 +131,6 @@ bash ./scripts/package-offline-linux.sh --full
 iot-platform-api:offline
 iot-platform-web:offline
 iot-platform-backup:offline
-zlmediakit/zlmediakit:master
 iot-deepseek-harness:offline
 iot-thingspanel-backend:offline
 iot-thingspanel-web:offline
@@ -170,16 +172,16 @@ chmod +x scripts/deploy-offline-linux.sh
 
 如果目标机已经存在同名 Ollama 数据卷，脚本会跳过模型恢复，不覆盖现有数据。
 
-离线部署默认也不会启动 `backup-service`。需要使用备份功能时，在离线包目录执行：
+离线部署会随主系统一起启动 `backup-service`，默认每天按 `IOT_BACKUP_TIME` 和 `IOT_BACKUP_TIMEZONE` 备份前一天的原始日志。若需要单独重新拉起备份服务，在离线包目录执行：
 
 ```powershell
-docker compose --env-file .\.env.offline -f .\compose.yaml -f .\compose.offline.yaml --profile backup up -d --no-build --pull never backup-service
+docker compose --env-file .\.env.offline -f .\compose.yaml -f .\compose.offline.yaml up -d --no-build --pull never backup-service
 ```
 
 停止备份服务：
 
 ```powershell
-docker compose --env-file .\.env.offline -f .\compose.yaml -f .\compose.offline.yaml --profile backup stop backup-service
+docker compose --env-file .\.env.offline -f .\compose.yaml -f .\compose.offline.yaml stop backup-service
 ```
 
 启用或停止服务不会自动删除 `backup-staging` 数据卷；如需回收历史备份空间，请先确认数据保留要求后单独处理。

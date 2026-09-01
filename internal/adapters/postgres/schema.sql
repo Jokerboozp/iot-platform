@@ -30,6 +30,19 @@ ALTER TABLE raw_archive_index ADD COLUMN IF NOT EXISTS last_publish_error text N
 CREATE INDEX IF NOT EXISTS raw_archive_device_time_idx ON raw_archive_index(tenant_id, device_id, received_at DESC);
 CREATE INDEX IF NOT EXISTS raw_archive_product_time_idx ON raw_archive_index(tenant_id, product_id, received_at DESC);
 
+-- Low-frequency raw payloads stay in PostgreSQL during the day. The daily
+-- backup worker exports this table together with ClickHouse raw payloads to
+-- one MinIO JSONL artifact.
+CREATE TABLE IF NOT EXISTS raw_message_log (
+  tenant_id text NOT NULL, message_id text NOT NULL, product_id text NOT NULL,
+  device_id text NOT NULL, protocol text, payload_format text,
+  payload_hash text NOT NULL, payload_size integer NOT NULL,
+  received_at bigint NOT NULL, stored_at bigint NOT NULL, body jsonb NOT NULL,
+  PRIMARY KEY (tenant_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS raw_message_log_device_time_idx ON raw_message_log(tenant_id, device_id, received_at DESC);
+CREATE INDEX IF NOT EXISTS raw_message_log_time_idx ON raw_message_log(received_at, message_id);
+
 CREATE TABLE IF NOT EXISTS standard_message (
   tenant_id text NOT NULL, message_id text NOT NULL, raw_message_id text NOT NULL,
   product_id text NOT NULL, device_id text NOT NULL, message_type text NOT NULL,
@@ -76,14 +89,18 @@ CREATE TABLE IF NOT EXISTS video_alarm_event (
   PRIMARY KEY (tenant_id, event_id)
 );
 CREATE TABLE IF NOT EXISTS video_camera_mapping (
-  tenant_id text NOT NULL, camera_id text NOT NULL, camera_name text, project_id text,
-  ingest_mode text NOT NULL DEFAULT 'direct', city_code text, district_code text, building text, floor text, area_id text,
+  tenant_id text NOT NULL, camera_id text NOT NULL, camera_name text, brand text, camera_point text, device_id text, project_id text,
+  ingest_mode text NOT NULL DEFAULT 'direct', city_code text, district_code text, building text, floor text, room text, area_id text,
   related_device_ids jsonb NOT NULL DEFAULT '[]', related_floor_ids jsonb NOT NULL DEFAULT '[]', related_room_ids jsonb NOT NULL DEFAULT '[]',
   video_platform_id text, stream_url text, stream_type text, sdk_endpoint text, sdk_camera_id text, sdk_credential_ref text,
   enabled boolean NOT NULL DEFAULT true,
   PRIMARY KEY (tenant_id, camera_id)
 );
 ALTER TABLE video_camera_mapping ADD COLUMN IF NOT EXISTS ingest_mode text NOT NULL DEFAULT 'direct';
+ALTER TABLE video_camera_mapping ADD COLUMN IF NOT EXISTS brand text;
+ALTER TABLE video_camera_mapping ADD COLUMN IF NOT EXISTS camera_point text;
+ALTER TABLE video_camera_mapping ADD COLUMN IF NOT EXISTS device_id text;
+ALTER TABLE video_camera_mapping ADD COLUMN IF NOT EXISTS room text;
 ALTER TABLE video_camera_mapping ADD COLUMN IF NOT EXISTS city_code text;
 ALTER TABLE video_camera_mapping ADD COLUMN IF NOT EXISTS district_code text;
 ALTER TABLE video_camera_mapping ADD COLUMN IF NOT EXISTS stream_type text;
@@ -111,6 +128,27 @@ INSERT INTO video_camera_relation(tenant_id,camera_id,relation_type,target_id)
 SELECT tenant_id,camera_id,'room',jsonb_array_elements_text(coalesce(related_room_ids,'[]'::jsonb))
 FROM video_camera_mapping
 ON CONFLICT DO NOTHING;
+-- Cameras are now associated with at most one device. Keep the first legacy
+-- association during migration, then enforce the cardinality with a unique
+-- partial index. Floor/room JSON columns remain only as legacy storage.
+DELETE FROM video_camera_relation relation
+WHERE relation.relation_type = 'device'
+  AND relation.target_id <> (
+    SELECT MIN(candidate.target_id)
+    FROM video_camera_relation candidate
+    WHERE candidate.tenant_id = relation.tenant_id
+      AND candidate.camera_id = relation.camera_id
+      AND candidate.relation_type = 'device'
+  );
+UPDATE video_camera_mapping mapping
+SET device_id = relation.target_id
+FROM video_camera_relation relation
+WHERE relation.tenant_id = mapping.tenant_id
+  AND relation.camera_id = mapping.camera_id
+  AND relation.relation_type = 'device'
+  AND (mapping.device_id IS NULL OR mapping.device_id = '');
+CREATE UNIQUE INDEX IF NOT EXISTS video_camera_relation_camera_device_unique_idx
+  ON video_camera_relation(tenant_id, camera_id) WHERE relation_type = 'device';
 CREATE TABLE IF NOT EXISTS video_alarm_media (
   tenant_id text NOT NULL, event_id text NOT NULL, media_type text NOT NULL,
   object_bucket text NOT NULL, object_key text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
@@ -156,12 +194,14 @@ BEGIN
   END IF;
 END $$;
 CREATE TABLE IF NOT EXISTS ai_knowledge_doc (
-  id text PRIMARY KEY, tenant_id text NOT NULL, product_id text, category text, tags text[] NOT NULL DEFAULT '{}', object_bucket text NOT NULL,
+  id text PRIMARY KEY, tenant_id text NOT NULL, workflow_id text NOT NULL DEFAULT '', product_id text, category text, tags text[] NOT NULL DEFAULT '{}', object_bucket text NOT NULL,
   object_key text NOT NULL, filename text NOT NULL, status text NOT NULL, metadata jsonb NOT NULL DEFAULT '{}',
   created_at timestamptz NOT NULL DEFAULT now()
 );
 ALTER TABLE ai_knowledge_doc ADD COLUMN IF NOT EXISTS category text;
 ALTER TABLE ai_knowledge_doc ADD COLUMN IF NOT EXISTS tags text[] NOT NULL DEFAULT '{}';
+ALTER TABLE ai_knowledge_doc ADD COLUMN IF NOT EXISTS workflow_id text NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS ai_knowledge_doc_workflow_idx ON ai_knowledge_doc(tenant_id, workflow_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS ai_workflow_knowledge_binding (
   tenant_id text NOT NULL,

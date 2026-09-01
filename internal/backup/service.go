@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -29,6 +30,7 @@ type Config struct {
 	PostgresDSN, BackupDir, BackupBucket, MinIOEndpoint, MinIOAccessKey, MinIOSecretKey string
 	MinIODREndpoint, MinIODRAccessKey, MinIODRSecretKey, ClickHouseURL, RedisAddr       string
 	RedisPassword, RedpandaAdminURL, WeaviateURL, ConfigPaths                           string
+	BackupTimezone                                                                      string
 	MinIOUseTLS, MinIODRUseTLS                                                          bool
 }
 
@@ -46,6 +48,20 @@ type Manifest struct {
 	CreatedAt  time.Time      `json:"createdAt"`
 	Artifacts  []Artifact     `json:"artifacts"`
 	Components map[string]any `json:"components"`
+}
+
+type rawLogRecord struct {
+	Storage string          `json:"storage"`
+	Message json.RawMessage `json:"message"`
+}
+
+type rawLogStats struct {
+	Date       string
+	Start      time.Time
+	End        time.Time
+	PostgreSQL int64
+	ClickHouse int64
+	Total      int64
 }
 
 type Service struct {
@@ -87,6 +103,9 @@ func New(ctx context.Context, cfg Config) (*Service, error) {
 	if cfg.BackupBucket == "" {
 		cfg.BackupBucket = "iot-backups"
 	}
+	if cfg.BackupTimezone == "" {
+		cfg.BackupTimezone = "Asia/Shanghai"
+	}
 	return &Service{cfg: cfg, pool: pool, store: store, dr: dr}, nil
 }
 
@@ -98,8 +117,11 @@ func (s *Service) Run(ctx context.Context, backupType string) (manifest Manifest
 	}
 	defer s.mu.Unlock()
 	backupType = strings.ToUpper(backupType)
-	if backupType != "FULL" && backupType != "INCREMENTAL" {
-		return manifest, fmt.Errorf("backup type must be FULL or INCREMENTAL")
+	if backupType != "FULL" && backupType != "INCREMENTAL" && backupType != "RAW_LOGS" {
+		return manifest, fmt.Errorf("backup type must be FULL, INCREMENTAL or RAW_LOGS")
+	}
+	if backupType == "RAW_LOGS" {
+		return s.runRawLogsLocked(ctx, time.Now().In(s.rawBackupLocation()).AddDate(0, 0, -1))
 	}
 	id := "backup_" + strings.ToLower(backupType) + "_" + time.Now().UTC().Format("20060102T150405.000Z")
 	manifest = Manifest{ID: id, Type: backupType, CreatedAt: time.Now().UTC(), Components: map[string]any{}}
@@ -220,9 +242,202 @@ func (s *Service) Run(ctx context.Context, backupType string) (manifest Manifest
 	return manifest, nil
 }
 
+// RunRawLogs creates one completed-day raw-log backup. Raw payloads are read
+// from their database tier and written as a single compressed JSONL artifact;
+// no raw message is written to MinIO during device ingest.
+func (s *Service) RunRawLogs(ctx context.Context, day time.Time) (manifest Manifest, err error) {
+	if !s.mu.TryLock() {
+		return manifest, fmt.Errorf("a backup is already running")
+	}
+	defer s.mu.Unlock()
+	return s.runRawLogsLocked(ctx, day)
+}
+
+func (s *Service) runRawLogsLocked(ctx context.Context, day time.Time) (manifest Manifest, err error) {
+	location := s.rawBackupLocation()
+	day = day.In(location)
+	start := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, location)
+	end := start.AddDate(0, 0, 1)
+	date := start.Format("20060102")
+	id := "backup_raw_logs_" + date + "_" + time.Now().UTC().Format("150405.000Z")
+	manifest = Manifest{ID: id, Type: "RAW_LOGS", CreatedAt: time.Now().UTC(), Components: map[string]any{}}
+	_, _ = s.pool.Exec(ctx, `INSERT INTO backup_task(id,backup_type,status,started_at) VALUES($1,'RAW_LOGS','RUNNING',now()) ON CONFLICT DO NOTHING`, id)
+	defer func() {
+		if err != nil {
+			s.failed.Add(1)
+			s.lastError.Store(err.Error())
+			details, _ := json.Marshal(map[string]any{"error": err.Error(), "components": manifest.Components})
+			_, _ = s.pool.Exec(context.Background(), `UPDATE backup_task SET status='FAILED',details=$2,completed_at=now() WHERE id=$1`, id, details)
+		}
+	}()
+
+	dir := filepath.Join(s.cfg.BackupDir, id)
+	if err = os.MkdirAll(dir, 0o750); err != nil {
+		return manifest, err
+	}
+	rawPath := filepath.Join(dir, "raw-logs-"+date+".jsonl.gz")
+	stats, exportErr := s.exportRawLogs(ctx, rawPath, start, end)
+	if exportErr != nil {
+		return manifest, fmt.Errorf("raw logs: %w", exportErr)
+	}
+	manifest.Components["rawLogs"] = map[string]any{
+		"date":       stats.Date,
+		"timezone":   location.String(),
+		"start":      stats.Start,
+		"end":        stats.End,
+		"records":    stats.Total,
+		"postgresql": stats.PostgreSQL,
+		"clickhouse": stats.ClickHouse,
+		"format":     "gzip JSONL; each line has storage and message",
+	}
+	if err = s.ensureBucket(ctx, s.store, s.cfg.BackupBucket); err != nil {
+		return manifest, err
+	}
+	artifact, uploadErr := s.uploadAndVerify(ctx, id, rawPath)
+	if uploadErr != nil {
+		return manifest, uploadErr
+	}
+	manifest.Artifacts = append(manifest.Artifacts, artifact)
+	if s.dr != nil {
+		stats, syncErr := s.replicateMinIO(ctx)
+		if syncErr != nil {
+			return manifest, fmt.Errorf("minio DR replication: %w", syncErr)
+		}
+		manifest.Components["minioDR"] = stats
+	}
+	manifestPath := filepath.Join(dir, "manifest.json")
+	if err = writeJSON(manifestPath, manifest); err != nil {
+		return manifest, err
+	}
+	manifestArtifact, err := s.uploadAndVerify(ctx, id, manifestPath)
+	if err != nil {
+		return manifest, err
+	}
+	manifest.Artifacts = append(manifest.Artifacts, manifestArtifact)
+	if s.dr != nil {
+		if _, syncErr := s.replicateMinIO(ctx); syncErr != nil {
+			return manifest, fmt.Errorf("minio DR manifest replication: %w", syncErr)
+		}
+	}
+	details, _ := json.Marshal(manifest)
+	_, err = s.pool.Exec(ctx, `UPDATE backup_task SET status='COMPLETED',object_key=$2,checksum=$3,details=$4,completed_at=now() WHERE id=$1`, id, manifestArtifact.ObjectKey, manifestArtifact.SHA256, details)
+	if err != nil {
+		return manifest, err
+	}
+	s.success.Add(1)
+	s.lastOK.Store(time.Now().Unix())
+	return manifest, nil
+}
+
+func (s *Service) rawBackupLocation() *time.Location {
+	location, err := time.LoadLocation(strings.TrimSpace(s.cfg.BackupTimezone))
+	if err != nil {
+		return time.UTC
+	}
+	return location
+}
+
+func (s *Service) exportRawLogs(ctx context.Context, path string, start, end time.Time) (stats rawLogStats, err error) {
+	stats = rawLogStats{Date: start.Format("2006-01-02"), Start: start, End: end}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return stats, err
+	}
+	gz := gzip.NewWriter(f)
+	encoder := json.NewEncoder(gz)
+	defer func() {
+		if closeErr := gz.Close(); err == nil && closeErr != nil {
+			err = closeErr
+		}
+		if closeErr := f.Close(); err == nil && closeErr != nil {
+			err = closeErr
+		}
+	}()
+
+	rows, err := s.pool.Query(ctx, `SELECT body FROM raw_message_log WHERE received_at >= $1 AND received_at < $2 ORDER BY received_at,message_id`, start.UnixMilli(), end.UnixMilli())
+	if err != nil {
+		return stats, err
+	}
+	for rows.Next() {
+		var body []byte
+		if err = rows.Scan(&body); err != nil {
+			rows.Close()
+			return stats, err
+		}
+		if err = encoder.Encode(rawLogRecord{Storage: "postgres", Message: json.RawMessage(body)}); err != nil {
+			rows.Close()
+			return stats, err
+		}
+		stats.PostgreSQL++
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return stats, err
+	}
+	rows.Close()
+
+	if s.cfg.ClickHouseURL != "" {
+		stats.ClickHouse, err = s.exportClickHouseRawLogs(ctx, start, end, encoder)
+		if err != nil {
+			return stats, err
+		}
+	}
+	stats.Total = stats.PostgreSQL + stats.ClickHouse
+	return stats, nil
+}
+
+func (s *Service) exportClickHouseRawLogs(ctx context.Context, start, end time.Time, encoder *json.Encoder) (int64, error) {
+	u, err := url.Parse(s.cfg.ClickHouseURL)
+	if err != nil {
+		return 0, err
+	}
+	user := u.User
+	u.User = nil
+	query := u.Query()
+	query.Set("query", fmt.Sprintf(`SELECT body FROM iot_raw_message WHERE received_at >= %d AND received_at < %d ORDER BY received_at,message_id FORMAT JSONEachRow`, start.UnixMilli(), end.UnixMilli()))
+	u.RawQuery = query.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), nil)
+	if err != nil {
+		return 0, err
+	}
+	if user != nil {
+		password, _ := user.Password()
+		req.SetBasicAuth(user.Username(), password)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return 0, fmt.Errorf("clickhouse HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	decoder := json.NewDecoder(resp.Body)
+	var count int64
+	for {
+		var row struct {
+			Body string `json:"body"`
+		}
+		if err = decoder.Decode(&row); err != nil {
+			if errors.Is(err, io.EOF) {
+				return count, nil
+			}
+			return count, err
+		}
+		if !json.Valid([]byte(row.Body)) {
+			return count, fmt.Errorf("clickhouse raw message body is not valid JSON")
+		}
+		if err = encoder.Encode(rawLogRecord{Storage: "clickhouse", Message: json.RawMessage(row.Body)}); err != nil {
+			return count, err
+		}
+		count++
+	}
+}
+
 func (s *Service) Verify(ctx context.Context, backupID string) (map[string]any, error) {
 	if backupID == "" || backupID == "latest" {
-		if err := s.pool.QueryRow(ctx, `SELECT id FROM backup_task WHERE status='COMPLETED' AND backup_type IN ('FULL','INCREMENTAL') ORDER BY completed_at DESC LIMIT 1`).Scan(&backupID); err != nil {
+		if err := s.pool.QueryRow(ctx, `SELECT id FROM backup_task WHERE status='COMPLETED' AND backup_type IN ('FULL','INCREMENTAL','RAW_LOGS') ORDER BY completed_at DESC LIMIT 1`).Scan(&backupID); err != nil {
 			return nil, err
 		}
 	}

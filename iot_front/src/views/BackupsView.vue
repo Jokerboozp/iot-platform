@@ -21,7 +21,7 @@ const pageSize = ref(20)
 
 const isAdmin = computed(() => session.role === 'admin')
 const runningCount = computed(() => records.value.filter(item => item.status === 'RUNNING').length)
-const latestCompleted = computed(() => records.value.find(item => item.status === 'COMPLETED' && ['FULL', 'INCREMENTAL'].includes(item.type)))
+const latestCompleted = computed(() => records.value.find(item => item.status === 'COMPLETED' && ['FULL', 'INCREMENTAL', 'RAW_LOGS'].includes(item.type)))
 
 function statusType(value) {
   if (value === 'COMPLETED') return 'success'
@@ -85,7 +85,7 @@ async function showDetail(row) {
   manifestTotal.value = 0
   try {
     detail.value = await api(`/api/v1/backups/${idPath(row.id)}`)
-    if (row.status === 'COMPLETED' && ['FULL', 'INCREMENTAL'].includes(row.type)) {
+    if (row.status === 'COMPLETED' && ['FULL', 'INCREMENTAL', 'RAW_LOGS'].includes(row.type)) {
       await loadManifest(row.id)
     }
   } catch (error) {
@@ -173,11 +173,12 @@ onMounted(load)
     <template v-if="isAdmin">
       <el-button type="primary" :loading="actionLoading === 'run:FULL'" @click="runBackup('FULL')">立即全量备份</el-button>
       <el-button type="success" :loading="actionLoading === 'run:INCREMENTAL'" @click="runBackup('INCREMENTAL')">立即增量备份</el-button>
+      <el-button type="warning" :loading="actionLoading === 'run:RAW_LOGS'" @click="runBackup('RAW_LOGS')">立即备份原始日志</el-button>
     </template>
   </div>
 
   <div class="backup-stat-grid">
-    <el-card shadow="never" class="surface-card"><span>历史记录</span><strong>{{ total }}</strong><small>包含全量、增量和恢复演练</small></el-card>
+    <el-card shadow="never" class="surface-card"><span>历史记录</span><strong>{{ total }}</strong><small>包含全量、增量、原始日志和恢复演练</small></el-card>
     <el-card shadow="never" class="surface-card"><span>当前执行中</span><strong>{{ runningCount }}</strong><small>备份任务正在进行时不可重复触发</small></el-card>
     <el-card shadow="never" class="surface-card"><span>最近完成</span><strong>{{ latestCompleted ? label(backupTypes, latestCompleted.type) : '暂无' }}</strong><small>{{ latestCompleted ? formatDate(latestCompleted.completedAt) : '等待首个成功任务' }}</small></el-card>
   </div>
@@ -190,7 +191,7 @@ onMounted(load)
       <el-table-column label="开始时间" min-width="170"><template #default="{ row }">{{ formatDate(row.startedAt) }}</template></el-table-column>
       <el-table-column label="完成时间" min-width="170"><template #default="{ row }">{{ formatDate(row.completedAt) }}</template></el-table-column>
       <el-table-column label="清单校验摘要" min-width="170"><template #default="{ row }"><el-tooltip v-if="row.checksum" :content="row.checksum"><code>{{ row.checksum.slice(0, 12) }}…</code></el-tooltip><span v-else>—</span></template></el-table-column>
-      <el-table-column label="操作" fixed="right" min-width="210" align="center"><template #default="{ row }"><div class="table-actions"><el-button link type="primary" @click="showDetail(row)">详情 / 文件</el-button><el-button v-if="isAdmin && row.status === 'COMPLETED' && ['FULL', 'INCREMENTAL'].includes(row.type)" link type="warning" :loading="actionLoading === `drill:${row.id}`" @click="restoreDrill(row)">恢复演练</el-button></div></template></el-table-column>
+      <el-table-column label="操作" fixed="right" min-width="210" align="center"><template #default="{ row }"><div class="table-actions"><el-button link type="primary" @click="showDetail(row)">详情 / 文件</el-button><el-button v-if="isAdmin && row.status === 'COMPLETED' && ['FULL', 'INCREMENTAL', 'RAW_LOGS'].includes(row.type)" link type="warning" :loading="actionLoading === `drill:${row.id}`" @click="restoreDrill(row)">恢复演练</el-button></div></template></el-table-column>
     </el-table>
     <el-empty v-if="!loading && !records.length" description="还没有备份记录；定时任务执行后会自动出现在这里" />
     <div class="list-pagination">

@@ -69,7 +69,7 @@ const pages = {
   inspection: { title:'智能巡检', sub: '设备健康、数据新鲜度与活动告警分析', icon: ChartNoAxesCombined, component: HealthInspectionView },
   raw: { title: '原始报文', sub: '证据链检索、审计与回放', icon: FileText, component: RawView },
   rules: { title: '告警规则', sub: '可审计的动态规则与 AI 草稿', icon: Settings2, component: RulesView },
-  knowledge: { title: '知识库管理', sub: '消防规范、设备手册与处置 SOP 索引', icon: Library, component: KnowledgeView },
+  knowledge: { title: 'Agent 知识库', sub: '文档直接归属 Agent，并使用持久化向量索引', icon: Library, component: KnowledgeView },
   ai: { title: 'AI 工作流', sub: 'DeepSeek Harness 插件、受控工具与知识库问答', icon: MessageCircle, component: AiView },
   backups: { title: '备份中心', sub: '备份记录、文件校验与恢复演练', icon: Database, component: BackupsView }
 }
@@ -114,8 +114,8 @@ function handleUIAction(payload) {
     const event = JSON.parse(payload)
     const action = event?.action || {}
     if (action.type === 'OPEN_CAMERA' && typeof action.cameraId === 'string' && action.cameraId) {
-      openPage('cameras', { cameraId: action.cameraId, autoPreview: true, actionId: event.id })
-      ElMessage.warning(`规则联动：打开摄像头 ${action.cameraId}`)
+      openPage('cameras', { cameraId: action.cameraId, actionId: event.id })
+      ElMessage.info(`规则联动：已定位摄像头信息 ${action.cameraId}`)
       return
     }
     const allowedPages = new Set(['dashboard', 'devices', 'products', 'protocols', 'protocolAssistant', 'integration', 'testDevice', 'cameras', 'alarms', 'inspection', 'raw', 'rules', 'knowledge', 'ai', 'backups'])

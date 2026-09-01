@@ -11,8 +11,13 @@ import (
 )
 
 const (
-	TopicRaw             = "iot.raw.message"
-	TopicParseFailed     = "iot.parse.failed"
+	TopicRaw         = "iot.raw.message"
+	TopicParseFailed = "iot.parse.failed"
+	// TopicParsed is the Kafka topic for parsed message types that do not have
+	// a more specific downstream topic yet (for example command replies and
+	// device logs). Raw messages stay on TopicRaw for the internal parser
+	// pipeline; external consumers must use the parsed topics below.
+	TopicParsed          = "iot.parsed.message"
 	TopicPropertyReport  = "iot.property.report"
 	TopicEventReport     = "iot.event.report"
 	TopicDeviceState     = "iot.device.state"
@@ -130,6 +135,20 @@ type StandardMessage struct {
 	Raw           map[string]any    `json:"raw,omitempty"`
 	Parser        string            `json:"parser"`
 	ParserVersion string            `json:"parserVersion"`
+}
+
+// MQTTTopic returns the tenant-scoped external topic for every successfully
+// parsed standard message. Keep tenant/product/device before messageType so a
+// client can subscribe to /iot/parsed/{tenant}/# without crossing tenants.
+func (m StandardMessage) MQTTTopic() string {
+	clean := func(value string) string {
+		value = strings.Trim(strings.ReplaceAll(value, "/", "_"), " ")
+		if value == "" {
+			return "unknown"
+		}
+		return value
+	}
+	return fmt.Sprintf("/iot/parsed/%s/%s/%s/%s", clean(m.TenantID), clean(m.ProductID), clean(m.DeviceID), clean(string(m.MessageType)))
 }
 
 type DeviceState struct {
@@ -326,30 +345,31 @@ type UIActionEvent struct {
 }
 
 type Alarm struct {
-	ID               string         `json:"alarmId"`
-	TenantID         string         `json:"tenantId"`
-	RuleID           string         `json:"ruleId"`
-	TriggerID        string         `json:"triggerId,omitempty"`
-	DeviceID         string         `json:"deviceId"`
-	DeviceName       string         `json:"deviceName,omitempty"`
-	AlarmType        string         `json:"alarmType"`
-	AlarmLevel       string         `json:"alarmLevel"`
-	Status           string         `json:"status"`
-	Source           string         `json:"source"`
-	CityCode         string         `json:"cityCode"`
-	DistrictCode     string         `json:"districtCode"`
-	BuildingID       string         `json:"buildingId"`
-	DeviceType       string         `json:"deviceType"`
-	AreaID           string         `json:"areaId,omitempty"`
-	FirstTriggeredAt int64          `json:"firstTriggeredAt"`
-	LastTriggeredAt  int64          `json:"lastTriggeredAt"`
-	TriggerCount     int            `json:"triggerCount"`
-	RecoveredAt      int64          `json:"recoveredAt,omitempty"`
-	AckedAt          int64          `json:"ackedAt,omitempty"`
-	ClosedAt         int64          `json:"closedAt,omitempty"`
-	Confidence       float64        `json:"confidence,omitempty"`
-	MultiSource      bool           `json:"multiSource"`
-	Details          map[string]any `json:"details,omitempty"`
+	ID               string          `json:"alarmId"`
+	TenantID         string          `json:"tenantId"`
+	RuleID           string          `json:"ruleId"`
+	TriggerID        string          `json:"triggerId,omitempty"`
+	DeviceID         string          `json:"deviceId"`
+	DeviceName       string          `json:"deviceName,omitempty"`
+	AlarmType        string          `json:"alarmType"`
+	AlarmLevel       string          `json:"alarmLevel"`
+	Status           string          `json:"status"`
+	Source           string          `json:"source"`
+	CityCode         string          `json:"cityCode"`
+	DistrictCode     string          `json:"districtCode"`
+	BuildingID       string          `json:"buildingId"`
+	DeviceType       string          `json:"deviceType"`
+	AreaID           string          `json:"areaId,omitempty"`
+	FirstTriggeredAt int64           `json:"firstTriggeredAt"`
+	LastTriggeredAt  int64           `json:"lastTriggeredAt"`
+	TriggerCount     int             `json:"triggerCount"`
+	RecoveredAt      int64           `json:"recoveredAt,omitempty"`
+	AckedAt          int64           `json:"ackedAt,omitempty"`
+	ClosedAt         int64           `json:"closedAt,omitempty"`
+	Confidence       float64         `json:"confidence,omitempty"`
+	MultiSource      bool            `json:"multiSource"`
+	Cameras          []CameraSummary `json:"cameras,omitempty"`
+	Details          map[string]any  `json:"details,omitempty"`
 }
 
 func (a Alarm) MQTTTopic(eventType string) string {
@@ -403,6 +423,7 @@ type AIAnalysis struct {
 type KnowledgeDoc struct {
 	ID           string         `json:"id"`
 	TenantID     string         `json:"tenantId"`
+	WorkflowID   string         `json:"workflowId"`
 	ProductID    string         `json:"productId,omitempty"`
 	Category     string         `json:"category,omitempty"`
 	Tags         []string       `json:"tags,omitempty"`
@@ -412,6 +433,21 @@ type KnowledgeDoc struct {
 	Status       string         `json:"status"`
 	Metadata     map[string]any `json:"metadata,omitempty"`
 	CreatedAt    int64          `json:"createdAt"`
+}
+
+// KnowledgeChunk is the extracted text slice that is sent to the vector
+// index. Character offsets are Unicode-code-point offsets in the normalized
+// extracted text, with StartChar inclusive and EndChar exclusive.
+type KnowledgeChunk struct {
+	DocumentID     string `json:"documentId"`
+	ChunkID        string `json:"chunkId"`
+	Index          int    `json:"index"`
+	StartChar      int    `json:"startChar"`
+	EndChar        int    `json:"endChar"`
+	CharacterCount int    `json:"characterCount"`
+	OverlapChars   int    `json:"overlapChars"`
+	Content        string `json:"content"`
+	Vectorized     bool   `json:"vectorized"`
 }
 
 // WorkflowKnowledgeBinding constrains knowledge retrieval for one tenant and
@@ -462,12 +498,16 @@ type VideoCameraMapping struct {
 	TenantID         string   `json:"tenantId"`
 	CameraID         string   `json:"cameraId"`
 	CameraName       string   `json:"cameraName"`
+	Brand            string   `json:"brand,omitempty"`
+	CameraPoint      string   `json:"cameraPoint,omitempty"`
+	DeviceID         string   `json:"deviceId,omitempty"`
 	IngestMode       string   `json:"ingestMode,omitempty"`
 	ProjectID        string   `json:"projectId,omitempty"`
 	CityCode         string   `json:"cityCode,omitempty"`
 	DistrictCode     string   `json:"districtCode,omitempty"`
 	Building         string   `json:"building,omitempty"`
 	Floor            string   `json:"floor,omitempty"`
+	Room             string   `json:"room,omitempty"`
 	AreaID           string   `json:"areaId"`
 	RelatedDeviceIDs []string `json:"relatedDeviceIds,omitempty"`
 	RelatedFloorIDs  []string `json:"relatedFloorIds,omitempty"`
@@ -484,9 +524,23 @@ type VideoCameraMapping struct {
 	UpdatedAt        int64    `json:"updatedAt"`
 }
 
-// VideoCameraRelation is the normalized many-to-many edge between one camera
-// and a device, floor, or room. The legacy arrays on VideoCameraMapping remain
-// in the API for compatibility; durable adapters also mirror these edges here.
+// CameraSummary is the safe camera metadata attached to an alarm. It
+// deliberately has no stream URL or vendor credential fields: live playback
+// remains an external camera-platform concern.
+type CameraSummary struct {
+	CameraID    string `json:"cameraId"`
+	Brand       string `json:"brand,omitempty"`
+	CameraName  string `json:"cameraName"`
+	CameraPoint string `json:"cameraPoint,omitempty"`
+	DeviceID    string `json:"deviceId,omitempty"`
+	Building    string `json:"building,omitempty"`
+	Floor       string `json:"floor,omitempty"`
+	Room        string `json:"room,omitempty"`
+	Enabled     bool   `json:"enabled"`
+}
+
+// VideoCameraRelation is the normalized camera-to-device edge. A device may
+// have many cameras, while a camera has at most one device association.
 type VideoCameraRelation struct {
 	TenantID     string `json:"tenantId"`
 	CameraID     string `json:"cameraId"`

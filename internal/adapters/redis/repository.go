@@ -38,7 +38,7 @@ func (r *Repository) UpsertDeviceState(ctx context.Context, v model.DeviceState)
 	b, _ := json.Marshal(v)
 	pipe := r.client.TxPipeline()
 	pipe.Set(ctx, stateKey(v.TenantID, v.DeviceID), b, 0)
-	if v.BusinessStatus == "ONLINE" {
+	if v.BusinessStatus == "ONLINE" || v.BusinessStatus == "ALARM" {
 		pipe.SAdd(ctx, "device:online:"+cacheSegment(v.TenantID), v.DeviceID)
 	} else {
 		pipe.SRem(ctx, "device:online:"+cacheSegment(v.TenantID), v.DeviceID)

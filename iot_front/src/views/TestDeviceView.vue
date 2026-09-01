@@ -9,7 +9,7 @@ const emit = defineEmits(['navigate'])
 const templateNames = { data: '正常数据', alarm: '报警数据', recovery: '恢复数据', event: '事件数据' }
 const templateDescriptions = {
   data: '用于验证设备上报、解析、设备在线状态和属性历史。',
-  alarm: '温度超过 80℃ 且 smoke=true，会命中当前租户已启用的匹配规则。',
+  alarm: '温度超过 80℃ 且 smoke=true，设备告警会直接进入告警中心；匹配规则可额外提供类型、等级和联动。',
   recovery: '温度恢复到安全值且 smoke=false，用于验证告警自动恢复。',
   event: '带 event 节点的事件上报，用于验证事件消息类型。'
 }
@@ -165,7 +165,7 @@ onMounted(() => prepare())
       <span>系统会为当前租户生成一台可重复使用的测试烟感设备。</span>
     </div>
 
-    <el-alert v-if="device" title="告警规则由当前租户配置" description="测试设备不会自动创建告警规则；发送报警数据只会触发告警规则页面中已启用且条件匹配的规则。"
+    <el-alert v-if="device" title="设备告警直接进入告警中心" description="测试设备不会自动创建告警规则；发送报警数据会直接产生设备告警。若存在匹配规则，则按规则提供告警类型、等级和联动动作。"
       type="info" :closable="false" show-icon />
 
     <div v-if="device" class="test-device-layout top-gap">
@@ -180,7 +180,7 @@ onMounted(() => prepare())
           <div class="test-device-summary">
             <div><span>设备名称</span><strong>{{ device.name }}</strong><small>{{ device.id }}</small></div>
             <div><span>产品 / 协议</span><strong>{{ product?.name }}</strong><small>{{ protocolPackage?.parserType }} · {{ protocolPackage?.version }}</small></div>
-            <div><span>告警规则</span><strong>使用当前租户配置</strong><small>报警模板只触发匹配的已启用规则</small></div>
+            <div><span>告警处理</span><strong>直接告警 + 可选规则</strong><small>ALARM_REPORT 无需规则；规则可补充联动</small></div>
           </div>
           <el-descriptions :column="1" border>
             <el-descriptions-item label="设备标识"><code>{{ device.id }}</code></el-descriptions-item>
@@ -210,7 +210,7 @@ onMounted(() => prepare())
           <template #header><div class="card-header"><div><strong>快捷发送</strong><small>不打开编辑器也可以直接验证典型链路</small></div></div></template>
           <div class="quick-send-grid">
             <button type="button" class="quick-send normal" :disabled="Boolean(sending)" @click="sendTemplate('data')"><strong>发送正常数据</strong><small>属性上报 · 在线状态</small></button>
-            <button type="button" class="quick-send danger" :disabled="Boolean(sending)" @click="sendTemplate('alarm')"><strong>发送报警数据</strong><small>高温 + 烟雾 · 触发规则</small></button>
+            <button type="button" class="quick-send danger" :disabled="Boolean(sending)" @click="sendTemplate('alarm')"><strong>发送报警数据</strong><small>高温 + 烟雾 · 直接入告警中心</small></button>
             <button type="button" class="quick-send warning" :disabled="Boolean(sending)" @click="sendTemplate('recovery')"><strong>发送恢复数据</strong><small>安全值 · 自动恢复</small></button>
             <button type="button" class="quick-send event" :disabled="Boolean(sending)" @click="sendTemplate('event')"><strong>发送事件数据</strong><small>心跳事件 · 事件解析</small></button>
           </div>
@@ -222,7 +222,7 @@ onMounted(() => prepare())
           <template #header><strong>建议测试顺序</strong></template>
           <el-steps direction="vertical" :active="4">
             <el-step title="发送正常数据" description="确认原始报文归档、标准消息和设备在线状态。" />
-            <el-step title="发送报警数据" description="确认规则命中，并在告警中心看到高等级告警。" />
+            <el-step title="发送报警数据" description="确认设备告警直接进入告警中心，并验证规则联动（如已配置）。" />
             <el-step title="发送恢复数据" description="确认告警从活动中变为已恢复。" />
             <el-step title="修改模板再发送" description="验证自定义字段、事件和异常报文。" />
           </el-steps>

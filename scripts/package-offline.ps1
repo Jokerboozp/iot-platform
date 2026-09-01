@@ -8,6 +8,7 @@ param(
     [switch]$IncludeThingsPanel,
     [switch]$IncludeGb26875,
     [string]$OllamaModel = "qwen3:8b",
+    [string]$OllamaEmbeddingModel = "nomic-embed-text",
     [switch]$SkipOllamaModel
 )
 
@@ -132,7 +133,6 @@ function New-OfflineEnv {
             "MINIO_ROOT_PASSWORD", "MINIO_DR_ROOT_PASSWORD", "IOT_JWT_SECRET",
             "IOT_ADMIN_USER", "IOT_ADMIN_PASSWORD", "IOT_ADMIN_TENANTS",
             "IOT_VIDEO_PLATFORM_SECRETS", "IOT_BACKUP_ADMIN_TOKEN",
-            "IOT_VIDEO_ZLM_SECRET",
             "EMQX_DASHBOARD_USER", "EMQX_DASHBOARD_PASSWORD",
             "GRAFANA_ADMIN_USER", "GRAFANA_ADMIN_PASSWORD"
         )
@@ -156,7 +156,6 @@ function New-OfflineEnv {
         $jwtSecret = New-RandomHex -Bytes 32
         $adminPassword = "Admin-" + (New-RandomHex -Bytes 12)
         $videoSecret = New-RandomHex -Bytes 24
-        $zlmSecret = New-RandomHex -Bytes 24
         $harnessToken = New-RandomHex -Bytes 32
         $backupToken = New-RandomHex -Bytes 32
         $emqxPassword = "Emqx-" + (New-RandomHex -Bytes 12)
@@ -182,14 +181,6 @@ function New-OfflineEnv {
             "IOT_ADMIN_TENANTS=tenant_001",
             "IOT_VIDEO_PLATFORM_SECRETS=video-platform-1:$videoSecret",
             "IOT_VIDEO_MEDIA_ALLOWED_HOSTS=",
-            "IOT_VIDEO_PREVIEW_ALLOWED_ORIGINS=",
-            "IOT_VIDEO_PREVIEW_CSP_SOURCES=",
-            "IOT_VIDEO_ZLM_API_URL=http://zlm:80",
-            "IOT_VIDEO_ZLM_PLAYBACK_BASE_URL=http://localhost:8090",
-            "IOT_VIDEO_ZLM_SECRET=$zlmSecret",
-            "IOT_VIDEO_ZLM_VHOST=__defaultVhost__",
-            "IOT_VIDEO_ZLM_APP=iot",
-            "IOT_ZLM_IMAGE=zlmediakit/zlmediakit:master",
             "IOT_OLLAMA_URL=$ollamaUrl",
             "IOT_OLLAMA_MODEL=$OllamaModel",
             "IOT_AI_PROVIDER=$aiProvider",
@@ -206,8 +197,9 @@ function New-OfflineEnv {
             "IOT_AI_HARNESS_TIMEOUT=90s",
             "IOT_WEAVIATE_URL=$weaviateUrl",
             "IOT_BACKUP_ADMIN_TOKEN=$backupToken",
-            "IOT_BACKUP_INTERVAL=24h",
-            "IOT_BACKUP_INCREMENTAL_INTERVAL=15m",
+            "IOT_RAW_HIGH_FREQUENCY_INTERVAL_SEC=60",
+            "IOT_BACKUP_TIME=00:05",
+            "IOT_BACKUP_TIMEZONE=Asia/Shanghai",
             "IOT_MQTT_WEBSOCKET_PUBLIC_URL=",
             "IOT_THINGSPANEL_URL=",
             "IOT_THINGSPANEL_USER=",
@@ -231,7 +223,6 @@ function New-OfflineEnv {
         [void]$credentialLines.Add("ClickHouse 密码：$clickhousePassword")
         [void]$credentialLines.Add("MinIO 主密码：$minioPassword")
         [void]$credentialLines.Add("MinIO 灾备密码：$minioDrPassword")
-        [void]$credentialLines.Add("ZLMediaKit API Secret：$zlmSecret")
     }
 
     $imageValues = [ordered]@{
@@ -323,7 +314,6 @@ $savedProjectName = [Environment]::GetEnvironmentVariable("COMPOSE_PROJECT_NAME"
 Set-Item -Path "Env:COMPOSE_PROJECT_NAME" -Value "iot-platform"
 
 $profiles = New-Object 'System.Collections.Generic.List[string]'
-if ($IncludeAi) { [void]$profiles.Add("ai") }
 if ($IncludeHarness) { [void]$profiles.Add("harness") }
 if ($IncludeThingsPanel) { [void]$profiles.Add("thingspanel") }
 if ($IncludeGb26875) { [void]$profiles.Add("gb26875") }
@@ -339,7 +329,7 @@ $thingsPanelImages = New-Object 'System.Collections.Generic.List[string]'
 
 try {
     $pullServices = @(
-        "zlm", "postgres", "postgres-wal-init", "redis", "minio", "minio-dr",
+        "postgres", "postgres-wal-init", "redis", "minio", "minio-dr",
         "redpanda", "redpanda-init", "clickhouse", "emqx", "prometheus",
         "grafana", "loki"
     )
@@ -347,12 +337,12 @@ try {
     Invoke-Checked -Arguments @("compose", "build", "--pull", "platform-api", "platform-web", "backup-service")
 
     if ($IncludeAi) {
-        Invoke-Checked -Arguments @("compose", "--profile", "ai", "pull", "ollama", "weaviate")
+        Invoke-Checked -Arguments @("compose", "pull", "ollama", "weaviate")
         if (-not $SkipOllamaModel) {
-            Invoke-Checked -Arguments @("compose", "--profile", "ai", "up", "-d", "ollama")
+            Invoke-Checked -Arguments @("compose", "up", "-d", "ollama")
             $ollamaReady = $false
             for ($i = 0; $i -lt 30; $i++) {
-                & docker compose --profile ai exec -T ollama ollama list *> $null
+                & docker compose exec -T ollama ollama list *> $null
                 if ($LASTEXITCODE -eq 0) {
                     $ollamaReady = $true
                     break
@@ -362,7 +352,10 @@ try {
             if (-not $ollamaReady) {
                 throw "Ollama 容器未在规定时间内就绪。"
             }
-            Invoke-Checked -Arguments @("compose", "--profile", "ai", "exec", "-T", "ollama", "ollama", "pull", $OllamaModel)
+            Invoke-Checked -Arguments @("compose", "exec", "-T", "ollama", "ollama", "pull", $OllamaModel)
+            if ($OllamaEmbeddingModel -and $OllamaEmbeddingModel -ne $OllamaModel) {
+                Invoke-Checked -Arguments @("compose", "exec", "-T", "ollama", "ollama", "pull", $OllamaEmbeddingModel)
+            }
             $ollamaVolumes = @(& docker volume ls --filter "label=com.docker.compose.volume=ollama-data" --format "{{.Name}}" 2>$null | ForEach-Object { $_.ToString().Trim() } | Where-Object { $_ })
             $ollamaVolume = if ($ollamaVolumes.Count -gt 0) { $ollamaVolumes[0] } else { "iot-platform_ollama-data" }
             $ollamaVolumeName = $ollamaVolume
@@ -451,6 +444,7 @@ try {
         envFile = ".env.offline"
         composeFiles = @("compose.yaml", "compose.offline.yaml")
         ollamaModel = if ($ollamaArchive) { $OllamaModel } else { $null }
+        ollamaEmbeddingModel = if ($ollamaArchive) { $OllamaEmbeddingModel } else { $null }
         ollamaArchive = $ollamaArchive
         ollamaVolume = $ollamaVolumeName
         generatedCredentials = [bool]$envResult.Generated
