@@ -13,7 +13,9 @@ const emit = defineEmits(['navigate'])
 let sequence = 0
 let abortController = null
 let scrollFrame = 0
+let scrollQueued = false
 let historyTimer = 0
+const pendingTextStates = new Map()
 const makeId = prefix => `${prefix}_${globalThis.crypto?.randomUUID?.() || `${Date.now()}_${++sequence}`}`
 const welcomeMessage = () => ({ id:'welcome', role:'assistant', status:'succeeded', text:'你好，我是消防物联网 AI 运维助手。选择一个工作流后，可以直接查询设备、告警和趋势；所有工具执行都会显示在运行轨迹中。', tools:[] })
 
@@ -267,13 +269,55 @@ function normalizeEvent(raw) {
 }
 
 function scheduleScroll() {
-  if (scrollFrame) cancelAnimationFrame(scrollFrame)
+  if (scrollQueued) return
+  scrollQueued = true
   nextTick(() => {
+    if (!scrollQueued) return
     scrollFrame = requestAnimationFrame(() => {
-      log.value?.scrollTo({ top:log.value.scrollHeight, behavior:'smooth' })
+      if (log.value) log.value.scrollTop = log.value.scrollHeight
       scrollFrame = 0
+      scrollQueued = false
     })
   })
+}
+
+function queueAssistantText(assistant, delta) {
+  if (!delta) return
+  let state = pendingTextStates.get(assistant)
+  if (!state) {
+    state = { value:'', timer:0 }
+    pendingTextStates.set(assistant, state)
+  }
+  state.value += delta
+  if (state.timer) return
+  state.timer = setTimeout(() => {
+    state.timer = 0
+    const buffered = state.value
+    state.value = ''
+    if (buffered) {
+      assistant.text += buffered
+      scheduleScroll()
+    }
+    if (!state.value) pendingTextStates.delete(assistant)
+  }, 50)
+}
+
+function flushAssistantText(assistant, shouldScroll = true) {
+  const state = pendingTextStates.get(assistant)
+  if (!state) return
+  if (state.timer) clearTimeout(state.timer)
+  state.timer = 0
+  const buffered = state.value
+  state.value = ''
+  pendingTextStates.delete(assistant)
+  if (buffered) {
+    assistant.text += buffered
+    if (shouldScroll) scheduleScroll()
+  }
+}
+
+function flushPendingAssistantText(shouldScroll = true) {
+  for (const assistant of pendingTextStates.keys()) flushAssistantText(assistant, shouldScroll)
 }
 
 async function loadRuntime() {
@@ -531,8 +575,7 @@ function applyStreamEvent(raw, assistant, run) {
       break
     case 'text.delta': {
       const delta = event.delta ?? event.text ?? event.content ?? ''
-      assistant.text += typeof delta === 'string' ? delta : ''
-      scheduleScroll()
+      if (typeof delta === 'string') queueAssistantText(assistant, delta)
       break
     }
     case 'tool.started': {
@@ -558,6 +601,7 @@ function applyStreamEvent(raw, assistant, run) {
       break
     }
     case 'run.completed':
+      flushAssistantText(assistant)
       if (!assistant.text) assistant.text = safeText(event.answer || event.text, '本次运行已完成，但没有返回文本。')
       assistant.status = 'succeeded'
       assistant.usage = event.usage || null
@@ -569,6 +613,7 @@ function applyStreamEvent(raw, assistant, run) {
       addRunEvent(run, event, 'Harness 运行完成', 'success', run.durationMs != null ? `${run.durationMs} ms` : '')
       break
     case 'run.failed': {
+      flushAssistantText(assistant)
       const failure = normalizeError(event.error || event, 'AI 运行失败')
       assistant.status = 'failed'
       assistant.error = failure
@@ -624,6 +669,7 @@ async function send(textValue) {
       addRunEvent(run, { type:'run.failed' }, '请求失败', 'danger', failure.message)
     }
   } finally {
+    flushAssistantText(assistant)
     run.finishedAt ||= Date.now()
     if (abortController === controller) { abortController = null; sending.value = false }
     scheduleScroll()
@@ -643,7 +689,7 @@ function editRuleDraft(draft, persisted, state) { if (state === 'enabled' || sta
 
 watch([messages, runs, conversationId, selectedWorkflowId], scheduleConversationPersist, { deep:true })
 onMounted(() => { restoreConversation(); loadProviderProfiles(); return Promise.all([loadRuntime(), loadKnowledgeCatalog(), refreshRuleDraftStatuses()]) })
-onBeforeUnmount(() => { abortController?.abort(); if (scrollFrame) cancelAnimationFrame(scrollFrame); if (historyTimer) clearTimeout(historyTimer); persistConversation() })
+onBeforeUnmount(() => { abortController?.abort(); flushPendingAssistantText(false); if (scrollFrame) cancelAnimationFrame(scrollFrame); scrollFrame = 0; scrollQueued = false; if (historyTimer) clearTimeout(historyTimer); persistConversation() })
 </script>
 
 <template>
@@ -678,7 +724,7 @@ onBeforeUnmount(() => { abortController?.abort(); if (scrollFrame) cancelAnimati
       <div class="quick-prompts"><button v-for="item in quickQuestions" :key="item" :disabled="sending || !workflowItems.length" @click="send(item)">{{ item }}</button></div>
       <div ref="log" class="chat-log" aria-live="polite">
         <div v-for="message in messages" :key="message.id" class="message-row" :class="message.role">
-          <span class="message-avatar">{{ message.role === 'assistant' ? 'AI' : '我' }}</span><div class="message-content"><div class="chat-message" :class="[message.role,`is-${message.status}`]"><MarkdownContent v-if="message.text && message.role === 'assistant'" :source="message.text" /><p v-else-if="message.text">{{ message.text }}</p><div v-else-if="message.status === 'streaming'" class="typing"><i/><i/><i/><span>正在运行工作流</span></div><ToolCallCard v-for="tool in message.tools" :key="tool.id || tool.toolCallId" :tool="tool" /><div v-if="message.ruleDraft" class="rule-draft-card"><div><strong>{{ message.ruleDraft.name || '自动化规则草稿' }}</strong><el-tag :type="ruleDraftStatusType(message)" size="small">{{ ruleDraftStatusLabel(message) }}</el-tag></div><small>{{ message.ruleDraft.conditions?.length || 0 }} 个条件 · {{ message.ruleDraft.actions?.map(actionSummary).join('、') || '仅告警' }}</small><el-button type="primary" size="small" :disabled="ruleDraftActionDisabled(message)" @click="editRuleDraft(message.ruleDraft, message.ruleDraftPersisted, message.ruleDraftState)">{{ ruleDraftActionLabel(message) }}</el-button></div><div v-if="message.error" class="message-error"><strong>{{ message.error.message }}</strong><small v-if="message.error.code || message.error.stage">{{ [message.error.code,message.error.stage].filter(Boolean).join(' · ') }}</small><small v-if="message.traceId || message.error.traceId">Trace · {{ message.traceId || message.error.traceId }}</small><el-button v-if="message.prompt" text size="small" :disabled="sending" @click="retry(message)">重新运行</el-button></div></div><div v-if="message.role === 'assistant' && message.runKey" class="message-meta"><span v-if="message.status === 'streaming'">运行中</span><span v-else>{{ message.status === 'succeeded' ? '已完成' : message.status === 'canceled' ? '已停止' : '运行失败' }}</span><span v-if="message.durationMs != null">{{ message.durationMs }} ms</span><span v-if="message.usage?.totalTokens != null">{{ message.usage.totalTokens }} tokens</span><button @click="openTrace(message)">查看轨迹</button></div></div>
+          <span class="message-avatar">{{ message.role === 'assistant' ? 'AI' : '我' }}</span><div class="message-content"><div class="chat-message" :class="[message.role,`is-${message.status}`]"><MarkdownContent v-if="message.text && message.role === 'assistant' && message.status !== 'streaming'" :source="message.text" /><p v-else-if="message.text">{{ message.text }}</p><div v-else-if="message.status === 'streaming'" class="typing"><i/><i/><i/><span>正在运行工作流</span></div><ToolCallCard v-for="tool in message.tools" :key="tool.id || tool.toolCallId" :tool="tool" /><div v-if="message.ruleDraft" class="rule-draft-card"><div><strong>{{ message.ruleDraft.name || '自动化规则草稿' }}</strong><el-tag :type="ruleDraftStatusType(message)" size="small">{{ ruleDraftStatusLabel(message) }}</el-tag></div><small>{{ message.ruleDraft.conditions?.length || 0 }} 个条件 · {{ message.ruleDraft.actions?.map(actionSummary).join('、') || '仅告警' }}</small><el-button type="primary" size="small" :disabled="ruleDraftActionDisabled(message)" @click="editRuleDraft(message.ruleDraft, message.ruleDraftPersisted, message.ruleDraftState)">{{ ruleDraftActionLabel(message) }}</el-button></div><div v-if="message.error" class="message-error"><strong>{{ message.error.message }}</strong><small v-if="message.error.code || message.error.stage">{{ [message.error.code,message.error.stage].filter(Boolean).join(' · ') }}</small><small v-if="message.traceId || message.error.traceId">Trace · {{ message.traceId || message.error.traceId }}</small><el-button v-if="message.prompt" text size="small" :disabled="sending" @click="retry(message)">重新运行</el-button></div></div><div v-if="message.role === 'assistant' && message.runKey" class="message-meta"><span v-if="message.status === 'streaming'">运行中</span><span v-else>{{ message.status === 'succeeded' ? '已完成' : message.status === 'canceled' ? '已停止' : '运行失败' }}</span><span v-if="message.durationMs != null">{{ message.durationMs }} ms</span><span v-if="message.usage?.totalTokens != null">{{ message.usage.totalTokens }} tokens</span><button @click="openTrace(message)">查看轨迹</button></div></div>
         </div>
       </div>
       <div class="chat-compose"><el-input v-model="question" type="textarea" :autosize="{ minRows:1,maxRows:4 }" maxlength="4000" resize="none" placeholder="询问设备、告警、趋势或处置知识；Shift + Enter 换行" :disabled="sending || !workflowItems.length" @keydown.enter.exact.prevent="send()" /><el-button v-if="sending" type="danger" plain @click="stop">停止</el-button><el-button v-else type="primary" :disabled="!question.trim() || !workflowItems.length" @click="send()">发送</el-button></div><small class="chat-notice">AI 输出仅供辅助判断，不会自动执行设备控制或启用规则。</small>

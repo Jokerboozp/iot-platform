@@ -156,11 +156,19 @@ function detailText(data, kind) {
   return candidate && candidate !== 'FAULT' ? candidate : ''
 }
 
+function nestedMessage(data) {
+  const details = asObject(data.details)
+  return asObject(data.message) || asObject(details?.message) || asObject(data.standardMessage)
+}
+
 function normalizeAlert(data, kind, topic) {
   const alarmLevel = upper(data.alarmLevel || data.level || (kind === 'fault' ? 'HIGH' : 'HIGH')) || 'HIGH'
   const alarmTypeValue = upper(data.alarmType || data.alarm_type || (kind === 'fault' ? 'DEVICE_FAULT' : 'MANUAL_ALARM')) || (kind === 'fault' ? 'DEVICE_FAULT' : 'MANUAL_ALARM')
   const alarmId = firstText(data.alarmId, data.id)
-  const messageId = firstText(data.messageId, data.triggerId)
+  const nested = nestedMessage(data)
+  const standardMessageId = firstText(data.messageId, data.message_id, data.triggerId, data.trigger_id, nested?.messageId, nested?.message_id)
+  const rawMessageId = firstText(data.rawMessageId, data.raw_message_id, nested?.rawMessageId, nested?.raw_message_id)
+  const messageId = rawMessageId || standardMessageId
   const deviceId = firstText(data.deviceId, data.cameraId)
   const baseId = alarmId || messageId || `${kind}:${topic}:${timestampOf(data)}`
   return {
@@ -169,6 +177,8 @@ function normalizeAlert(data, kind, topic) {
     alarmId,
     triggerId: firstText(data.triggerId),
     messageId,
+    rawMessageId,
+    standardMessageId,
     tenantId: firstText(data.tenantId),
     productId: firstText(data.productId),
     deviceId,
@@ -202,7 +212,7 @@ export function parseRealtimeAlert(topic, payload) {
 }
 
 export function alertKeys(alert) {
-  return [...new Set([alert?.alarmId, alert?.triggerId, alert?.messageId, alert?.id].filter(Boolean).map(String))]
+  return [...new Set([alert?.alarmId, alert?.triggerId, alert?.messageId, alert?.rawMessageId, alert?.standardMessageId, alert?.id].filter(Boolean).map(String))]
 }
 
 export function alertTagType(level) {

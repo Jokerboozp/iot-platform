@@ -52,9 +52,10 @@ test('global alarm popup handles raised alarms, fault events and tenant-scoped s
 
   const fault = alerts.parseRealtimeAlert(
     '/iot/parsed/tenant-a/product-a/device-1/EVENT_REPORT',
-    { messageId:'message-fault', messageType:'EVENT_REPORT', deviceId:'device-1', event:{ type:'FAULT', description:'主电源故障' } }
+    { messageId:'message-fault', rawMessageId:'raw-message-fault', messageType:'EVENT_REPORT', deviceId:'device-1', event:{ type:'FAULT', description:'主电源故障' } }
   )
   assert.equal(fault.kind, 'fault')
+  assert.equal(fault.messageId, 'raw-message-fault')
   assert.equal(fault.alarmType, 'DEVICE_FAULT')
   assert.equal(fault.detail, '主电源故障')
   assert.equal(alerts.parseRealtimeAlert('/iot/parsed/tenant-a/product-a/device-1/EVENT_REPORT', { messageType:'EVENT_REPORT', event:{ type:'HEARTBEAT' } }), null)
@@ -165,6 +166,16 @@ test('AI workbench uses cancellable SSE workflows and stable message keys', asyn
   assert.match(aiView, /provider:custom \? 'openai-compatible' : sandbox\.provider/)
   assert.match(apiSource, /text\/event-stream/)
   assert.match(sseSource, /getReader\(\)/)
+})
+
+test('AI streaming keeps Markdown rendering and scroll work bounded', async () => {
+  const aiView = await readFile(new URL('src/views/AiView.vue', root), 'utf8')
+
+  assert.match(aiView, /queueAssistantText/)
+  assert.match(aiView, /flushAssistantText/)
+  assert.match(aiView, /<MarkdownContent v-if="message\.text && message\.role === 'assistant' && message\.status !== 'streaming'"/)
+  assert.match(aiView, /<p v-else-if="message\.text">\{\{ message\.text \}\}<\/p>/)
+  assert.doesNotMatch(aiView, /behavior:'smooth'/)
 })
 
 test('AI chat sizes sent question bubbles to content until the readable max width', async () => {

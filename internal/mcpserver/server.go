@@ -146,7 +146,19 @@ func newServer(engine *core.Engine, harness bool, endpoint string) http.Handler 
 		output := map[string]any{"kind": "ruleDraft", "draft": v, "persisted": draftErr == nil, "requiresHumanApproval": true}
 		return auditedResult(ctx, engine, "create_rule_draft", map[string]any{"inputText": inputText}, output, draftErr)
 	})
-	return server.NewStreamableHTTPServer(s, server.WithStateLess(true), server.WithEndpointPath(endpoint))
+	options := []server.StreamableHTTPOption{
+		server.WithStateLess(true),
+		server.WithEndpointPath(endpoint),
+	}
+	if harness {
+		// The Harness sidecar reaches the local API through Docker Desktop's
+		// host.docker.internal bridge. The Go server sees that connection as
+		// loopback, while the Host header is host.docker.internal:port. Keep
+		// the MCP endpoint's JWT/audience/scope checks as the security boundary
+		// and disable only the transport's localhost Host-header check here.
+		options = append(options, server.WithDisableLocalhostProtection(true))
+	}
+	return server.NewStreamableHTTPServer(s, options...)
 }
 
 func buildSystemOverview(ctx context.Context, engine *core.Engine, tenant string) (map[string]any, error) {
