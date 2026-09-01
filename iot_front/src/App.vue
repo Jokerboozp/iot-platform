@@ -25,8 +25,8 @@ import Avatar from './components/ui/Avatar.vue'
 import Button from './components/ui/Button.vue'
 import Input from './components/ui/Input.vue'
 import Label from './components/ui/Label.vue'
+import GlobalAlertPopup from './components/GlobalAlertPopup.vue'
 import { api, notifyError, session } from './api'
-import { alarmType } from './labels'
 import { startRealtime, stopRealtime } from './realtime'
 
 const DashboardView = defineAsyncComponent(() => import('./views/DashboardView.vue'))
@@ -50,6 +50,7 @@ const active = ref('dashboard')
 const collapsed = ref(false)
 const pageKey = ref(0)
 const loginLoading = ref(false)
+const globalAlertPopup = ref(null)
 const loginForm = ref({ tenantId: 'tenant_001', username: 'admin', password: 'admin123' })
 const identity = ref({ tenant: session.tenant, user: session.user, role: session.role })
 const currentTenant = computed(() => identity.value.tenant || loginForm.value.tenantId || '—')
@@ -109,6 +110,10 @@ function openPage(name, detail) {
   if (detail) sessionStorage.setItem('iot:navigation-detail', JSON.stringify(detail))
 }
 
+function openAlertSettings() {
+  globalAlertPopup.value?.openSettings()
+}
+
 function handleUIAction(payload) {
   try {
     const event = JSON.parse(payload)
@@ -130,14 +135,6 @@ function handleUIAction(payload) {
 
 function connect() {
   startRealtime((topic, payload) => {
-    if (topic.includes('/alarm/')) {
-      try {
-        const alarm = JSON.parse(payload)
-        ElMessage.warning(`新告警：${alarmType(alarm.alarmType)} · ${alarm.deviceName || alarm.deviceId || ''}`)
-      } catch {
-        // Ignore malformed notification payloads.
-      }
-    }
     if (topic.includes('/ui-action/')) handleUIAction(payload)
     window.dispatchEvent(new CustomEvent('iot:realtime', { detail: { topic, payload } }))
   })
@@ -220,6 +217,7 @@ onBeforeUnmount(() => {
             <div><span>首页 / {{ current.title }}</span><h2>{{ current.title }}</h2><p>{{ current.sub }}</p></div>
           </div>
           <div class="top-actions">
+            <button class="alert-settings-trigger" type="button" aria-label="告警提醒设置" @click="openAlertSettings"><Settings2 /><span>告警提醒</span></button>
             <div class="health"><i />服务正常</div>
             <span class="tenant-pill">{{ currentTenant }}</span>
             <div class="account"><Avatar>{{ currentUser.slice(0, 1) }}</Avatar><span>{{ currentUser }} · {{ currentRole }}</span></div>
@@ -228,5 +226,6 @@ onBeforeUnmount(() => {
         <section class="main-content"><component :is="current.component" :key="`${active}-${pageKey}`" @navigate="openPage" /></section>
       </main>
     </div>
+    <GlobalAlertPopup v-if="authenticated" ref="globalAlertPopup" @navigate="openPage" />
   </el-config-provider>
 </template>

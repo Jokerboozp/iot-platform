@@ -31,6 +31,59 @@ test('shared controls keep file pickers and text actions visibly shaped', async 
   assert.match(`${assistant}\n${protocols}`, /<input type="file"/)
 })
 
+test('global alarm popup handles raised alarms, fault events and tenant-scoped settings', async () => {
+  const app = await readFile(new URL('src/App.vue', root), 'utf8')
+  const popup = await readFile(new URL('src/components/GlobalAlertPopup.vue', root), 'utf8')
+  const alerts = await import('../src/globalAlert.js')
+
+  assert.match(app, /GlobalAlertPopup/)
+  for (const label of ['告警提醒', '显示报警弹窗', '弹窗静默时段', '播放警报声', '查看告警详情', '查看原始报文']) {
+    assert.match(popup, new RegExp(label), `missing global alarm UI label: ${label}`)
+  }
+  assert.match(popup, /window\.addEventListener\('iot:realtime'/)
+
+  const raised = alerts.parseRealtimeAlert(
+    '/iot/alarm/raised/city-1/district-1/building-1/smoke/device-1',
+    JSON.stringify({ alarmId:'alarm-1', triggerId:'message-1', deviceId:'device-1', deviceName:'东区烟感', alarmType:'FIRE_RISK', alarmLevel:'CRITICAL', source:'device', lastTriggeredAt:1760000000000 })
+  )
+  assert.equal(raised.kind, 'alarm')
+  assert.equal(raised.alarmId, 'alarm-1')
+  assert.deepEqual(alerts.alertKeys(raised), ['alarm-1', 'message-1'])
+
+  const fault = alerts.parseRealtimeAlert(
+    '/iot/parsed/tenant-a/product-a/device-1/EVENT_REPORT',
+    { messageId:'message-fault', messageType:'EVENT_REPORT', deviceId:'device-1', event:{ type:'FAULT', description:'主电源故障' } }
+  )
+  assert.equal(fault.kind, 'fault')
+  assert.equal(fault.alarmType, 'DEVICE_FAULT')
+  assert.equal(fault.detail, '主电源故障')
+  assert.equal(alerts.parseRealtimeAlert('/iot/parsed/tenant-a/product-a/device-1/EVENT_REPORT', { messageType:'EVENT_REPORT', event:{ type:'HEARTBEAT' } }), null)
+
+  const values = new Map()
+  const storage = { getItem:key => values.get(key) ?? null, setItem:(key, value) => values.set(key, value) }
+  const saved = alerts.saveAlertSettings(storage, { tenant:'tenant-a', user:'operator' }, { popupEnabled:false, soundEnabled:false, quietStart:'22:00', quietEnd:'07:00' })
+  assert.equal(alerts.loadAlertSettings(storage, { tenant:'tenant-a', user:'operator' }).popupEnabled, false)
+  assert.equal(alerts.loadAlertSettings(storage, { tenant:'tenant-b', user:'operator' }).popupEnabled, true)
+  assert.equal(alerts.isWithinQuietHours(new Date(2026, 0, 1, 23, 30), saved), true)
+  assert.equal(alerts.isWithinQuietHours(new Date(2026, 0, 1, 12, 0), saved), false)
+})
+
+test('long dialogs keep the viewport fixed and scroll within the dialog body', async () => {
+  const styles = await readFile(new URL('src/styles.css', root), 'utf8')
+  const dialogStyle = styles.match(/\.el-dialog\s*\{[^}]+\}/)?.[0]
+  const dialogBodyStyle = styles.match(/\.el-dialog__body\s*\{[^}]+\}/)?.[0]
+  assert.ok(dialogStyle, 'dialog layout style must remain explicit')
+  assert.ok(dialogBodyStyle, 'dialog body layout style must remain explicit')
+  assert.match(styles, /\.main-content\s*\{[^}]*flex:\s*1 1 auto[^}]*overflow-y:\s*auto/)
+  assert.match(styles, /\.el-overlay-dialog\s*\{[^}]*overflow:\s*hidden/)
+  assert.match(dialogStyle, /display:\s*flex/)
+  assert.match(dialogStyle, /flex-direction:\s*column/)
+  assert.match(dialogStyle, /max-height:\s*calc\(100vh\s*-\s*48px\)/)
+  assert.match(dialogBodyStyle, /min-height:\s*0/)
+  assert.match(dialogBodyStyle, /overflow-y:\s*auto/)
+  assert.match(dialogBodyStyle, /overscroll-behavior:\s*contain/)
+})
+
 test('camera metadata and AI provider playground remain available', async () => {
   const source = await sourceText()
   for (const label of ['摄像头点位', '不解析、拉取或预览视频流', 'Provider 测试与配置', '添加自定义 Provider', '保存到当前租户', '连接并测试插件', 'DEEPSEEK HARNESS', 'AI 工作流', '运行轨迹', '工具调用']) {

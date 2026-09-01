@@ -76,18 +76,20 @@ async function downloadBatch() {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
+  let navigation = {}
   try {
     const raw = sessionStorage.getItem('iot:navigation-detail')
     if (raw) {
-      const navigation = JSON.parse(raw)
+      navigation = JSON.parse(raw)
       query.value = navigation.deviceId || ''
       sessionStorage.removeItem('iot:navigation-detail')
     }
   } catch {
     // Ignore malformed navigation state.
   }
-  load()
+  await load()
+  if (navigation.messageId) await show(navigation.messageId)
 })
 </script>
 

@@ -9,3 +9,6 @@ iot_front/dist/
 upstream/deepseek-harness/
 upstream/deepseek-harness.revision
 offline-bundles/
+.vscode/
+iot_front/.idea/
+.gitignore
