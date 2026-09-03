@@ -1,13 +1,15 @@
 <script setup>
 import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { api, download, formatTime, notifyError } from '../api'
+import { api, download, formatTime, notifyError, session } from '../api'
 import { businessStatuses, label, tagType } from '../labels'
 import MarkdownContent from '../components/MarkdownContent.vue'
+import { loadHealthInspection, saveHealthInspection } from '../healthInspectionState'
 
-const report=ref(null), loading=ref(false), downloading=ref(false)
+const inspectionStorage = typeof window !== 'undefined' ? window.sessionStorage : null
+const report=ref(loadHealthInspection(inspectionStorage, session)), loading=ref(false), downloading=ref(false)
 const counts=computed(()=>report.value?.counts||{})
-async function run(){if(loading.value)return;loading.value=true;try{report.value=await api('/api/v1/ai/health-inspection',{method:'POST',body:'{}'});ElMessage.success('设备健康巡检已完成')}catch(e){notifyError(e)}finally{loading.value=false}}
+async function run(){if(loading.value)return;loading.value=true;try{const nextReport=await api('/api/v1/ai/health-inspection',{method:'POST',body:'{}'});report.value=nextReport;saveHealthInspection(inspectionStorage, session, nextReport);ElMessage.success('设备健康巡检已完成')}catch(e){notifyError(e)}finally{loading.value=false}}
 async function downloadPDF(){if(!report.value||downloading.value)return;downloading.value=true;try{const stamp=new Date(Number(report.value.generatedAt||Date.now())).toISOString().replace(/[:.]/g,'-');await download('/api/v1/ai/health-inspection/pdf',`智能巡检结果_${stamp}.pdf`,{method:'POST',body:'{}'});ElMessage.success('巡检结果 PDF 已下载')}catch(e){notifyError(e)}finally{downloading.value=false}}
 </script>
 

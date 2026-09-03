@@ -241,6 +241,22 @@ test('AI answers render safe Markdown in chat and health inspection', async () =
   assert.match(inspectionView, /<MarkdownContent[^>]*:source="report\.aiAdvice"/)
 })
 
+test('health inspection report survives menu-driven view recreation and stays tenant scoped', async () => {
+  const { HEALTH_INSPECTION_STORAGE_PREFIX, healthInspectionStorageKey, saveHealthInspection, loadHealthInspection } = await import('../src/healthInspectionState.js')
+  const values = new Map()
+  const storage = { getItem:key => values.get(key) ?? null, setItem:(key,value) => values.set(key,value), removeItem:key => values.delete(key) }
+  const session = { tenant:'tenant-a', user:'alice' }
+  const report = { generatedAt:1760000000000, summary:'巡检完成', counts:{ total:3, healthy:2 }, items:[], aiAdvice:'需要复核一台设备。' }
+  assert.equal(saveHealthInspection(storage, session, report), true)
+  assert.ok([...values.keys()][0].startsWith(HEALTH_INSPECTION_STORAGE_PREFIX))
+  assert.deepEqual(loadHealthInspection(storage, session), report)
+  assert.equal(loadHealthInspection(storage, { tenant:'tenant-b', user:'alice' }), null)
+  assert.equal(loadHealthInspection(storage, { tenant:'tenant-a', user:'bob' }), null)
+  values.set(healthInspectionStorageKey(session), '{invalid')
+  assert.equal(loadHealthInspection(storage, session), null)
+  assert.equal(values.has(healthInspectionStorageKey(session)), false)
+})
+
 test('Agent management is standalone and Provider testing is removed from the AI workbench', async () => {
   const app = await readFile(new URL('src/App.vue', root), 'utf8')
   const aiView = await readFile(new URL('src/views/AiView.vue', root), 'utf8')
@@ -330,6 +346,9 @@ test('device access and health inspection pages expose the new runtime workflow'
     assert.match(inspection, new RegExp(label), `missing inspection label: ${label}`)
   }
   assert.match(inspection, /api\('\/api\/v1\/ai\/health-inspection'/)
+  assert.match(inspection, /loadHealthInspection/)
+  assert.match(inspection, /saveHealthInspection/)
+  assert.match(inspection, /sessionStorage/)
   assert.doesNotMatch(inspection, /onMounted\(run\)/)
   assert.match(inspection, /点击“立即巡检”开始检查/)
   assert.match(app, /title: '设备接入'/)
