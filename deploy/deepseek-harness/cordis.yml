@@ -29,20 +29,19 @@
 - id: fs-local
   disabled: true
 
-- id: agent-spine
+- id: system-prompt
   config:
     includeHarnessIdentity: false
     includeRuntimeContext: false
     persona: !!js process.env.IOT_OPS_PERSONA
-    workspaceContext: false
-    skills:
-      enabled: false
-    toolBash: false
-    toolJobs: false
-    goals: false
+
+- id: agent-loop
+  config:
     maxParallelToolCalls: 3
-    tools:
-      mode: native
+
+- id: tools
+  config:
+    mode: native
 
 - id: persistent-bash
   disabled: true

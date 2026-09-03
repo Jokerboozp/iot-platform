@@ -6,6 +6,7 @@ import {
   Bell,
   Boxes,
   ChartNoAxesCombined,
+  ChevronDown,
   Cpu,
   Database,
   FileText,
@@ -33,7 +34,6 @@ const DashboardView = defineAsyncComponent(() => import('./views/DashboardView.v
 const DevicesView = defineAsyncComponent(() => import('./views/DevicesView.vue'))
 const ProductsView = defineAsyncComponent(() => import('./views/ProductsView.vue'))
 const ProtocolsView = defineAsyncComponent(() => import('./views/ProtocolsView.vue'))
-const ProtocolAssistantView = defineAsyncComponent(() => import('./views/ProtocolAssistantView.vue'))
 const IntegrationView = defineAsyncComponent(() => import('./views/IntegrationView.vue'))
 const TestDeviceView = defineAsyncComponent(() => import('./views/TestDeviceView.vue'))
 const CameraMappingsView = defineAsyncComponent(() => import('./views/CameraMappingsView.vue'))
@@ -61,8 +61,7 @@ const pages = {
   dashboard: { title: '运行总览', sub: '城市级消防感知与告警态势', icon: LayoutDashboard, component: DashboardView },
   devices: { title: '设备管理', sub: '注册、启停、凭证和实时状态统一管理', icon: Cpu, component: DevicesView },
   products: { title: '产品管理', sub: '产品模型与协议包绑定', icon: Boxes, component: ProductsView },
-  protocols: { title: '协议开发', sub: '协议包版本、解析器配置与样本调试', icon: Network, component: ProtocolsView },
-  protocolAssistant: { title:'协议接入助手', sub: '上传点表，生成并确认 Go 协议映射', icon: Network, component: ProtocolAssistantView },
+  protocols: { title: '设备接入', sub: '点表直连、协议版本与采集实例', icon: Network, component: ProtocolsView },
   integration: { title:'接入指南', sub: '真实设备 HTTP / MQTT 参数与数据联调', icon: Upload, component: IntegrationView },
   testDevice: { title:'测试设备', sub: '模板化发送数据、事件、报警和恢复报文', icon: FlaskConical, component: TestDeviceView },
   cameras: { title: '摄像头映射', sub: '视频平台摄像头、空间位置与物联设备关联', icon: Video, component: CameraMappingsView },
@@ -77,7 +76,7 @@ const pages = {
 const current = computed(() => pages[active.value])
 const menuGroups = [
   { label: '控制中心', items: ['dashboard'] },
-  { label:'设备与数据', items: ['devices', 'products', 'protocols', 'protocolAssistant', 'integration', 'testDevice', 'cameras'] },
+  { label:'设备与数据', items: ['devices', 'products', 'protocols', 'integration', 'testDevice', 'cameras'] },
   { label: '运行中心', items: ['alarms', 'inspection', 'raw', 'rules', 'knowledge', 'ai', 'backups'] }
 ]
 
@@ -104,6 +103,10 @@ function logout() {
   authenticated.value = false
 }
 
+function handleAccountCommand(command) {
+  if (command === 'logout') logout()
+}
+
 function openPage(name, detail) {
   active.value = name
   pageKey.value++
@@ -123,7 +126,7 @@ function handleUIAction(payload) {
       ElMessage.info(`规则联动：已定位摄像头信息 ${action.cameraId}`)
       return
     }
-    const allowedPages = new Set(['dashboard', 'devices', 'products', 'protocols', 'protocolAssistant', 'integration', 'testDevice', 'cameras', 'alarms', 'inspection', 'raw', 'rules', 'knowledge', 'ai', 'backups'])
+    const allowedPages = new Set(['dashboard', 'devices', 'products', 'protocols', 'integration', 'testDevice', 'cameras', 'alarms', 'inspection', 'raw', 'rules', 'knowledge', 'ai', 'backups'])
     if (action.type === 'OPEN_PAGE' && allowedPages.has(action.page)) {
       openPage(action.page)
       ElMessage.warning('规则联动：已打开相关业务页面')
@@ -207,7 +210,6 @@ onBeforeUnmount(() => {
             </template>
           </div>
         </div>
-        <button class="logout-button" @click="logout"><LogOut /><span v-show="!collapsed">退出登录</span></button>
       </aside>
 
       <main class="app-main">
@@ -220,7 +222,19 @@ onBeforeUnmount(() => {
             <button class="alert-settings-trigger" type="button" aria-label="告警提醒设置" @click="openAlertSettings"><Settings2 /><span>告警提醒</span></button>
             <div class="health"><i />服务正常</div>
             <span class="tenant-pill">{{ currentTenant }}</span>
-            <div class="account"><Avatar>{{ currentUser.slice(0, 1) }}</Avatar><span>{{ currentUser }} · {{ currentRole }}</span></div>
+            <el-dropdown class="account-dropdown" trigger="click" @command="handleAccountCommand">
+              <button class="account" type="button" aria-label="打开用户菜单">
+                <Avatar>{{ currentUser.slice(0, 1) }}</Avatar>
+                <span class="account-copy"><strong>{{ currentUser }}</strong><small>{{ currentRole }}</small></span>
+                <ChevronDown class="account-chevron" />
+              </button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item disabled>{{ currentTenant }}</el-dropdown-item>
+                  <el-dropdown-item divided command="logout"><LogOut />退出登录</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
           </div>
         </header>
         <section class="main-content"><component :is="current.component" :key="`${active}-${pageKey}`" @navigate="openPage" /></section>

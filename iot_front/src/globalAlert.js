@@ -150,10 +150,13 @@ function hasFaultEvent(data) {
 function detailText(data, kind) {
   const event = asObject(data.event)
   const details = asObject(data.details)
+  const nested = nestedMessage(data)
+  const nestedEvent = asObject(nested?.event)
+  const videoEvent = asObject(details?.videoEvent)
   const candidate = kind === 'fault'
-    ? firstText(event?.message, event?.description, event?.name, event?.type, data.message, data.description)
-    : firstText(data.message, data.description, details?.message, event?.message)
-  return candidate && candidate !== 'FAULT' ? candidate : ''
+    ? firstText(event?.message, event?.description, event?.name, event?.type, data.message, data.description, data.alarmContent, data.content, data.alarmName, details?.description, details?.reason, nestedEvent?.message, nestedEvent?.description, nestedEvent?.name, nestedEvent?.type, videoEvent?.alarmName, videoEvent?.description)
+    : firstText(data.alarmContent, data.alarm_content, data.content, data.message, data.description, data.reason, data.alarmReason, data.alarmName, details?.description, details?.reason, details?.ruleName, event?.message, event?.description, nestedEvent?.message, nestedEvent?.description, nestedEvent?.name, nestedEvent?.type, videoEvent?.alarmName, videoEvent?.description)
+  return candidate && !['FAULT', 'ALARM'].includes(upper(candidate)) ? candidate : ''
 }
 
 function nestedMessage(data) {
@@ -182,7 +185,7 @@ function normalizeAlert(data, kind, topic) {
     tenantId: firstText(data.tenantId),
     productId: firstText(data.productId),
     deviceId,
-    deviceName: firstText(data.deviceName, data.cameraName),
+    deviceName: firstText(data.deviceName, data.device_name, data.cameraName, nested?.deviceName, nested?.device_name),
     alarmType: alarmTypeValue,
     alarmTypeLabel: alarmType(alarmTypeValue),
     alarmLevel,
@@ -190,7 +193,7 @@ function normalizeAlert(data, kind, topic) {
     status: upper(data.status || 'ACTIVE') || 'ACTIVE',
     source: firstText(data.source),
     timestamp: timestampOf(data),
-    detail: detailText(data, kind),
+    detail: detailText(data, kind) || (kind === 'fault' ? '检测到设备故障，请及时处理。' : '检测到设备异常报警，请及时处理。'),
     raw: data,
     topic
   }

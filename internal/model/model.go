@@ -31,22 +31,27 @@ const (
 )
 
 type RawMessage struct {
-	MessageID     string            `json:"messageId"`
-	Source        string            `json:"source"`
-	TenantID      string            `json:"tenantId"`
-	ProductID     string            `json:"productId"`
-	DeviceID      string            `json:"deviceId"`
-	DeviceName    string            `json:"deviceName,omitempty"`
-	GatewayID     string            `json:"gatewayId,omitempty"`
-	Protocol      string            `json:"protocol"`
-	Transport     string            `json:"transport"`
-	ReceivedAt    int64             `json:"receivedAt"`
-	PayloadFormat string            `json:"payloadFormat"`
-	Payload       json.RawMessage   `json:"payload"`
-	ClientID      string            `json:"clientId,omitempty"`
-	RemoteAddress string            `json:"remoteAddress,omitempty"`
-	Headers       map[string]string `json:"headers,omitempty"`
-	ParserVersion string            `json:"parserVersion,omitempty"`
+	MessageID         string            `json:"messageId"`
+	Source            string            `json:"source"`
+	TenantID          string            `json:"tenantId"`
+	ProductID         string            `json:"productId"`
+	DeviceID          string            `json:"deviceId"`
+	DeviceName        string            `json:"deviceName,omitempty"`
+	GatewayID         string            `json:"gatewayId,omitempty"`
+	Protocol          string            `json:"protocol"`
+	Transport         string            `json:"transport"`
+	ReceivedAt        int64             `json:"receivedAt"`
+	PayloadFormat     string            `json:"payloadFormat"`
+	Payload           json.RawMessage   `json:"payload"`
+	ClientID          string            `json:"clientId,omitempty"`
+	RemoteAddress     string            `json:"remoteAddress,omitempty"`
+	Headers           map[string]string `json:"headers,omitempty"`
+	ParserVersion     string            `json:"parserVersion,omitempty"`
+	ProtocolID        string            `json:"protocolId,omitempty"`
+	ProtocolVersion   string            `json:"protocolVersion,omitempty"`
+	PointTableVersion string            `json:"pointTableVersion,omitempty"`
+	CollectorID       string            `json:"collectorId,omitempty"`
+	Metadata          map[string]any    `json:"metadata,omitempty"`
 }
 
 func (m *RawMessage) Normalize(now time.Time) {
@@ -206,6 +211,108 @@ type ProtocolPackage struct {
 	Config        map[string]any `json:"config,omitempty"`
 	CreatedAt     int64          `json:"createdAt"`
 	UpdatedAt     int64          `json:"updatedAt"`
+}
+
+// ProtocolDefinition is the stable identity of a protocol family. Executable
+// and mapping content lives in immutable ProtocolRelease records.
+type ProtocolDefinition struct {
+	ID          string `json:"id"`
+	TenantID    string `json:"tenantId"`
+	Name        string `json:"name"`
+	Vendor      string `json:"vendor,omitempty"`
+	Description string `json:"description,omitempty"`
+	CreatedAt   int64  `json:"createdAt"`
+	UpdatedAt   int64  `json:"updatedAt"`
+}
+
+// ModbusPoint is a normalized point-table row. Address is always the zero
+// based PDU address; AddressNotation records how the uploaded value was
+// interpreted so that conversions remain auditable.
+type ModbusPoint struct {
+	Identifier      string         `json:"identifier"`
+	Name            string         `json:"name"`
+	FunctionCode    int            `json:"functionCode"`
+	Address         int            `json:"address"`
+	AddressNotation string         `json:"addressNotation"`
+	DataType        string         `json:"dataType"`
+	RegisterCount   int            `json:"registerCount,omitempty"`
+	ByteOrder       string         `json:"byteOrder,omitempty"`
+	WordOrder       string         `json:"wordOrder,omitempty"`
+	Bit             *int           `json:"bit,omitempty"`
+	Scale           float64        `json:"scale,omitempty"`
+	Offset          float64        `json:"offset,omitempty"`
+	Unit            string         `json:"unit,omitempty"`
+	Access          string         `json:"access,omitempty"`
+	PollIntervalSec int            `json:"pollIntervalSec,omitempty"`
+	Deadband        float64        `json:"deadband,omitempty"`
+	AlarmMapping    map[string]any `json:"alarmMapping,omitempty"`
+	Description     string         `json:"description,omitempty"`
+}
+
+type ModbusReadBlock struct {
+	ID              string `json:"id"`
+	FunctionCode    int    `json:"functionCode"`
+	StartAddress    int    `json:"startAddress"`
+	Quantity        int    `json:"quantity"`
+	PollIntervalSec int    `json:"pollIntervalSec"`
+}
+
+type PointTableRelease struct {
+	TenantID     string        `json:"tenantId"`
+	ProtocolID   string        `json:"protocolId"`
+	Version      string        `json:"version"`
+	SourceName   string        `json:"sourceName,omitempty"`
+	SourceSHA256 string        `json:"sourceSha256,omitempty"`
+	Points       []ModbusPoint `json:"points"`
+	CreatedAt    int64         `json:"createdAt"`
+}
+
+type ProtocolRelease struct {
+	TenantID          string         `json:"tenantId"`
+	ProtocolID        string         `json:"protocolId"`
+	Version           string         `json:"version"`
+	Transport         string         `json:"transport"`
+	PayloadFormat     string         `json:"payloadFormat"`
+	ParserType        string         `json:"parserType"`
+	Status            string         `json:"status"`
+	PointTableVersion string         `json:"pointTableVersion,omitempty"`
+	Capabilities      []string       `json:"capabilities,omitempty"`
+	Config            map[string]any `json:"config,omitempty"`
+	Artifact          map[string]any `json:"artifact,omitempty"`
+	CreatedAt         int64          `json:"createdAt"`
+	PublishedAt       int64          `json:"publishedAt,omitempty"`
+}
+
+type ProductProtocolBinding struct {
+	TenantID        string `json:"tenantId"`
+	ProductID       string `json:"productId"`
+	ProtocolID      string `json:"protocolId"`
+	Version         string `json:"version"`
+	PreviousVersion string `json:"previousVersion,omitempty"`
+	UpdatedAt       int64  `json:"updatedAt"`
+}
+
+type DeviceAccessProfile struct {
+	ID                string `json:"id"`
+	TenantID          string `json:"tenantId"`
+	DeviceID          string `json:"deviceId"`
+	ProductID         string `json:"productId"`
+	ProtocolID        string `json:"protocolId"`
+	ProtocolVersion   string `json:"protocolVersion"`
+	PointTableVersion string `json:"pointTableVersion"`
+	CollectorID       string `json:"collectorId,omitempty"`
+	Host              string `json:"host"`
+	Port              int    `json:"port"`
+	UnitID            int    `json:"unitId"`
+	TimeoutMs         int    `json:"timeoutMs"`
+	Retries           int    `json:"retries"`
+	Enabled           bool   `json:"enabled"`
+	RuntimeStatus     string `json:"runtimeStatus"`
+	LastSuccessAt     int64  `json:"lastSuccessAt,omitempty"`
+	LastErrorAt       int64  `json:"lastErrorAt,omitempty"`
+	LastError         string `json:"lastError,omitempty"`
+	CreatedAt         int64  `json:"createdAt"`
+	UpdatedAt         int64  `json:"updatedAt"`
 }
 
 // ProtocolAssistantField is the editable address/mapping contract between the

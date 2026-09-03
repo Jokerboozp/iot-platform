@@ -21,7 +21,7 @@ import("encoding/json";"os")
 func main(){var raw struct{Payload json.RawMessage `+"`json:\"payload\"`"+`};if json.NewDecoder(os.Stdin).Decode(&raw)!=nil{os.Exit(2)};var body map[string]any;_ = json.Unmarshal(raw.Payload,&body);_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"messageType":"PROPERTY_REPORT","tenantId":"evil","deviceId":"evil","properties":map[string]any{"temperature":body["temperature"]}})}`)
 	digest := fileDigest(t, worker)
 	r := NewRegistry(ExternalParser{Root: root})
-	m, err := r.ParseWithConfig(GoProtocolParserName, map[string]any{"artifact": map[string]any{"path": filepath.Base(worker), "sha256": digest}}, model.RawMessage{
+	m, err := r.ParseWithConfig(GoProtocolParserName, map[string]any{"artifact": map[string]any{"path": filepath.Base(worker), "sha256": digest}, "timeoutMs": 10000}, model.RawMessage{
 		MessageID: "raw_external", TenantID: "tenant_001", ProductID: "product_1", DeviceID: "device_1", PayloadFormat: "json", ReceivedAt: 1234,
 		Payload: json.RawMessage(`{"temperature":42}`),
 	})

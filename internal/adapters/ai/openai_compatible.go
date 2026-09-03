@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -116,12 +117,58 @@ func (o *OpenAICompatible) AnalyzeAlarm(ctx context.Context, alarm model.Alarm, 
 	if err != nil {
 		return model.AIAnalysis{}, err
 	}
+	return decodeAIAnalysis(content, alarm.ID, o.model)
+}
+
+func decodeAIAnalysis(content, alarmID, modelName string) (model.AIAnalysis, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(extractJSON(content)), &raw); err != nil {
+		return model.AIAnalysis{}, fmt.Errorf("decode model json: %w", err)
+	}
+	if confidence, ok := raw["confidence"]; ok {
+		normalized, err := normalizeAIConfidence(confidence)
+		if err != nil {
+			return model.AIAnalysis{}, fmt.Errorf("decode model json: %w", err)
+		}
+		raw["confidence"] = normalized
+	}
+	normalized, err := json.Marshal(raw)
+	if err != nil {
+		return model.AIAnalysis{}, fmt.Errorf("decode model json: %w", err)
+	}
 	var out model.AIAnalysis
-	if err := json.Unmarshal([]byte(extractJSON(content)), &out); err != nil {
+	if err := json.Unmarshal(normalized, &out); err != nil {
 		return out, fmt.Errorf("decode model json: %w", err)
 	}
-	out.AlarmID, out.Model, out.PromptVersion, out.CreatedAt = alarm.ID, o.model, "alarm-diagnosis-v1", time.Now().UnixMilli()
+	if strings.TrimSpace(out.Summary) == "" {
+		return out, fmt.Errorf("decode model json: summary is empty")
+	}
+	out.AlarmID, out.Model, out.PromptVersion, out.CreatedAt = alarmID, modelName, "alarm-diagnosis-v1", time.Now().UnixMilli()
 	return out, nil
+}
+
+func normalizeAIConfidence(raw json.RawMessage) (json.RawMessage, error) {
+	var number float64
+	if err := json.Unmarshal(raw, &number); err == nil {
+		return raw, nil
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return nil, fmt.Errorf("confidence must be a number")
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return json.RawMessage("0"), nil
+	}
+	number, err := strconv.ParseFloat(text, 64)
+	if err != nil {
+		return nil, fmt.Errorf("confidence must be a number")
+	}
+	normalized, err := json.Marshal(number)
+	if err != nil {
+		return nil, fmt.Errorf("confidence must be a number")
+	}
+	return normalized, nil
 }
 
 func (o *OpenAICompatible) Chat(ctx context.Context, tenant, question string) (string, error) {

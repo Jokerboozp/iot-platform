@@ -139,7 +139,18 @@ func TestHarnessHTTPBridgeAndTenantScopedConversation(t *testing.T) {
 		t.Fatal(err)
 	}
 	engine := core.New(repo, archive, local.NewBus(), local.NewRealtime(), parser.NewRegistry(parser.JSONParser{}), slog.New(slog.NewTextHandler(io.Discard, nil)))
-	runtime := &captureWorkflowRuntime{}
+	runtime := &captureWorkflowRuntime{
+		plugins: []ports.AIWorkflowPlugin{
+			{ID: "alarm-handler", Name: "AI Alarm Handler", Enabled: true},
+			{ID: "device-health-inspector", Name: "AI Device Health Inspector", Enabled: true},
+			{ID: "protocol-assistant", Name: "AI Protocol Assistant", Enabled: true},
+		},
+		manifests: []ports.AIWorkflowManifest{
+			{ID: "alarm-handler", Name: "AI Alarm Handler"},
+			{ID: "device-health-inspector", Name: "AI Device Health Inspector"},
+			{ID: "protocol-assistant", Name: "AI Protocol Assistant"},
+		},
+	}
 	engine.AIWorkflows = runtime
 	registry := metrics.New()
 	cfg := config.Load()

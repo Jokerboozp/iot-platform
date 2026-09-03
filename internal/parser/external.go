@@ -29,7 +29,7 @@ const GoProtocolParserName = "go_protocol_parser"
 const GoProtocolParserVersion = "1.0.0"
 
 const (
-	defaultExternalTimeout = 2 * time.Second
+	defaultExternalTimeout = 5 * time.Second
 	maxExternalTimeout     = 10 * time.Second
 	maxExternalArtifact    = 64 << 20
 	maxExternalOutput      = 1 << 20

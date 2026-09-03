@@ -21,6 +21,15 @@ test('management controls and Chinese labels remain available', async () => {
   }
 })
 
+test('account logout is available from the top-right avatar menu', async () => {
+  const app = await readFile(new URL('src/App.vue', root), 'utf8')
+  assert.match(app, /<el-dropdown class="account-dropdown"/)
+  assert.match(app, /aria-label="打开用户菜单"/)
+  assert.match(app, /command="logout"/)
+  assert.match(app, /function handleAccountCommand\(command\)/)
+  assert.doesNotMatch(app, /class="logout-button"/)
+})
+
 test('shared controls keep file pickers and text actions visibly shaped', async () => {
   const styles = await readFile(new URL('src/styles.css', root), 'utf8')
   const assistant = await readFile(new URL('src/views/ProtocolAssistantView.vue', root), 'utf8')
@@ -37,9 +46,12 @@ test('global alarm popup handles raised alarms, fault events and tenant-scoped s
   const alerts = await import('../src/globalAlert.js')
 
   assert.match(app, /GlobalAlertPopup/)
-  for (const label of ['告警提醒', '显示报警弹窗', '弹窗静默时段', '播放警报声', '查看告警详情', '查看原始报文']) {
+  for (const label of ['告警提醒', '显示报警弹窗', '弹窗静默时段', '播放警报声', '查看告警详情', '查看原始报文', '设备名称', '报警内容', '报警类型', '报警时间', '报警等级']) {
     assert.match(popup, new RegExp(label), `missing global alarm UI label: ${label}`)
   }
+  assert.match(popup, /function alertContent\(item\)/)
+  assert.doesNotMatch(popup, /global-alert-identifiers/)
+  for (const technicalLabel of ['设备 ID', '告警编号', '消息 ID']) assert.doesNotMatch(popup, new RegExp(technicalLabel), `technical alarm identifier should not be shown: ${technicalLabel}`)
   assert.match(popup, /window\.addEventListener\('iot:realtime'/)
 
   const raised = alerts.parseRealtimeAlert(
@@ -48,6 +60,8 @@ test('global alarm popup handles raised alarms, fault events and tenant-scoped s
   )
   assert.equal(raised.kind, 'alarm')
   assert.equal(raised.alarmId, 'alarm-1')
+  assert.equal(raised.deviceName, '东区烟感')
+  assert.equal(raised.detail, '检测到设备异常报警，请及时处理。')
   assert.deepEqual(alerts.alertKeys(raised), ['alarm-1', 'message-1'])
 
   const fault = alerts.parseRealtimeAlert(
@@ -87,7 +101,7 @@ test('long dialogs keep the viewport fixed and scroll within the dialog body', a
 
 test('camera metadata and AI provider playground remain available', async () => {
   const source = await sourceText()
-  for (const label of ['摄像头点位', '不解析、拉取或预览视频流', 'Provider 测试与配置', '添加自定义 Provider', '保存到当前租户', '连接并测试插件', 'DEEPSEEK HARNESS', 'AI 工作流', '运行轨迹', '工具调用']) {
+  for (const label of ['摄像头点位', '不解析、拉取或预览视频流', 'DEEPSEEK HARNESS', 'AI 工作流', '运行轨迹', '工具调用']) {
     assert.match(source, new RegExp(label), `missing feature label: ${label}`)
   }
   const cameraView = await readFile(new URL('src/views/CameraMappingsView.vue', root), 'utf8')
@@ -98,7 +112,7 @@ test('camera metadata and AI provider playground remain available', async () => 
 test('knowledge management uploads files and lists tenant documents', async () => {
   const app = await readFile(new URL('src/App.vue', root), 'utf8')
   const view = await readFile(new URL('src/views/KnowledgeView.vue', root), 'utf8')
-  for (const label of ['Agent 知识库', '上传知识文档', '上传并建立索引', '已上传文档', '打开 AI 工作流', '知识文档详情与切片', '索引与切片规则', '字符范围', '切片内容', '向量化']) {
+  for (const label of ['Agent 知识库', '上传知识文档', '上传并建立索引', '已上传文档', '打开 AI 工作流', '知识文档详情与切片', '索引与切片规则', '字符范围', '切片内容', '向量化', 'Agent 知识库策略', '每次强制检索', '最低相似度', '无匹配知识时', '保存知识库策略']) {
     assert.match(`${app}\n${view}`, new RegExp(label), `missing knowledge UI label: ${label}`)
   }
   assert.match(view, /api\((?:'|`)[^'`]*\/api\/v1\/knowledge\/documents(?:\?|['`])/)
@@ -113,6 +127,9 @@ test('knowledge management uploads files and lists tenant documents', async () =
   assert.match(view, /row\.startChar/)
   assert.match(view, /row\.overlapChars/)
   assert.match(view, /row\.vectorized/)
+  assert.match(view, /knowledge-binding/)
+  assert.match(view, /function loadBinding\(\)/)
+  assert.match(view, /function saveBinding\(\)/)
   for (const label of ['知识分类', '知识标签', '告警处置 SOP']) assert.match(view, new RegExp(label), `missing knowledge metadata UI: ${label}`)
 })
 
@@ -143,27 +160,41 @@ test('AI workbench uses cancellable SSE workflows and stable message keys', asyn
   assert.doesNotMatch(aiView, /conversationId\.value\s*=\s*event\.conversationId/)
   assert.doesNotMatch(aiView, /model:[^\n]*runtime\.value\.active/)
   assert.match(aiView, /conversationId\.value\s*=\s*makeId\('conversation'\)/)
-  for (const label of ['Agent 知识库', '强制检索', '最低相似度', '无匹配知识时', '保存知识库绑定']) assert.match(aiView, new RegExp(label), `missing workflow knowledge binding UI: ${label}`)
-  for (const label of ['通过 JSON 创建 Agent', 'Agent Manifest JSON', '校验并创建 Agent', '保存后立即进入工作流列表']) assert.match(aiView, new RegExp(label), `missing dynamic Agent UI: ${label}`)
+  for (const label of ['Agent 插件管理', '新建 Agent', 'Agent Manifest JSON', '校验并创建 Agent', '保存后 Agent 会立即进入工作流列表']) assert.match(aiView, new RegExp(label), `missing dynamic Agent UI: ${label}`)
   for (const field of ['schemaVersion','id','name','description','version','enabled','persona','defaultModel','maxTokens','capabilities','allowedTools']) assert.match(aiView, new RegExp(`name:'${field}'`), `missing Agent field documentation: ${field}`)
   assert.match(aiView, /JSON 标准不支持注释/)
   assert.match(aiView, /allowedTools 可用工具/)
-  for (const label of ['本次运行', '选择工作流', '运行参数', '运行环境', '管理中心', 'AI 工作流管理']) assert.match(aiView, new RegExp(label), `missing workflow hierarchy label: ${label}`)
-  assert.match(aiView, /<el-drawer v-model="managementVisible"/)
-  assert.match(aiView, /<el-menu :default-active="managementTab"/)
-  for (const menuClass of ['menu-agent','menu-knowledge','menu-provider']) assert.match(aiView, new RegExp(menuClass), `missing colored management menu: ${menuClass}`)
+  for (const label of ['本次运行', '选择工作流', '运行参数', '运行环境', 'Agent 管理']) assert.match(aiView, new RegExp(label), `missing workflow hierarchy label: ${label}`)
+  assert.match(aiView, /<el-drawer v-model="managementVisible" title="Agent 管理"/)
+  assert.doesNotMatch(aiView, /<el-menu/)
+  assert.doesNotMatch(aiView, /Provider 测试/)
+  assert.doesNotMatch(aiView, /panel-knowledge|panel-provider/)
   assert.doesNotMatch(aiView, /<el-collapse/)
-  assert.match(aiView, /knowledge-binding/)
   assert.match(aiView, /method:'PUT'/)
   assert.match(aiView, /api\('\/api\/v1\/ai\/workflows', \{ method:'POST'/)
   for (const marker of ['/api/v1/ai/workflows/admin', "method:'DELETE'", '工作流插件管理', '已配置的工作流插件', '内置只读', '启用', '禁用', '删除']) {
     assert.match(aiView, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), `missing workflow management marker: ${marker}`)
   }
+  for (const marker of ['agentPreviewVisible', 'agentPreviewJson', 'viewAgent', '查看内置 Agent', '内置 Agent Manifest（只读）']) {
+    assert.match(aiView, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), `missing built-in Agent preview marker: ${marker}`)
+  }
+  for (const workflowId of ['alarm-handler', 'device-health-inspector', 'protocol-assistant']) {
+    assert.match(aiView, new RegExp(workflowId), `missing non-chat workflow classification: ${workflowId}`)
+  }
+  assert.match(aiView, /const nonChatWorkflowIds = new Set\(\[/)
+  assert.match(aiView, /isChatWorkflow\(item\)/)
+  assert.match(aiView, /value\.items\.filter\(isChatWorkflow\)/)
+  assert.match(aiView, /@click="viewAgent\(item\)"/)
+  assert.match(aiView, /@click="startCreateAgent"/)
+  assert.match(aiView, /function startCreateAgent\(\)/)
+  assert.match(aiView, /agentEditorVisible\.value = true/)
+  assert.match(aiView, /function openAgentManagement\(\)/)
+  assert.match(aiView, /agentEditorRef/)
+  assert.match(aiView, /@click="openAgentManagement"/)
   assert.match(aiView, /method:'PUT'/)
   assert.match(apiSource, /export async function apiStream/)
   assert.match(apiSource, /request\.cache = 'no-store'/)
-  assert.match(aiView, /providerProfileStorageKey/)
-  assert.match(aiView, /provider:custom \? 'openai-compatible' : sandbox\.provider/)
+  assert.doesNotMatch(aiView, /providerProfileStorageKey|testPlugin|sandbox\.provider/)
   assert.match(apiSource, /text\/event-stream/)
   assert.match(sseSource, /getReader\(\)/)
 })
@@ -210,28 +241,28 @@ test('AI answers render safe Markdown in chat and health inspection', async () =
   assert.match(inspectionView, /<MarkdownContent[^>]*:source="report\.aiAdvice"/)
 })
 
-test('switching away from the add-custom Provider hides its profile editor', async () => {
+test('Agent management is standalone and Provider testing is removed from the AI workbench', async () => {
+  const app = await readFile(new URL('src/App.vue', root), 'utf8')
   const aiView = await readFile(new URL('src/views/AiView.vue', root), 'utf8')
-  const providerWatch = aiView.match(/watch\(\(\) => sandbox\.provider, \(\) => \{([\s\S]*?)\n\}\)/)?.[1]
-  assert.ok(providerWatch, 'Provider selection watcher must remain explicit')
-  const nonCustomBranch = providerWatch.split('if (sandbox.provider === customProviderOptionId)')[1]
-  assert.match(nonCustomBranch, /providerProfileEditorVisible\.value = false/, 'built-in Provider selection must close the custom profile editor')
+  const knowledgeView = await readFile(new URL('src/views/KnowledgeView.vue', root), 'utf8')
+  assert.match(app, /knowledge: \{ title: 'Agent 知识库'/)
+  assert.match(aiView, /<el-dialog v-model="agentEditorVisible" :title="editingAgentId \? '编辑 Agent' : '新建 Agent'"/)
+  assert.match(aiView, /function cancelAgentEditor\(\)/)
+  assert.doesNotMatch(aiView, /Provider 测试|连接并测试插件|\/api\/v1\/ai\/providers\/test/)
+  assert.doesNotMatch(aiView, /<el-menu-item index="knowledge"|<el-menu-item index="provider"/)
+  assert.match(knowledgeView, /Agent 知识库策略/)
 })
 
-test('protocol mappings, parsed raw results and device connection state are visible', async () => {
+test('protocol v2 point-table, package release and device collection flows are visible', async () => {
   const protocols = await readFile(new URL('src/views/ProtocolsView.vue', root), 'utf8')
   const raw = await readFile(new URL('src/views/RawView.vue', root), 'utf8')
   const devices = await readFile(new URL('src/views/DevicesView.vue', root), 'utf8')
   const app = await readFile(new URL('src/App.vue', root), 'utf8')
   const integration = await readFile(new URL('src/views/IntegrationView.vue', root), 'utf8')
-  const labels = await readFile(new URL('src/labels.js', root), 'utf8')
-  for (const label of ['可配置解析', '配置 JSON', '解析调试', '标准解析结果', '解析脚本']) assert.match(`${protocols}\n${raw}`, new RegExp(label), `missing label: ${label}`)
-  assert.match(protocols, /configurable_json_parser/)
-  assert.match(protocols, /configurable_hex_parser/)
-  assert.match(protocols, /javascript_sandbox_parser/)
-  assert.match(protocols, /go_protocol_parser/)
-  assert.match(protocols, /uploadArtifact/)
-  assert.match(labels, /受限 JavaScript 解析器/)
+  for (const label of ['点表快速接入', '上传自定义协议包', '不可变版本', '设备采集实例', '连接测试']) assert.match(protocols, new RegExp(label), `missing label: ${label}`)
+  for (const route of ['/api/v2/protocols', '/api/v2/modbus-tcp/import', '/api/v2/device-access-profiles']) assert.match(protocols, new RegExp(route.replaceAll('/', '\\/')))
+  assert.match(protocols, /FC01\/02\/03\/04/)
+  assert.match(protocols, /manifest\.yaml/)
   assert.match(app, /label:'设备与数据'/)
   assert.match(app, /title:'接入指南'/)
   assert.match(integration, /设备连接指南/)
@@ -288,16 +319,12 @@ test('backup center exposes history, artifact downloads and restore drills', asy
   assert.match(app, /backups/)
 })
 
-test('protocol assistant and health inspection pages expose the review workflow', async () => {
-  const assistant = await readFile(new URL('src/views/ProtocolAssistantView.vue', root), 'utf8')
+test('device access and health inspection pages expose the new runtime workflow', async () => {
+  const protocol = await readFile(new URL('src/views/ProtocolsView.vue', root), 'utf8')
   const inspection = await readFile(new URL('src/views/HealthInspectionView.vue', root), 'utf8')
   const app = await readFile(new URL('src/App.vue', root), 'utf8')
-  for (const label of ['协议接入助手', '协议文件', '点表 / 协议片段', '生成 Go 协议映射', '字段映射', '线圈地址', '运行解析预览', '保存并发布 Go 协议包']) {
-    assert.match(assistant, new RegExp(label), `missing protocol assistant label: ${label}`)
-  }
-  assert.doesNotMatch(assistant, /解析 JavaScript|解析表达式|function parse/)
-  for (const route of ['/api/v1/ai/protocol-assistant/generate', '/api/v1/ai/protocol-assistant/preview', '/api/v1/ai/protocol-assistant/publish']) {
-    assert.match(assistant, new RegExp(route.replaceAll('/', '\\/')))
+  for (const label of ['上传点表即可连接 Modbus TCP 设备', '校验、发布并启用', '协议与版本', '设备采集实例']) {
+    assert.match(protocol, new RegExp(label), `missing protocol v2 label: ${label}`)
   }
   for (const label of ['设备健康巡检', '立即巡检', '状态正常', '活动告警', 'AI 巡检建议']) {
     assert.match(inspection, new RegExp(label), `missing inspection label: ${label}`)
@@ -305,9 +332,9 @@ test('protocol assistant and health inspection pages expose the review workflow'
   assert.match(inspection, /api\('\/api\/v1\/ai\/health-inspection'/)
   assert.doesNotMatch(inspection, /onMounted\(run\)/)
   assert.match(inspection, /点击“立即巡检”开始检查/)
-  assert.match(app, /title:'协议接入助手'/)
+  assert.match(app, /title: '设备接入'/)
   assert.match(app, /title:'智能巡检'/)
-  assert.match(app, /protocolAssistant/)
+  assert.doesNotMatch(app, /protocolAssistant/)
   assert.match(app, /inspection/)
 })
 

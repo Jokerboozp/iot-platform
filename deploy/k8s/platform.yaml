@@ -10,6 +10,7 @@ data:
   IOT_CORS_ALLOWED_ORIGINS: ""
   IOT_DEV_MODE: "false"
   IOT_OFFLINE_SCAN_INTERVAL: "30s"
+  IOT_MODBUS_ALLOWED_CIDRS: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7"
   IOT_KAFKA_BROKERS: "redpanda.iot-infra.svc:9092"
   IOT_MQTT_BROKER: "ssl://emqx.iot-infra.svc:8883"
   IOT_MINIO_ENDPOINT: "minio.iot-infra.svc:9000"

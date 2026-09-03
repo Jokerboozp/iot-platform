@@ -4,7 +4,7 @@
 
 当前代码库支持三种常用运行方式：使用 Docker Compose 启动前后端与基础设施；分开启动 Go API 和 Vue 前端进行本地开发；或只构建前端静态资源并交给现有 Nginx/Ingress 部署。文档按当前源码和部署配置编写；生产容量、灾备、TLS/ACL 和第三方平台验收仍需在目标环境单独完成。
 
-> 说明：JetLinks 上游协议包不属于本项目交付范围。协议接入助手使用 Go 解析 Excel/点表并生成 Go 映射，不生成 JavaScript；协议开发页仍保留受限 JavaScript 解析器作为管理员维护的独立扩展点。
+> 说明：设备协议已经重构为独立的 Protocol v2 子系统，不依赖 JetLinks。简单设备上传 CSV/XLSX 点表后由内置 Modbus TCP 运行时主动采集；复杂设备上传带 Manifest、目标平台 Worker 和样例测试的版本化 ZIP，校验发布后无需重启 API。
 
 ## 文档导航
 
@@ -357,9 +357,8 @@ kubectl apply -f deploy/k8s/platform.yaml
 |---|---|
 | 运行总览 | 设备、在线率、告警趋势和重点态势 |
 | 设备管理 | 注册、启停、凭证轮换、连接指南和实时状态 |
-| 产品管理 | 产品模型、物模型属性和协议包绑定 |
-| 协议开发 | 协议包版本、JSON/Hex/JavaScript/Go Worker 解析器配置和样本调试 |
-| 协议接入助手 | 上传协议/点表，生成 Go 字段映射，表单修改字段，样本预览并发布；不生成 JavaScript |
+| 产品管理 | 产品模型和当前协议版本绑定 |
+| 设备接入 | 点表直连、自定义 ZIP 协议包、不可变版本、设备采集实例和连接测试 |
 | 接入指南 | HTTP/MQTT 上报参数、设备凭证、Topic 和数据联调；不是重复的设备注册入口 |
 | 摄像头映射 | 摄像头品牌、名称、点位、楼层/建筑/房间和设备关联；直播流由外部视频平台提供 |
 | 告警中心 | 告警查询、确认、抑制、恢复和关闭 |
@@ -367,27 +366,22 @@ kubectl apply -f deploy/k8s/platform.yaml
 | 原始报文 | 证据链检索、下载、审计和回放 |
 | 告警规则 | JSON/Gengine 规则、冲突检测和 AI 草稿 |
 | 知识库管理 | 上传消防规范、设备手册和处置 SOP，查看索引状态 |
-| AI 工作流 | DeepSeek Harness 插件、Provider 测试、流式对话和工具轨迹 |
+| AI 工作流 | DeepSeek Harness 插件、流式对话、工具轨迹和 Agent 管理 |
 | 测试设备 | 自动准备绑定产品、协议和默认报文，可发送数据、事件、报警和恢复报文 |
 
-“AI 告警研判”是业务工作流，不是独立菜单。进入“AI 工作流”后，在左侧“运行工作流”卡片的“工作流插件”下拉框中选择：
+“AI 工作流”中的聊天下拉框只展示交互式聊天助手：
 
-- AI 告警研判
 - AI 运维助手
 - AI 系统状态助手
-- AI 设备健康巡检
-- AI 协议接入助手
 
-“协议接入助手”支持 PDF、Word、Excel/CSV 点表和直接粘贴文本。XLSX 点表由 Go 直接还原共享字符串和行列关系，生成 `modbus_coil_parser` 地址映射，不调用 AI，也不生成 JavaScript；其他资料在配置了 AI Provider 时生成 Go 字段映射草稿。发布前必须由操作员在字段表单中确认字段名、地址、数据类型、正常值、报出值、消息类型和样本结果。发布内容是 Go 映射协议包，发布后到“产品管理”把协议包绑定到产品，设备原始报文即可走同一解析链路。
+“AI 告警研判”和“AI 设备健康巡检”是业务专用工作流，分别由告警中心和智能巡检页面调用，不显示在聊天工作流下拉框中。旧的 AI 协议接入助手接口暂时保留兼容，但不再出现在主菜单，新设备统一从“设备接入”进入。
 
-对于不属于常见 JSON 或固定字段十六进制格式的新设备，按复杂度选择解析路径：
+设备接入只保留两条主路径：
 
-1. 在“协议开发”中使用配置化 JSON/Hex 映射，适合字段偏移、类型、缩放和枚举规则稳定的设备。
-2. 在“协议接入助手”上传协议文件或点表；XLSX 由 Go 生成 Modbus 映射，其他资料由 AI 生成 Go 映射草稿。
-3. 在字段表单中修改字段名、地址、数据类型、正常值、报出值和消息类型，使用样本报文预览标准消息。
-4. 确认发布后，解析映射以 Go 协议包配置保存；变长、TLV、状态机或请求/应答协议先选择 `go_protocol_parser` 并上传已编译 Go Worker，再到产品管理绑定协议包。
+1. **点表快速接入**：上传 CSV/XLSX，平台校验地址歧义、功能码、数据类型、字节序、缩放和重复标识，编译 FC01/02/03/04 读取块；可同时创建产品、设备和 Modbus TCP 连接实例并立即轮询。
+2. **自定义协议包**：上传版本化 ZIP。根目录必须包含 `manifest.yaml`，立即发布时还必须包含 `samples/cases.json`；平台核对当前 OS/CPU Worker、路径和 SHA-256，并真实运行全部样例后发布。
 
-受限 JavaScript 仅是“协议开发”页面的独立扩展点，不属于“协议接入助手”的生成或发布链路。如确需使用，脚本不能访问网络、文件、环境变量、平台 API 或设备控制能力。
+协议定义、协议 release、点表 release、产品绑定和设备连接参数分别持久化。`protocolId + version` 发布后不可覆盖；切换产品时保留上一版本并支持回滚。主动 Modbus 响应仍先写入 RawMessage，再进入 Parser Registry、StandardMessage、Kafka/MQTT、规则与告警链路。
 
 消息类型在界面显示中文名称，接口和 Go Worker 使用稳定代码：
 
@@ -400,7 +394,7 @@ kubectl apply -f deploy/k8s/platform.yaml
 | 指令应答 | `COMMAND_REPLY` | 设备对平台指令的响应 |
 | 日志上报 | `LOG_REPORT` | 运行日志或诊断信息 |
 
-字段映射、Excel 处理和编译 Go Worker 的完整约定见 [配置驱动协议](docs/CONFIGURABLE_PROTOCOLS.md) 和 [Go 协议包接入](docs/GO_PROTOCOL_PACKAGES.md)。
+完整架构、点表列定义、ZIP 目录和验收边界见 [设备协议包与点表接入方案](docs/DEVICE_PROTOCOL_ACCESS_DESIGN.md)。示例文件位于 `examples/protocol-v2`。
 
 ### 智能巡检操作约定
 
@@ -581,7 +575,7 @@ AI 工作台
   -> 平台只读 MCP 工具
 ```
 
-当前插件：
+当前 Harness 插件完整清单（其中业务专用工作流不属于聊天插件管理清单）：
 
 | ID | 界面名称 | 用途 |
 |---|---|---|
@@ -591,7 +585,7 @@ AI 工作台
 | `device-health-inspector` | AI 设备健康巡检 | 设备状态、数据新鲜度、活动告警和维修优先级建议 |
 | `protocol-assistant` | AI 协议接入助手 | 协议文档、点表和样本报文的字段映射草稿 |
 
-这些是 Harness 的内置插件。动态 Agent 会保存在 Harness 数据卷中，数量和名称以“AI 工作流 → 管理中心 → Agent 管理”的实时清单为准。
+这些是 Harness 的内置插件。动态 Agent 会保存在 Harness 数据卷中，数量和名称以“AI 工作流 → Agent 管理”的实时清单为准。
 
 ### 启动 Harness
 
@@ -627,11 +621,11 @@ docker compose --profile harness logs -f deepseek-harness platform-api
 - 模型和最大输出长度配置
 - 为每个工作流单独配置知识库绑定
 
-管理员进入“管理中心 → Agent 管理”后，还可以查看启用和禁用的完整清单。动态 Agent 支持 JSON 编辑、启用/禁用和删除；内置插件只读。保存或状态变更后不需要重新部署容器。
+管理员进入“AI 工作流 → Agent 管理”后，还可以查看启用和禁用的完整清单。动态 Agent 支持 JSON 编辑、启用/禁用和删除；内置插件只读。点击“新建 Agent”会在弹窗中提交 Manifest，保存或状态变更后不需要重新部署容器。
 
-### Agent 知识库策略
+### Agent 知识库
 
-展开“AI 工作流 → Agent 知识库”，可以按租户为当前 Agent 配置：
+知识库统一从左侧“Agent 知识库”进入；文档管理、Agent 归属和检索策略集中在同一页面，避免在 AI 工作流中重复配置。管理员或运维人员可以按租户为当前 Agent 配置：
 
 - 查看当前 Agent 已直接绑定的文档数量。
 - 选择按需检索、每次强制检索或完全禁用知识库。
@@ -645,7 +639,7 @@ MCP 服务端只允许检索该 Agent 的文档；模型无法通过修改工具
 
 ### 新增业务插件
 
-管理员可以直接在“AI 工作流 → Agent 管理”查看完整插件清单。动态 Agent 支持编辑 Manifest、启用/禁用和删除；“新建 Agent”仍可通过 JSON 粘贴 Manifest。平台会执行两层校验：Go API 检查字段和只读工具白名单，Harness 再验证完整 Manifest。保存后 Agent 立即出现在工作流下拉框，不需要重建容器。
+管理员可以直接在“AI 工作流 → Agent 管理”查看完整插件清单。动态 Agent 支持编辑 Manifest、启用/禁用和删除；“新建 Agent”在独立弹窗中通过 JSON 粘贴 Manifest。平台会执行两层校验：Go API 检查字段和只读工具白名单，Harness 再验证完整 Manifest。保存后 Agent 立即出现在工作流下拉框，不需要重建容器。
 
 动态 Agent 保存在 `deepseek-harness-data` 卷的 `/data/plugins`，容器重启后仍然存在。内置 `alarm-handler`、`ops-assistant`、`system-observer`、`device-health-inspector` 和 `protocol-assistant` 只能查看，禁止覆盖、修改或删除；自定义 Agent 使用相同 ID 保存会更新。
 
@@ -691,7 +685,7 @@ mcp__iot__create_rule_draft
 
 ## 12. 其他 AI Provider
 
-不使用 Harness 时，也可以启用 Eino Provider 链路，用于告警分析、规则草稿、报表和 Provider 在线测试。
+不使用 Harness 时，也可以启用 Eino Provider 链路，用于告警分析、规则草稿和报表等后端能力。
 
 DeepSeek 示例：
 
@@ -723,11 +717,11 @@ docker compose restart platform-api
 Compose 默认已经启动 Ollama 和 Weaviate；上面的命令只用于显式重建或补拉模型。Weaviate 数据保存在
 `weaviate-data` 命名卷，Ollama 模型保存在 `ollama-data` 命名卷。
 
-AI 页面“管理中心 → Provider 测试与配置”支持 DeepSeek、Ollama 和 OpenAI-compatible 连接测试。管理员可以添加自定义 OpenAI-compatible Provider，保存名称、Provider ID、Base URL 和模型配置到当前浏览器/租户的配置中；API Key 只在本次测试使用，不写入浏览器配置、数据库或审计日志。自定义 Provider 的 Base URL 来源必须加入 `IOT_AI_PROVIDER_TEST_ALLOWED_ORIGINS` 白名单，平台不会为了测试关闭 SSRF 防护。
+AI 工作流页面只展示当前模型服务状态，不再提供 Provider 在线测试或自定义 Provider 配置入口。告警分析、规则草稿等后端能力仍按服务端配置选择 Eino Provider；Provider 凭据和地址不由前端保存或修改。
 
-## 13. 知识库管理
+## 13. Agent 知识库
 
-进入左侧“知识库管理”页面可以：
+进入左侧“Agent 知识库”页面可以：
 
 - 拖放或选择单个知识文档。
 - 必须直接选择一个 Agent；文档不会再通过产品、分类和标签叠加筛选。
@@ -735,7 +729,7 @@ AI 页面“管理中心 → Provider 测试与配置”支持 DeepSeek、Ollama
 - 上传原文件并自动提取、分片和建立索引。
 - 查看当前租户的文档、索引状态、分片数、大小和上传时间。
 - 点击“详情”可以查看实际切片：切片序号、Unicode 字符范围、重叠字符数、切片正文和是否已向量化；详情接口为 `GET /api/v1/knowledge/documents/{id}`。
-- 进入“AI 工作流 → 管理中心 → Agent 知识库”调整该 Agent 的检索模式、TopK 和最低相似度。
+- 在本页面的“Agent 知识库策略”区域调整该 Agent 的检索模式、TopK、最低相似度和无匹配知识时的处理方式。
 
 支持 PDF、DOCX、PPTX、XLSX、ODT、ODP、ODS、HTML/XML 和 UTF-8 文本，单文件最大 32 MiB。扫描版 PDF 需要先完成 OCR。
 
@@ -798,6 +792,15 @@ GET/POST/PUT /api/v1/products[/{id}]
 GET/POST/PUT /api/v1/protocol-packages[/{id}]
 POST         /api/v1/protocol-packages/{id}/artifact
 POST         /api/v1/protocol-packages/{id}/test
+GET/POST     /api/v2/protocols
+GET/POST     /api/v2/protocols/{id}/releases
+POST         /api/v2/protocols/{id}/package-releases
+POST         /api/v2/protocols/{id}/releases/{version}/publish
+POST         /api/v2/products/{id}/protocol-binding
+POST         /api/v2/products/{id}/protocol-binding/rollback
+POST         /api/v2/modbus-tcp/import
+GET/POST/PUT /api/v2/device-access-profiles[/{id}]
+POST         /api/v2/device-access-profiles/{id}/test
 GET/POST/PUT /api/v1/device-registry[/{id}]
 POST         /api/v1/discovered-devices/{id}/register
 POST         /api/v1/device-registry/{id}/credentials
@@ -972,7 +975,7 @@ go run ./cmd/loadgen -url http://localhost:8080 -token $login.accessToken `
 
 ## 21. 常见问题
 
-### 看不到“AI 告警研判”或工作流下拉框
+### 看不到“AI 运维助手”或工作流下拉框
 
 1. 确认使用 `--profile harness` 启动：
 
@@ -999,7 +1002,7 @@ go run ./cmd/loadgen -url http://localhost:8080 -token $login.accessToken `
      platform-api deepseek-harness platform-web
    ```
 
-5. 退出旧会话，强制刷新并重新登录。进入“AI 工作流 → 运行工作流 → 工作流插件”。
+5. 退出旧会话，强制刷新并重新登录。进入“AI 工作流 → 运行工作流 → 工作流插件”；告警研判、设备巡检和协议接入助手请从各自业务页面进入。
 
 ### 修改 `.env` 后数据库认证失败
 

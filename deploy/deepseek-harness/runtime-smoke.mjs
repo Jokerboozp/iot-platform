@@ -7,8 +7,10 @@ import { pathToFileURL } from 'node:url'
 const harnessRoot = process.env.DSH_SOURCE_ROOT ?? '/harness'
 const runtimeRoot = process.env.DSH_RUNTIME_NODE_ROOT ?? join(harnessRoot, 'runtime-node')
 const deploymentRoot = process.env.DSH_DEPLOYMENT_ROOT ?? join(harnessRoot, 'examples', 'iot-ops-agent')
-const runtimeBin = join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
-const sdkClientModule = join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh-sdk-client', 'lib', 'index.js')
+const runtimeBin = process.env.DSH_RUNTIME_BIN
+  ?? join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+const sdkClientModule = process.env.DSH_SDK_CLIENT_MODULE
+  ?? join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh-sdk-client', 'lib', 'index.js')
 const patchFile = join(deploymentRoot, 'cordis.yml')
 
 const [{ McpServer }, { StreamableHTTPServerTransport }, { DeepSeekHarness }] = await Promise.all([

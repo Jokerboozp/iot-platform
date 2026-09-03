@@ -69,6 +69,14 @@ func (e *Engine) Start(ctx context.Context) error {
 }
 func (e *Engine) IngestRaw(ctx context.Context, raw model.RawMessage) (model.RawArchiveIndex, bool, error) {
 	raw.Normalize(e.Clock.Now())
+	if raw.ProtocolID == "" || raw.ProtocolVersion == "" {
+		if binding, err := e.Repo.GetProductProtocolBinding(ctx, raw.TenantID, raw.ProductID); err == nil {
+			raw.ProtocolID, raw.ProtocolVersion = binding.ProtocolID, binding.Version
+			if release, releaseErr := e.Repo.GetProtocolRelease(ctx, raw.TenantID, binding.ProtocolID, binding.Version); releaseErr == nil {
+				raw.PointTableVersion = release.PointTableVersion
+			}
+		}
+	}
 	if err := raw.Validate(); err != nil {
 		return model.RawArchiveIndex{}, false, err
 	}
@@ -222,8 +230,28 @@ func (e *Engine) handleRaw(ctx context.Context, b []byte) error {
 	}
 	var msg *model.StandardMessage
 	var err error
+	protocolID, protocolVersion := raw.ProtocolID, raw.ProtocolVersion
+	if protocolID == "" || protocolVersion == "" {
+		if binding, bindingErr := e.Repo.GetProductProtocolBinding(ctx, raw.TenantID, raw.ProductID); bindingErr == nil {
+			protocolID, protocolVersion = binding.ProtocolID, binding.Version
+		}
+	}
+	if protocolID != "" && protocolVersion != "" {
+		release, releaseErr := e.Repo.GetProtocolRelease(ctx, raw.TenantID, protocolID, protocolVersion)
+		if releaseErr != nil {
+			err = fmt.Errorf("protocol release %s@%s not found: %w", protocolID, protocolVersion, releaseErr)
+		} else if release.Status == "REVOKED" {
+			err = fmt.Errorf("protocol release %s@%s is revoked", protocolID, protocolVersion)
+		} else {
+			raw.ProtocolID, raw.ProtocolVersion = protocolID, protocolVersion
+			if raw.PointTableVersion == "" {
+				raw.PointTableVersion = release.PointTableVersion
+			}
+			msg, err = e.Parsers.ParseWithConfig(release.ParserType, release.Config, raw)
+		}
+	}
 	product, productErr := e.Repo.GetProduct(ctx, raw.TenantID, raw.ProductID)
-	if productErr == nil && product.ProtocolPackageID != "" {
+	if msg == nil && err == nil && productErr == nil && product.ProtocolPackageID != "" {
 		pkg, pkgErr := e.Repo.GetProtocolPackage(ctx, raw.TenantID, product.ProtocolPackageID)
 		if pkgErr == nil && pkg.Status == "PUBLISHED" {
 			msg, err = e.Parsers.ParseVersionWithConfig(pkg.ParserType, raw.ParserVersion, pkg.Config, raw)
@@ -415,7 +443,7 @@ func (e *Engine) raiseDirectAlarm(ctx context.Context, msg model.StandardMessage
 	alarmType, level := directAlarmMetadata(msg)
 	a := model.Alarm{
 		ID: id("alarm"), TenantID: msg.TenantID, RuleID: directAlarmRuleID(alarmType), TriggerID: msg.MessageID,
-		DeviceID: msg.DeviceID, AlarmType: alarmType, AlarmLevel: level, Status: "ACTIVE", Source: "device",
+		DeviceID: msg.DeviceID, DeviceName: e.alarmDeviceName(ctx, msg.TenantID, msg.DeviceID), AlarmType: alarmType, AlarmLevel: level, Status: "ACTIVE", Source: "device",
 		CityCode: tag(msg, "cityCode", "unknown"), DistrictCode: tag(msg, "districtCode", "unknown"),
 		BuildingID: tag(msg, "buildingId", "unknown"), DeviceType: tag(msg, "deviceType", msg.ProductID),
 		AreaID: tag(msg, "areaId", ""), FirstTriggeredAt: now, LastTriggeredAt: now, TriggerCount: 1,
@@ -439,6 +467,14 @@ func (e *Engine) raiseDirectAlarm(ctx context.Context, msg model.StandardMessage
 
 func directAlarmRuleID(alarmType string) string {
 	return directAlarmRulePrefix + alarmType
+}
+
+func (e *Engine) alarmDeviceName(ctx context.Context, tenantID, deviceID string) string {
+	device, err := e.Repo.GetManagedDevice(ctx, tenantID, deviceID)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(device.Name)
 }
 
 func firstMessageValue(msg model.StandardMessage, keys ...string) any {
@@ -616,7 +652,7 @@ func (e *Engine) recoverDirectAlarms(ctx context.Context, msg model.StandardMess
 }
 func (e *Engine) raiseRuleAlarm(ctx context.Context, rule model.AlarmRule, msg model.StandardMessage) (model.Alarm, bool, error) {
 	now := e.Clock.Now().UnixMilli()
-	a := model.Alarm{ID: id("alarm"), TenantID: msg.TenantID, RuleID: rule.ID, TriggerID: msg.MessageID, DeviceID: msg.DeviceID, AlarmType: rule.AlarmType, AlarmLevel: rule.Level, Status: "ACTIVE", Source: "device", CityCode: tag(msg, "cityCode", "unknown"), DistrictCode: tag(msg, "districtCode", "unknown"), BuildingID: tag(msg, "buildingId", "unknown"), DeviceType: tag(msg, "deviceType", msg.ProductID), AreaID: tag(msg, "areaId", ""), FirstTriggeredAt: now, LastTriggeredAt: now, TriggerCount: 1, Details: map[string]any{"message": msg, "ruleName": rule.Name}}
+	a := model.Alarm{ID: id("alarm"), TenantID: msg.TenantID, RuleID: rule.ID, TriggerID: msg.MessageID, DeviceID: msg.DeviceID, DeviceName: e.alarmDeviceName(ctx, msg.TenantID, msg.DeviceID), AlarmType: rule.AlarmType, AlarmLevel: rule.Level, Status: "ACTIVE", Source: "device", CityCode: tag(msg, "cityCode", "unknown"), DistrictCode: tag(msg, "districtCode", "unknown"), BuildingID: tag(msg, "buildingId", "unknown"), DeviceType: tag(msg, "deviceType", msg.ProductID), AreaID: tag(msg, "areaId", ""), FirstTriggeredAt: now, LastTriggeredAt: now, TriggerCount: 1, Details: map[string]any{"message": msg, "ruleName": rule.Name}}
 	a.Cameras, _ = e.ListCameraSummaries(ctx, msg.TenantID, msg.DeviceID)
 	saved, created, err := e.Repo.UpsertAlarm(ctx, a)
 	if err != nil {
@@ -1003,7 +1039,15 @@ func (e *Engine) AnalyzeAlarm(ctx context.Context, tenantID, alarmID string) (mo
 		if e.Metrics != nil {
 			e.Metrics.Inc("ai_analysis_failed_total")
 		}
-		analysis = model.AIAnalysis{AlarmID: alarm.ID, RiskLevel: alarm.AlarmLevel, CreatedAt: e.Clock.Now().UnixMilli(), Error: err.Error()}
+		analysis = model.AIAnalysis{
+			AlarmID:       alarm.ID,
+			Summary:       "AI 研判暂时失败，已保留告警供人工研判。",
+			RiskLevel:     alarm.AlarmLevel,
+			Model:         aiModelName(e.AI),
+			PromptVersion: "fallback-v2",
+			CreatedAt:     e.Clock.Now().UnixMilli(),
+			Error:         err.Error(),
+		}
 	}
 	if err == nil && e.Metrics != nil {
 		e.Metrics.Inc("ai_analysis_success_total")
@@ -1017,6 +1061,19 @@ func (e *Engine) AnalyzeAlarm(ctx context.Context, tenantID, alarmID string) (mo
 	_ = e.Bus.Publish(ctx, model.TopicAlarmAIAnalysis, alarm.ID, payload)
 	_ = e.Realtime.Publish(ctx, alarm.MQTTTopic("ai-analysis"), payload, 1, false)
 	return analysis, nil
+}
+
+func aiModelName(client ports.AIClient) string {
+	if provider, ok := client.(ports.AIInspectable); ok {
+		info := provider.ProviderInfo()
+		if name := strings.TrimSpace(info.Model); name != "" {
+			return name
+		}
+		if id := strings.TrimSpace(info.ID); id != "" {
+			return id
+		}
+	}
+	return "unavailable"
 }
 func (e *Engine) SetAlarmStatus(ctx context.Context, tenant, alarmID, status, actor string) (model.Alarm, error) {
 	a, err := e.Repo.GetAlarm(ctx, tenant, alarmID)

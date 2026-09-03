@@ -99,6 +99,19 @@ func (s *Server) routes() {
 	s.router.PUT("/api/v1/protocol-packages/:id", s.authorize("operator"), s.endpoint(s.saveProtocolPackage, "id"))
 	s.router.POST("/api/v1/protocol-packages/:id/artifact", s.authorize("operator"), s.endpoint(s.uploadProtocolArtifact, "id"))
 	s.router.POST("/api/v1/protocol-packages/:id/test", s.authorize("operator"), s.endpoint(s.testProtocolPackage, "id"))
+	s.router.GET("/api/v2/protocols", s.authorize("viewer"), s.endpoint(s.protocolDefinitionsV2))
+	s.router.POST("/api/v2/protocols", s.authorize("operator"), s.endpoint(s.saveProtocolDefinitionV2))
+	s.router.GET("/api/v2/protocols/:id/releases", s.authorize("viewer"), s.endpoint(s.protocolReleasesV2, "id"))
+	s.router.POST("/api/v2/protocols/:id/releases", s.authorize("operator"), s.endpoint(s.createProtocolReleaseV2, "id"))
+	s.router.POST("/api/v2/protocols/:id/package-releases", s.authorize("operator"), s.endpoint(s.uploadProtocolPackageV2, "id"))
+	s.router.POST("/api/v2/protocols/:id/releases/:version/publish", s.authorize("operator"), s.endpoint(s.publishProtocolReleaseV2, "id", "version"))
+	s.router.POST("/api/v2/products/:id/protocol-binding", s.authorize("operator"), s.endpoint(s.bindProductProtocolV2, "id"))
+	s.router.POST("/api/v2/products/:id/protocol-binding/rollback", s.authorize("operator"), s.endpoint(s.rollbackProductProtocolV2, "id"))
+	s.router.POST("/api/v2/modbus-tcp/import", s.authorize("operator"), s.endpoint(s.importModbusTCPV2))
+	s.router.GET("/api/v2/device-access-profiles", s.authorize("viewer"), s.endpoint(s.deviceAccessProfilesV2))
+	s.router.POST("/api/v2/device-access-profiles", s.authorize("operator"), s.endpoint(s.saveDeviceAccessProfileV2))
+	s.router.PUT("/api/v2/device-access-profiles/:id", s.authorize("operator"), s.endpoint(s.saveDeviceAccessProfileV2, "id"))
+	s.router.POST("/api/v2/device-access-profiles/:id/test", s.authorize("operator"), s.endpoint(s.testDeviceAccessProfileV2, "id"))
 	s.router.GET("/api/v1/device-registry", s.authorize("viewer"), s.endpoint(s.deviceRegistry))
 	s.router.POST("/api/v1/device-registry", s.authorize("operator"), s.endpoint(s.saveManagedDevice))
 	s.router.PUT("/api/v1/device-registry/:id", s.authorize("operator"), s.endpoint(s.saveManagedDevice, "id"))
@@ -1400,6 +1413,7 @@ func (s *Server) aiWorkflows(w http.ResponseWriter, r *http.Request) {
 		writeList(w, 200, []ports.AIWorkflowPlugin{}, 0, pagination, map[string]any{"configured": true, "mode": "harness", "healthy": false, "healthMessage": "AI workflow harness is unavailable"})
 		return
 	}
+	items = chatWorkflowPlugins(items)
 	items, total := pageItems(items, pagination)
 	writeList(w, 200, items, total, pagination, map[string]any{"configured": true, "mode": "harness", "healthy": true, "healthMessage": "AI workflow harness is reachable"})
 }
@@ -1419,6 +1433,7 @@ func (s *Server) aiWorkflowManifests(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusBadGateway, "AI workflow harness plugin catalog is unavailable")
 		return
 	}
+	items = chatWorkflowManifests(items)
 	items, total := pageItems(items, pagination)
 	writeList(w, http.StatusOK, items, total, pagination, map[string]any{
 		"configured":    true,
@@ -2581,6 +2596,34 @@ func cleanStringList(values []string, maximum, maxLength int) []string {
 	}
 	return out
 }
+
+// The chat workbench only exposes interactive assistants. These workflows are
+// invoked by their dedicated business pages/services and must not be treated
+// as user-selectable chatbots or configurable chat Agents.
+func isChatWorkflowID(id string) bool {
+	return !oneOf(strings.TrimSpace(id), "alarm-handler", "device-health-inspector", "protocol-assistant")
+}
+
+func chatWorkflowPlugins(items []ports.AIWorkflowPlugin) []ports.AIWorkflowPlugin {
+	visible := make([]ports.AIWorkflowPlugin, 0, len(items))
+	for _, item := range items {
+		if isChatWorkflowID(item.ID) {
+			visible = append(visible, item)
+		}
+	}
+	return visible
+}
+
+func chatWorkflowManifests(items []ports.AIWorkflowManifest) []ports.AIWorkflowManifest {
+	visible := make([]ports.AIWorkflowManifest, 0, len(items))
+	for _, item := range items {
+		if isChatWorkflowID(item.ID) {
+			visible = append(visible, item)
+		}
+	}
+	return visible
+}
+
 func oneOf(value string, allowed ...string) bool {
 	for _, candidate := range allowed {
 		if value == candidate {

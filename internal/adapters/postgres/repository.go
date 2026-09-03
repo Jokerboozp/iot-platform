@@ -182,6 +182,192 @@ func (r *Repository) ListProtocolPackagesPage(ctx context.Context, tenant string
 	}
 	return items, total, rows.Err()
 }
+
+func (r *Repository) SaveProtocolDefinition(ctx context.Context, v model.ProtocolDefinition) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	_, err = r.pool.Exec(ctx, `INSERT INTO protocol_definition(tenant_id,id,body) VALUES($1,$2,$3) ON CONFLICT(tenant_id,id) DO UPDATE SET body=excluded.body,updated_at=now()`, v.TenantID, v.ID, b)
+	return err
+}
+func (r *Repository) GetProtocolDefinition(ctx context.Context, tenant, id string) (model.ProtocolDefinition, error) {
+	var v model.ProtocolDefinition
+	var b []byte
+	err := r.pool.QueryRow(ctx, `SELECT body FROM protocol_definition WHERE tenant_id=$1 AND id=$2`, tenant, id).Scan(&b)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return v, ErrNotFound
+	}
+	if err == nil {
+		err = json.Unmarshal(b, &v)
+	}
+	return v, err
+}
+func (r *Repository) ListProtocolDefinitions(ctx context.Context, tenant string) ([]model.ProtocolDefinition, error) {
+	rows, err := r.pool.Query(ctx, `SELECT body FROM protocol_definition WHERE ($1='' OR tenant_id=$1) ORDER BY updated_at DESC,id`, tenant)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.ProtocolDefinition{}
+	for rows.Next() {
+		var b []byte
+		var v model.ProtocolDefinition
+		if err = rows.Scan(&b); err != nil {
+			return nil, err
+		}
+		if err = json.Unmarshal(b, &v); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+func (r *Repository) CreateProtocolRelease(ctx context.Context, v model.ProtocolRelease) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	_, err = r.pool.Exec(ctx, `INSERT INTO protocol_release(tenant_id,protocol_id,version,status,parser_type,body) VALUES($1,$2,$3,$4,$5,$6)`, v.TenantID, v.ProtocolID, v.Version, v.Status, v.ParserType, b)
+	return err
+}
+func (r *Repository) GetProtocolRelease(ctx context.Context, tenant, protocolID, version string) (model.ProtocolRelease, error) {
+	var v model.ProtocolRelease
+	var b []byte
+	err := r.pool.QueryRow(ctx, `SELECT body FROM protocol_release WHERE tenant_id=$1 AND protocol_id=$2 AND version=$3`, tenant, protocolID, version).Scan(&b)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return v, ErrNotFound
+	}
+	if err == nil {
+		err = json.Unmarshal(b, &v)
+	}
+	return v, err
+}
+func (r *Repository) ListProtocolReleases(ctx context.Context, tenant, protocolID string) ([]model.ProtocolRelease, error) {
+	rows, err := r.pool.Query(ctx, `SELECT body FROM protocol_release WHERE ($1='' OR tenant_id=$1) AND ($2='' OR protocol_id=$2) ORDER BY created_at DESC,protocol_id,version`, tenant, protocolID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.ProtocolRelease{}
+	for rows.Next() {
+		var b []byte
+		var v model.ProtocolRelease
+		if err = rows.Scan(&b); err != nil {
+			return nil, err
+		}
+		if err = json.Unmarshal(b, &v); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+func (r *Repository) UpdateProtocolReleaseStatus(ctx context.Context, tenant, protocolID, version, status string, publishedAt int64) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var b []byte
+	if err = tx.QueryRow(ctx, `SELECT body FROM protocol_release WHERE tenant_id=$1 AND protocol_id=$2 AND version=$3 FOR UPDATE`, tenant, protocolID, version).Scan(&b); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	var v model.ProtocolRelease
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	v.Status = status
+	v.PublishedAt = publishedAt
+	b, _ = json.Marshal(v)
+	if _, err = tx.Exec(ctx, `UPDATE protocol_release SET status=$4,body=$5 WHERE tenant_id=$1 AND protocol_id=$2 AND version=$3`, tenant, protocolID, version, status, b); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+func (r *Repository) CreatePointTableRelease(ctx context.Context, v model.PointTableRelease) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	_, err = r.pool.Exec(ctx, `INSERT INTO point_table_release(tenant_id,protocol_id,version,source_sha256,body) VALUES($1,$2,$3,$4,$5)`, v.TenantID, v.ProtocolID, v.Version, v.SourceSHA256, b)
+	return err
+}
+func (r *Repository) GetPointTableRelease(ctx context.Context, tenant, protocolID, version string) (model.PointTableRelease, error) {
+	var v model.PointTableRelease
+	var b []byte
+	err := r.pool.QueryRow(ctx, `SELECT body FROM point_table_release WHERE tenant_id=$1 AND protocol_id=$2 AND version=$3`, tenant, protocolID, version).Scan(&b)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return v, ErrNotFound
+	}
+	if err == nil {
+		err = json.Unmarshal(b, &v)
+	}
+	return v, err
+}
+func (r *Repository) SaveProductProtocolBinding(ctx context.Context, v model.ProductProtocolBinding) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	_, err = r.pool.Exec(ctx, `INSERT INTO product_protocol_binding(tenant_id,product_id,protocol_id,version,body) VALUES($1,$2,$3,$4,$5) ON CONFLICT(tenant_id,product_id) DO UPDATE SET protocol_id=excluded.protocol_id,version=excluded.version,body=excluded.body,updated_at=now()`, v.TenantID, v.ProductID, v.ProtocolID, v.Version, b)
+	return err
+}
+func (r *Repository) GetProductProtocolBinding(ctx context.Context, tenant, productID string) (model.ProductProtocolBinding, error) {
+	var v model.ProductProtocolBinding
+	var b []byte
+	err := r.pool.QueryRow(ctx, `SELECT body FROM product_protocol_binding WHERE tenant_id=$1 AND product_id=$2`, tenant, productID).Scan(&b)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return v, ErrNotFound
+	}
+	if err == nil {
+		err = json.Unmarshal(b, &v)
+	}
+	return v, err
+}
+func (r *Repository) SaveDeviceAccessProfile(ctx context.Context, v model.DeviceAccessProfile) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	_, err = r.pool.Exec(ctx, `INSERT INTO device_access_profile(tenant_id,id,device_id,product_id,enabled,body) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(tenant_id,id) DO UPDATE SET device_id=excluded.device_id,product_id=excluded.product_id,enabled=excluded.enabled,body=excluded.body,updated_at=now()`, v.TenantID, v.ID, v.DeviceID, v.ProductID, v.Enabled, b)
+	return err
+}
+func (r *Repository) GetDeviceAccessProfile(ctx context.Context, tenant, id string) (model.DeviceAccessProfile, error) {
+	var v model.DeviceAccessProfile
+	var b []byte
+	err := r.pool.QueryRow(ctx, `SELECT body FROM device_access_profile WHERE tenant_id=$1 AND id=$2`, tenant, id).Scan(&b)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return v, ErrNotFound
+	}
+	if err == nil {
+		err = json.Unmarshal(b, &v)
+	}
+	return v, err
+}
+func (r *Repository) ListDeviceAccessProfiles(ctx context.Context, tenant string) ([]model.DeviceAccessProfile, error) {
+	rows, err := r.pool.Query(ctx, `SELECT body FROM device_access_profile WHERE ($1='' OR tenant_id=$1) ORDER BY updated_at DESC,id`, tenant)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.DeviceAccessProfile{}
+	for rows.Next() {
+		var b []byte
+		var v model.DeviceAccessProfile
+		if err = rows.Scan(&b); err != nil {
+			return nil, err
+		}
+		if err = json.Unmarshal(b, &v); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
 func (r *Repository) SaveManagedDevice(ctx context.Context, v model.ManagedDevice) error {
 	b, _ := json.Marshal(v)
 	_, err := r.pool.Exec(ctx, `INSERT INTO device_registry(tenant_id,id,product_id,status,access_key,secret_hash,body) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(tenant_id,id) DO UPDATE SET product_id=excluded.product_id,status=excluded.status,access_key=excluded.access_key,secret_hash=excluded.secret_hash,body=excluded.body,updated_at=now()`, v.TenantID, v.ID, v.ProductID, v.Status, v.AccessKey, v.SecretHash, b)

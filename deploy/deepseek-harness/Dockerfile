@@ -2,7 +2,7 @@
 
 FROM node:24-bookworm-slim AS build
 
-ARG DSH_REVISION=cd5ef8148158c3a752a658978873241fdf8e2bbc
+ARG DSH_REVISION=a66e4702047846cdaa10c66c9d3df3951f5ea70d
 WORKDIR /harness
 
 RUN npm install --global pnpm@11.7.0
@@ -30,12 +30,12 @@ COPY deploy/deepseek-harness/ /harness/examples/iot-ops-agent/
 RUN sed -i 's/\r$//' /harness/examples/iot-ops-agent/*.sh
 RUN test "$(tr -d '\r\n' < /harness/examples/iot-ops-agent/REVISION)" = "$DSH_REVISION"
 RUN node --test /harness/examples/iot-ops-agent/gateway.test.mjs
-RUN node --input-type=module -e "await import('/harness/runtime-node/node_modules/@deepseek-ai/dsh-sdk-minimal/lib/index.js'); await import('/harness/runtime-node/node_modules/@deepseek-ai/dsh-agent-spine-demo/lib/index.js'); await import('/harness/runtime-node/node_modules/@deepseek-ai/dsh-mcp-client/lib/index.js')"
+RUN node --input-type=module -e "await import('/harness/runtime-node/node_modules/@deepseek-ai/dsh-sdk-minimal/lib/index.js'); await import('/harness/runtime-node/node_modules/@deepseek-ai/dsh-system-prompt/lib/index.js'); await import('/harness/runtime-node/node_modules/@deepseek-ai/dsh-agent-loop/lib/index.js'); await import('/harness/runtime-node/node_modules/@deepseek-ai/dsh-tools/lib/index.js'); await import('/harness/runtime-node/node_modules/@deepseek-ai/dsh-mcp-client/lib/index.js')"
 RUN node /harness/examples/iot-ops-agent/runtime-smoke.mjs
 
 FROM node:24-bookworm-slim AS runtime
 
-ARG DSH_REVISION=cd5ef8148158c3a752a658978873241fdf8e2bbc
+ARG DSH_REVISION=a66e4702047846cdaa10c66c9d3df3951f5ea70d
 LABEL org.opencontainers.image.title="IoT DeepSeek Harness sidecar" \
       org.opencontainers.image.revision="$DSH_REVISION" \
       org.opencontainers.image.source="https://github.com/deepseek-ai/deepseek-harness"

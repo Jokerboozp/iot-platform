@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"testing"
@@ -16,6 +17,19 @@ import (
 	"iot-platform/internal/parser"
 	"iot-platform/internal/ports"
 )
+
+type failingAlarmAI struct{}
+
+func (failingAlarmAI) AnalyzeAlarm(context.Context, model.Alarm, []map[string]any, []string) (model.AIAnalysis, error) {
+	return model.AIAnalysis{}, errors.New("provider response invalid")
+}
+func (failingAlarmAI) Chat(context.Context, string, string) (string, error) {
+	return "", errors.New("provider response invalid")
+}
+func (failingAlarmAI) RuleDraft(context.Context, string, string) (model.AlarmRule, error) {
+	return model.AlarmRule{}, errors.New("provider response invalid")
+}
+func (failingAlarmAI) Health(context.Context) error { return errors.New("provider response invalid") }
 
 type recordingBus struct {
 	*local.Bus
@@ -98,6 +112,9 @@ func TestRawToAlarmPipeline(t *testing.T) {
 	if err = e.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if err = repo.SaveManagedDevice(ctx, model.ManagedDevice{ID: "device_1", TenantID: "t1", ProductID: "json_sensor", Name: "一号烟感", Status: "ENABLED", AccessKey: "device-1-key"}); err != nil {
+		t.Fatal(err)
+	}
 	if err = repo.SaveVideoCameraMapping(ctx, model.VideoCameraMapping{TenantID: "t1", CameraID: "camera-001", CameraName: "一号摄像头", Brand: "海康", CameraPoint: "东侧入口", DeviceID: "device_1", Building: "A", Floor: "1", Room: "大厅", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -115,6 +132,9 @@ func TestRawToAlarmPipeline(t *testing.T) {
 	}
 	if alarms[0].TriggerCount != 1 {
 		t.Fatalf("unexpected alarm %#v", alarms[0])
+	}
+	if alarms[0].DeviceName != "一号烟感" {
+		t.Fatalf("alarm did not preserve the managed device name: %#v", alarms[0])
 	}
 	if len(alarms[0].Cameras) != 1 || alarms[0].Cameras[0].CameraID != "camera-001" || alarms[0].Cameras[0].Brand != "海康" {
 		t.Fatalf("alarm did not resolve associated camera metadata: %#v", alarms[0].Cameras)
@@ -145,6 +165,35 @@ func TestRawToAlarmPipeline(t *testing.T) {
 	}
 	if !foundAction {
 		t.Fatalf("expected validated UI action event, messages=%#v", realtime.Messages)
+	}
+}
+
+func TestAnalyzeAlarmPersistsReadableFallbackOnProviderError(t *testing.T) {
+	ctx := context.Background()
+	repo := memory.NewRepository()
+	archive, err := local.NewArchive(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(repo, archive, local.NewBus(), local.NewRealtime(), parser.NewRegistry(parser.JSONParser{}), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	e.AI = failingAlarmAI{}
+	if _, _, err = repo.UpsertAlarm(ctx, model.Alarm{ID: "alarm-ai-failure", TenantID: "t1", DeviceID: "device-1", AlarmType: "FIRE", AlarmLevel: "HIGH", Status: "ACTIVE", LastTriggeredAt: time.Now().UnixMilli()}); err != nil {
+		t.Fatal(err)
+	}
+
+	analysis, err := e.AnalyzeAlarm(ctx, "t1", "alarm-ai-failure")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if analysis.Summary != "AI 研判暂时失败，已保留告警供人工研判。" || analysis.Model != "unavailable" || analysis.Error == "" {
+		t.Fatalf("unexpected readable fallback: %#v", analysis)
+	}
+	saved, err := repo.GetAIAnalysis(ctx, "t1", "alarm-ai-failure")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Summary == "" || saved.Model == "" {
+		t.Fatalf("saved fallback is not renderable: %#v", saved)
 	}
 }
 

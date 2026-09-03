@@ -43,6 +43,12 @@ func main() {
 		if len(data) > 1 {
 			properties["secondByte"] = int(data[1])
 		}
+		// The protocol-v2 package example uses AA 01 2A, where byte 3 is
+		// the temperature value. Replace this with the vendor protocol's
+		// real frame validation and field decoding rules.
+		if len(data) > 2 {
+			properties["temperature"] = int(data[2])
+		}
 	} else {
 		var body any
 		if err := json.Unmarshal(raw.Payload, &body); err != nil {

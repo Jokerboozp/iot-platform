@@ -57,7 +57,7 @@ const runtimeLoading = ref(false)
 const runtimeError = ref('')
 const workflowError = ref('')
 let runtimeRequestSequence = 0
-const runtime = ref({ items:[], active:{ id:'disabled', name:'未启用', enabled:false }, healthy:false, healthMessage:'正在读取 Provider 状态' })
+const runtime = ref({ items:[], active:{ id:'disabled', name:'未启用', enabled:false }, healthy:false, healthMessage:'正在读取模型服务状态' })
 const workflows = ref({ items:[], healthy:false, healthMessage:'正在读取工作流状态' })
 const selectedWorkflowId = ref('')
 const creatingAgent = ref(false)
@@ -70,6 +70,9 @@ const agentTemplate = {
 }
 const agentJson = ref(JSON.stringify(agentTemplate, null, 2))
 const editingAgentId = ref('')
+const agentEditorRef = ref(null)
+const agentPreviewVisible = ref(false)
+const agentPreview = ref(null)
 const workflowManageLoading = ref(false)
 const workflowManageError = ref('')
 const workflowManageItems = ref([])
@@ -99,146 +102,28 @@ const agentToolDocs = [
   { name:'mcp__iot__query_knowledge_base', label:'知识库检索' },
   { name:'mcp__iot__create_rule_draft', label:'生成待确认的自动化规则草稿' }
 ]
-const knowledgeLoading = ref(false)
-const knowledgeSaving = ref(false)
-const knowledgeDocuments = ref([])
-const knowledgeBinding = reactive({ productIds:[], categories:[], tags:[], retrievalMode:'auto', topK:5, minScore:0.25, noMatchPolicy:'allow-model' })
-
-const testing = ref(false)
-const testResult = ref(null)
 const managementVisible = ref(false)
-const managementTab = ref('knowledge')
-const sandbox = reactive({ provider:'deepseek', baseUrl:'https://api.deepseek.com', model:'deepseek-v4-flash', apiKey:'', question:'请用一句话说明你已经连接到消防物联网 AI 测试台。' })
-const customProviderOptionId = '__custom-openai-compatible__'
-const customProviderProfiles = ref([])
-const providerProfileEditorVisible = ref(false)
-const providerProfileEditingId = ref('')
-const providerProfileDraft = reactive({ id:'', name:'', requiresApiKey:true })
+const agentEditorVisible = ref(false)
 const runConfig = reactive({ model:'', maxTokens:1200 })
 const quickQuestions = ['当前有哪些高等级活动告警？', 'device_001 最近温度趋势如何？', '给出今日消防巡检重点']
 
-const providerItems = computed(() => [
-  ...(runtime.value.items || []).filter(item => item.id !== 'disabled' && item.enabled !== false),
-  ...customProviderProfiles.value,
-  { id:customProviderOptionId, name:'＋添加自定义 Provider', description:'使用 OpenAI Chat Completions 兼容接口连接私有或第三方模型服务。', enabled:true, requiresApiKey:true, capabilities:['chat'], customOption:true }
-])
-const workflowItems = computed(() => (workflows.value.items || []).filter(item => item.enabled !== false))
-const selectedPlugin = computed(() => providerItems.value.find(item => item.id === sandbox.provider))
-const selectedCustomProvider = computed(() => customProviderProfiles.value.find(item => item.id === sandbox.provider) || null)
-const customProviderSelected = computed(() => sandbox.provider === customProviderOptionId || Boolean(selectedCustomProvider.value))
+const nonChatWorkflowIds = new Set(['alarm-handler', 'device-health-inspector', 'protocol-assistant'])
+const workflowItems = computed(() => (workflows.value.items || []).filter(item => item.enabled !== false && isChatWorkflow(item)))
 const selectedWorkflow = computed(() => workflowItems.value.find(item => workflowKey(item) === selectedWorkflowId.value))
 const selectedRun = computed(() => runs.value.find(run => run.id === selectedRunKey.value) || null)
 const activeHealthy = computed(() => Boolean(workflows.value.healthy))
 const activeTone = computed(() => !workflowItems.value.length ? 'info' : activeHealthy.value ? 'success' : 'danger')
 const healthMessage = computed(() => workflows.value.healthMessage || 'Harness 工作流状态未知')
 const isAdmin = computed(() => session.role === 'admin')
-const canManageKnowledge = computed(() => session.role === 'admin' || session.role === 'operator')
-const workflowKnowledgeAvailable = computed(() => selectedWorkflow.value?.knowledgeEnabled !== false)
-const selectedKnowledgeCount = computed(() => knowledgeDocuments.value.filter(item => item.workflowId === selectedWorkflowId.value).length)
-const knowledgeModeLabel = computed(() => ({ auto:'按需检索', always:'每次强制检索', disabled:'禁用知识库' }[knowledgeBinding.retrievalMode] || '未配置'))
 const selectedCapabilities = computed(() => {
   const value = selectedWorkflow.value?.capabilities || selectedWorkflow.value?.tools || []
   return Array.isArray(value) ? value : []
 })
+const agentPreviewJson = computed(() => agentPreview.value ? JSON.stringify(agentPreview.value, null, 2) : '')
 
 function workflowKey(item) { return item?.id || item?.workflowId || '' }
 function workflowName(item) { return item?.name || item?.label || workflowKey(item) || '未命名工作流' }
 function capabilityLabel(item) { return typeof item === 'string' ? item : item?.name || item?.id || '工具' }
-function providerProfileStorageKey() { return `iot:ai-provider-profiles:${session.tenant || 'default'}` }
-function loadProviderProfiles() {
-  try {
-    const value = JSON.parse(globalThis.localStorage?.getItem(providerProfileStorageKey()) || '[]')
-    customProviderProfiles.value = Array.isArray(value) ? value.filter(item => item?.custom === true && typeof item.id === 'string' && typeof item.name === 'string' && typeof item.defaultBaseUrl === 'string' && typeof item.defaultModel === 'string') : []
-  } catch {
-    customProviderProfiles.value = []
-  }
-}
-function persistProviderProfiles() {
-  const safeProfiles = customProviderProfiles.value.map(({ apiKey, ...profile }) => profile)
-  globalThis.localStorage?.setItem(providerProfileStorageKey(), JSON.stringify(safeProfiles))
-}
-function startCustomProvider() {
-  providerProfileEditingId.value = ''
-  Object.assign(providerProfileDraft, { id:'custom-provider', name:'', requiresApiKey:true })
-  providerProfileEditorVisible.value = true
-  sandbox.provider = customProviderOptionId
-  sandbox.baseUrl = ''
-  sandbox.model = ''
-  sandbox.apiKey = ''
-  testResult.value = null
-}
-function editCustomProvider(profile) {
-  if (!isAdmin.value || !profile?.custom) return
-  providerProfileEditingId.value = profile.id
-  Object.assign(providerProfileDraft, { id:profile.id, name:profile.name, requiresApiKey:profile.requiresApiKey !== false })
-  providerProfileEditorVisible.value = true
-  sandbox.provider = profile.id
-  sandbox.baseUrl = profile.defaultBaseUrl || ''
-  sandbox.model = profile.defaultModel || ''
-  sandbox.apiKey = ''
-  testResult.value = null
-}
-async function deleteCustomProvider(profile) {
-  if (!isAdmin.value || !profile?.custom) return
-  try {
-    await ElMessageBox.confirm(`删除后将从当前租户的 Provider 测试列表移除“${profile.name}”，确定继续吗？`, '删除自定义 Provider', { type:'warning', confirmButtonText:'确定删除', cancelButtonText:'取消' })
-  } catch { return }
-  customProviderProfiles.value = customProviderProfiles.value.filter(item => item.id !== profile.id)
-  persistProviderProfiles()
-  if (sandbox.provider === profile.id) {
-    sandbox.provider = 'openai-compatible'
-    providerProfileEditorVisible.value = false
-  }
-  ElMessage.success(`已删除自定义 Provider：${profile.name}`)
-}
-function cancelProviderProfileEdit() {
-  providerProfileEditorVisible.value = false
-  providerProfileEditingId.value = ''
-  if (sandbox.provider === customProviderOptionId) sandbox.provider = 'openai-compatible'
-}
-function saveProviderProfile() {
-  if (!isAdmin.value) return
-  const id = String(providerProfileDraft.id || '').trim().toLowerCase()
-  const name = String(providerProfileDraft.name || '').trim()
-  const baseURL = String(sandbox.baseUrl || '').trim().replace(/\/+$/, '')
-  const model = String(sandbox.model || '').trim()
-  if (!/^custom-[a-z0-9][a-z0-9._-]{1,63}$/.test(id)) {
-    ElMessage.error('Provider ID 必须以 custom- 开头，只能包含小写字母、数字、点、下划线或连字符')
-    return
-  }
-  if (!name || name.length > 128 || !model || model.length > 256) {
-    ElMessage.error('Provider 名称和模型不能为空，且长度不能超限')
-    return
-  }
-  try {
-    const parsed = new URL(baseURL)
-    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error()
-  } catch {
-    ElMessage.error('Base URL 必须是没有账号、查询参数和片段的 HTTP(S) 地址')
-    return
-  }
-  const duplicate = customProviderProfiles.value.some(item => item.id === id && item.id !== providerProfileEditingId.value)
-  if (duplicate || ['deepseek', 'ollama', 'openai-compatible', 'disabled'].includes(id)) {
-    ElMessage.error('Provider ID 已存在，请换一个唯一 ID')
-    return
-  }
-  const profile = {
-    id, name, description:'自定义 OpenAI-compatible Provider', version:'1.0.0', enabled:true, custom:true,
-    defaultBaseUrl:baseURL, defaultModel:model, requiresApiKey:Boolean(providerProfileDraft.requiresApiKey),
-    capabilities:['chat','alarm-analysis','rule-draft','json-output']
-  }
-  const next = customProviderProfiles.value.filter(item => item.id !== providerProfileEditingId.value && item.id !== id)
-  customProviderProfiles.value = [...next, profile]
-  persistProviderProfiles()
-  providerProfileEditingId.value = ''
-  providerProfileEditorVisible.value = false
-  sandbox.provider = id
-  sandbox.baseUrl = baseURL
-  sandbox.model = model
-  sandbox.apiKey = ''
-  ElMessage.success(`已保存自定义 Provider：${name}`)
-}
-
 function timestamp(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value
   if (typeof value === 'string' && /^\d+$/.test(value)) return Number(value)
@@ -336,10 +221,8 @@ async function loadRuntime() {
     if (requestSequence !== runtimeRequestSequence) return
     if (providerResult.status === 'fulfilled') {
       runtime.value = providerResult.value
-      const selectableProviders = providerItems.value.filter(item => !item.customOption)
-      if (!selectableProviders.some(item => item.id === sandbox.provider) && selectableProviders[0]) sandbox.provider = selectableProviders[0].id
     } else {
-      runtimeError.value = providerResult.reason?.message || 'Provider 状态读取失败'
+      runtimeError.value = providerResult.reason?.message || '模型服务状态读取失败'
     }
     if (workflowResult.status === 'fulfilled') {
       workflows.value = {
@@ -357,40 +240,25 @@ async function loadRuntime() {
   }
 }
 
-async function loadKnowledgeCatalog() {
-  const documentResult = await Promise.allSettled([api('/api/v1/knowledge/documents?page=1&pageSize=100')])
-  if (documentResult[0].status === 'fulfilled') knowledgeDocuments.value = documentResult[0].value?.items || []
-}
-
-async function loadKnowledgeBinding() {
-  if (!selectedWorkflowId.value) return
-  knowledgeLoading.value = true
-  try {
-    const value = await api(`/api/v1/ai/workflows/${encodeURIComponent(selectedWorkflowId.value)}/knowledge-binding`)
-    Object.assign(knowledgeBinding, {
-      productIds:[], categories:[], tags:[],
-      retrievalMode:value.retrievalMode || 'auto', topK:Number(value.topK) || 5, minScore:Number(value.minScore ?? 0.25), noMatchPolicy:value.noMatchPolicy || 'allow-model'
-    })
-  } catch (error) {
-    workflowError.value = error.message || '知识库绑定读取失败'
-  } finally { knowledgeLoading.value = false }
-}
-
-async function saveKnowledgeBinding() {
-  if (!selectedWorkflowId.value || !canManageKnowledge.value || !workflowKnowledgeAvailable.value) return
-  knowledgeSaving.value = true
-  try {
-    const value = await api(`/api/v1/ai/workflows/${encodeURIComponent(selectedWorkflowId.value)}/knowledge-binding`, { method:'PUT', body:JSON.stringify(knowledgeBinding) })
-    Object.assign(knowledgeBinding, value)
-    ElMessage.success('Agent 知识库策略已保存')
-  } catch (error) { workflowError.value = error.message || '知识库绑定保存失败' }
-  finally { knowledgeSaving.value = false }
-}
-
 const builtinWorkflowIds = new Set(['alarm-handler', 'ops-assistant', 'system-observer', 'device-health-inspector', 'protocol-assistant'])
 function isBuiltinWorkflow(item) { return builtinWorkflowIds.has(workflowKey(item)) }
+function isChatWorkflow(item) { return !nonChatWorkflowIds.has(workflowKey(item)) }
 
 function resetAgentJson() { editingAgentId.value = ''; agentJson.value = JSON.stringify(agentTemplate, null, 2) }
+
+function focusAgentEditor() {
+  nextTick(() => {
+    agentEditorRef.value?.focus?.()
+    agentEditorRef.value?.$el?.scrollIntoView?.({ behavior:'auto', block:'center' })
+  })
+}
+
+function startCreateAgent() {
+  resetAgentJson()
+  agentEditorVisible.value = true
+  focusAgentEditor()
+  ElMessage.info('已打开新建 Agent，请填写 Manifest JSON')
+}
 
 async function loadWorkflowManagement(force = false) {
   if (!isAdmin.value || workflowManageLoading.value && !force) return
@@ -400,7 +268,7 @@ async function loadWorkflowManagement(force = false) {
   try {
     const value = await api(`/api/v1/ai/workflows/admin?page=${workflowManagePage.value}&pageSize=${workflowManagePageSize.value}`)
     if (requestSequence !== workflowManageRequestSequence) return
-    workflowManageItems.value = Array.isArray(value?.items) ? value.items : []
+    workflowManageItems.value = Array.isArray(value?.items) ? value.items.filter(isChatWorkflow) : []
     workflowManageTotal.value = Number(value?.total ?? value?.count ?? workflowManageItems.value.length)
   } catch (error) {
     if (requestSequence === workflowManageRequestSequence) workflowManageError.value = error.message || '工作流插件清单读取失败'
@@ -420,22 +288,28 @@ function changeWorkflowManagePageSize(value) {
   loadWorkflowManagement()
 }
 
-function selectManagementTab(tab) {
-  managementTab.value = tab
-  if (tab === 'agent') void loadWorkflowManagement()
-}
-
-function openManagement(tab = 'agent') {
-  managementTab.value = tab
+function openAgentManagement() {
   managementVisible.value = true
-  if (tab === 'agent') void loadWorkflowManagement()
+  void loadWorkflowManagement()
 }
 
 function editAgent(item) {
   if (!isAdmin.value || isBuiltinWorkflow(item)) return
   editingAgentId.value = workflowKey(item)
   agentJson.value = JSON.stringify(item, null, 2)
-  managementTab.value = 'agent'
+  agentEditorVisible.value = true
+  focusAgentEditor()
+}
+
+function cancelAgentEditor() {
+  agentEditorVisible.value = false
+  resetAgentJson()
+}
+
+function viewAgent(item) {
+  if (!isAdmin.value || !isBuiltinWorkflow(item)) return
+  agentPreview.value = item
+  agentPreviewVisible.value = true
 }
 
 async function saveAgent() {
@@ -447,9 +321,9 @@ async function saveAgent() {
     ElMessage.error('编辑时不能修改 Agent 的唯一标识；如需新插件请先新建')
     return
   }
+  const editing = Boolean(editingAgentId.value)
   creatingAgent.value = true
   try {
-    const editing = Boolean(editingAgentId.value)
     const saved = editing
       ? await api(`/api/v1/ai/workflows/${encodeURIComponent(editingAgentId.value)}`, { method:'PUT', body:JSON.stringify(manifest) })
       : await api('/api/v1/ai/workflows', { method:'POST', body:JSON.stringify(manifest) })
@@ -458,8 +332,9 @@ async function saveAgent() {
     selectedWorkflowId.value = workflowKey(saved)
     editingAgentId.value = ''
     agentJson.value = JSON.stringify(agentTemplate, null, 2)
+    agentEditorVisible.value = false
     ElMessage.success(`${editing ? 'Agent 已更新' : 'Agent 已创建'}：${workflowName(saved)}`)
-  } catch (error) { workflowManageError.value = error.message || (editingAgentId.value ? 'Agent 更新失败' : 'Agent 创建失败') }
+  } catch (error) { workflowManageError.value = error.message || (editing ? 'Agent 更新失败' : 'Agent 创建失败') }
   finally { creatingAgent.value = false }
 }
 
@@ -490,54 +365,19 @@ async function deleteWorkflow(item) {
     workflows.value = { ...workflows.value, items:remaining, count:remaining.length }
     workflowManageItems.value = workflowManageItems.value.filter(candidate => workflowKey(candidate) !== deletedWorkflowId)
     if (selectedWorkflowId.value === deletedWorkflowId) selectedWorkflowId.value = workflowKey(remaining.find(candidate => candidate.enabled !== false))
-    if (editingAgentId.value === deletedWorkflowId) resetAgentJson()
+    if (editingAgentId.value === deletedWorkflowId) cancelAgentEditor()
     await Promise.all([loadRuntime(), loadWorkflowManagement(true)])
     ElMessage.success(`已删除工作流插件：${workflowName(item)}`)
   } catch (error) { workflowManageError.value = error.message || '工作流插件删除失败' }
   finally { creatingAgent.value = false }
 }
 
-watch(() => sandbox.provider, () => {
-  if (sandbox.provider === customProviderOptionId) {
-    providerProfileEditorVisible.value = true
-    sandbox.baseUrl = ''
-    sandbox.model = ''
-    sandbox.apiKey = ''
-    testResult.value = null
-    return
-  }
-  if (!selectedCustomProvider.value) providerProfileEditorVisible.value = false
-  const plugin = selectedPlugin.value
-  if (!plugin) return
-  sandbox.baseUrl = plugin.defaultBaseUrl || ''
-  sandbox.model = plugin.defaultModel || ''
-  sandbox.apiKey = ''
-  testResult.value = null
-})
-
-watch(selectedWorkflowId, async () => { applyWorkflowDefaults(); await loadKnowledgeBinding() })
+watch(selectedWorkflowId, () => { applyWorkflowDefaults() })
 
 function applyWorkflowDefaults() {
   const workflow = selectedWorkflow.value
   runConfig.model = workflow?.defaultModel || workflow?.model || ''
   if (Number.isSafeInteger(workflow?.maxTokens)) runConfig.maxTokens = Math.max(128, Math.min(8192, workflow.maxTokens))
-}
-
-async function testPlugin() {
-  if (!sandbox.provider || testing.value || !isAdmin.value) return
-  testing.value = true
-  testResult.value = null
-  try {
-    const custom = selectedCustomProvider.value || sandbox.provider === customProviderOptionId
-    const payload = { ...sandbox, provider:custom ? 'openai-compatible' : sandbox.provider }
-    const result = await api('/api/v1/ai/providers/test', { method:'POST', body:JSON.stringify(payload) })
-    testResult.value = { ...result, providerName:custom && selectedCustomProvider.value ? selectedCustomProvider.value.name : result.providerName }
-  } catch (error) {
-    testResult.value = { success:false, error:error.message, traceId:error.traceId }
-  } finally {
-    sandbox.apiKey = ''
-    testing.value = false
-  }
 }
 
 function addRunEvent(run, event, label, status = 'info', detail = '') {
@@ -688,14 +528,14 @@ function ruleDraftActionDisabled(message) { return message.ruleDraftState === 'e
 function editRuleDraft(draft, persisted, state) { if (state === 'enabled' || state === 'missing') return; emit('navigate', 'rules', { ruleDraft:draft, persisted:Boolean(persisted) }) }
 
 watch([messages, runs, conversationId, selectedWorkflowId], scheduleConversationPersist, { deep:true })
-onMounted(() => { restoreConversation(); loadProviderProfiles(); return Promise.all([loadRuntime(), loadKnowledgeCatalog(), refreshRuleDraftStatuses()]) })
+onMounted(() => { restoreConversation(); return Promise.all([loadRuntime(), refreshRuleDraftStatuses()]) })
 onBeforeUnmount(() => { abortController?.abort(); flushPendingAssistantText(false); if (scrollFrame) cancelAnimationFrame(scrollFrame); scrollFrame = 0; scrollQueued = false; if (historyTimer) clearTimeout(historyTimer); persistConversation() })
 </script>
 
 <template>
   <div class="ai-runtime" v-loading="runtimeLoading">
-    <div><span class="section-kicker">DEEPSEEK HARNESS</span><strong>AI 工作流</strong><small>业务插件、Provider 与工具解耦；每次运行都有可审计的 Harness 轨迹。</small></div>
-    <div class="runtime-actions"><div class="runtime-status"><el-tag :type="activeTone" effect="light">{{ selectedWorkflow ? 'Harness 工作流' : '未配置' }}</el-tag><span>{{ runConfig.model || '无活动模型' }}</span><i :class="{ online:activeHealthy }" />{{ healthMessage }}</div><el-button size="small" @click="openManagement('agent')">管理中心</el-button><el-button size="small" :loading="runtimeLoading" @click="loadRuntime">刷新状态</el-button></div>
+    <div><span class="section-kicker">DEEPSEEK HARNESS</span><strong>AI 工作流</strong><small>聊天 Agent 与受控工具解耦；每次运行都有可审计的 Harness 轨迹。</small></div>
+    <div class="runtime-actions"><div class="runtime-status"><el-tag :type="activeTone" effect="light">{{ selectedWorkflow ? 'Harness 工作流' : '未配置' }}</el-tag><span>{{ runConfig.model || '无活动模型' }}</span><i :class="{ online:activeHealthy }" />{{ healthMessage }}</div><el-button size="small" @click="openAgentManagement">Agent 管理</el-button><el-button size="small" :loading="runtimeLoading" @click="loadRuntime">刷新状态</el-button></div>
   </div>
 
   <div class="ai-workbench">
@@ -710,12 +550,10 @@ onBeforeUnmount(() => { abortController?.abort(); flushPendingAssistantText(fals
         <div class="control-section-label"><span>02</span>运行参数</div>
         <el-form class="run-config" label-position="top" :model="runConfig" :disabled="sending"><div><el-form-item label="运行模型"><el-input v-model="runConfig.model" placeholder="使用活动模型" /></el-form-item><el-form-item label="最大输出"><el-input-number v-model="runConfig.maxTokens" :min="128" :max="8192" :step="128" controls-position="right" /></el-form-item></div></el-form>
         <div class="control-section-label"><span>03</span>运行环境</div>
-        <div class="runtime-overview">
-          <button type="button" class="overview-item" @click="openManagement('provider')"><span>模型服务</span><strong>{{ runtime.active?.name || '未配置' }}</strong><small>{{ runtime.active?.model || '由服务端选择' }}</small></button>
-          <button type="button" class="overview-item" @click="openManagement('knowledge')"><span>知识库</span><strong>{{ workflowKnowledgeAvailable ? knowledgeModeLabel : '未授权' }}</strong><small>{{ selectedKnowledgeCount }} 份 Agent 文档 · Top {{ knowledgeBinding.topK }}</small></button>
+        <div class="runtime-overview runtime-overview-single">
+          <div class="overview-item overview-item-static"><span>当前模型服务</span><strong>{{ runtime.active?.name || '未配置' }}</strong><small>{{ runtime.active?.model || '由服务端选择' }}</small></div>
         </div>
         <el-alert v-if="runtimeError" class="runtime-warning" :title="runtimeError" type="warning" :closable="false" show-icon />
-        <button type="button" class="manager-entry" @click="openManagement('agent')"><span><strong>工作流管理</strong><small>Agent 插件清单、启停、编辑与删除</small></span><b>进入 →</b></button>
       </div>
     </el-card>
 
@@ -731,75 +569,48 @@ onBeforeUnmount(() => { abortController?.abort(); flushPendingAssistantText(fals
     </el-card>
   </div>
 
-  <el-drawer v-model="managementVisible" title="AI 工作流管理" size="min(680px, 94vw)" class="workflow-manager" append-to-body>
-    <div class="manager-shell">
-      <el-menu :default-active="managementTab" class="manager-menu" @select="selectManagementTab">
-        <el-menu-item index="agent" class="menu-agent"><span class="manager-menu-icon">AG</span><span class="manager-menu-copy"><strong>Agent 管理</strong><small>插件清单与生命周期</small></span></el-menu-item>
-        <el-menu-item index="knowledge" class="menu-knowledge"><span class="manager-menu-icon">KB</span><span class="manager-menu-copy"><strong>知识库</strong><small>配置检索策略</small></span></el-menu-item>
-        <el-menu-item index="provider" class="menu-provider"><span class="manager-menu-icon">PV</span><span class="manager-menu-copy"><strong>Provider 测试</strong><small>验证模型连接</small></span></el-menu-item>
-      </el-menu>
-      <div class="manager-content">
-      <section v-show="managementTab === 'agent'" class="manager-panel panel-agent">
-        <div class="manager-intro"><span>AGENT MANIFEST</span><div><h3>通过 JSON 创建 Agent</h3><el-tag size="small" type="primary" effect="plain">{{ editingAgentId ? 'EDIT' : 'ADMIN' }}</el-tag></div><p>先在下方清单选择插件进行编辑、启用/禁用或删除；也可以提交新的 Agent Manifest，保存后立即进入工作流列表。</p></div>
+  <el-drawer v-model="managementVisible" title="Agent 管理" size="min(760px, 94vw)" class="workflow-manager" append-to-body>
+    <section class="manager-panel panel-agent">
+        <div class="manager-intro"><span>AGENT MANAGEMENT</span><div><h3>Agent 插件管理</h3><el-tag size="small" type="primary" effect="plain">ADMIN</el-tag></div><p>内置 Agent 仅可查看；动态 Agent 可编辑、启用/禁用或删除。点击“新建 Agent”即可在弹窗中提交新的 Manifest，保存后 Agent 会立即进入工作流列表。</p></div>
         <el-alert v-if="!isAdmin" title="工作流插件管理仅限管理员。" type="warning" :closable="false" show-icon />
         <div v-else class="workflow-admin-panel">
-          <div class="workflow-admin-toolbar"><div><strong>已配置的工作流插件</strong><small>{{ workflowManageTotal }} 个插件 · 内置插件只读，动态插件可管理</small></div><div><el-button size="small" :loading="workflowManageLoading" @click="loadWorkflowManagement">刷新清单</el-button><el-button size="small" type="primary" plain @click="resetAgentJson">新建 Agent</el-button></div></div>
+          <div class="workflow-admin-toolbar"><div><strong>已配置的工作流插件</strong><small>{{ workflowManageTotal }} 个聊天插件 · 内置聊天 Agent 只读；告警研判、设备巡检和协议接入由业务页面调用</small></div><div><el-button size="small" :loading="workflowManageLoading" @click="loadWorkflowManagement">刷新清单</el-button><el-button size="small" type="primary" plain @click="startCreateAgent">新建 Agent</el-button></div></div>
           <el-alert v-if="workflowManageError" :title="workflowManageError" type="error" :closable="false" show-icon />
           <el-skeleton v-if="workflowManageLoading && !workflowManageItems.length" :rows="4" animated />
           <el-empty v-else-if="!workflowManageItems.length" description="暂无工作流插件" :image-size="56" />
           <div v-else class="workflow-admin-list">
             <div v-for="item in workflowManageItems" :key="workflowKey(item)" class="workflow-admin-item">
               <div class="workflow-admin-main"><div><strong>{{ workflowName(item) }}</strong><el-tag size="small" :type="item.enabled === false ? 'info' : 'success'" effect="plain">{{ item.enabled === false ? '已禁用' : '已启用' }}</el-tag><el-tag v-if="isBuiltinWorkflow(item)" size="small" effect="plain">内置只读</el-tag></div><small>{{ workflowKey(item) }} · {{ item.version ? `v${item.version}` : '无版本' }}</small><p>{{ item.description || '未填写插件说明' }}</p></div>
-              <div class="workflow-admin-actions"><el-button size="small" :disabled="isBuiltinWorkflow(item)" @click="editAgent(item)">编辑</el-button><el-button size="small" :disabled="isBuiltinWorkflow(item)" @click="toggleWorkflow(item)">{{ item.enabled === false ? '启用' : '禁用' }}</el-button><el-button size="small" type="danger" plain :disabled="isBuiltinWorkflow(item)" @click="deleteWorkflow(item)">删除</el-button></div>
+              <div class="workflow-admin-actions"><template v-if="isBuiltinWorkflow(item)"><el-button size="small" type="primary" plain @click="viewAgent(item)">查看</el-button></template><template v-else><el-button size="small" @click="editAgent(item)">编辑</el-button><el-button size="small" @click="toggleWorkflow(item)">{{ item.enabled === false ? '启用' : '禁用' }}</el-button><el-button size="small" type="danger" plain @click="deleteWorkflow(item)">删除</el-button></template></div>
             </div>
           </div>
           <div v-if="workflowManageTotal" class="list-pagination">
             <el-pagination v-model:current-page="workflowManagePage" v-model:page-size="workflowManagePageSize" :total="workflowManageTotal" :page-sizes="[20, 50, 100]" layout="total, sizes, prev, pager, next, jumper" @current-change="changeWorkflowManagePage" @size-change="changeWorkflowManagePageSize" />
           </div>
         </div>
-        <el-form class="drawer-form" label-position="top" :disabled="!isAdmin || creatingAgent">
-          <el-form-item label="Agent Manifest JSON"><el-input v-model="agentJson" class="agent-json-editor" type="textarea" :rows="18" resize="vertical" spellcheck="false" /></el-form-item>
-          <div class="manifest-guide">
-            <div class="manifest-guide-title"><div><strong>字段说明</strong><small>所有字段均为必填；JSON 标准不支持注释，请参考下方说明填写。</small></div><el-tag size="small" effect="plain">11 个字段</el-tag></div>
-            <div class="manifest-field-list">
-              <div v-for="field in agentFieldDocs" :key="field.name" class="manifest-field"><code>{{ field.name }}</code><span>{{ field.type }}</span><p>{{ field.note }}</p></div>
-            </div>
-            <div class="tool-whitelist"><strong>allowedTools 可用工具</strong><div><span v-for="tool in agentToolDocs" :key="tool.name"><code>{{ tool.name }}</code><small>{{ tool.label }}</small></span></div></div>
-          </div>
-          <el-alert title="只允许受控查询工具与“仅生成、不保存”的规则草稿工具；内置 Agent 不能覆盖，Agent 不能直接启用规则。" type="info" :closable="false" show-icon />
-          <div class="agent-actions"><el-button @click="resetAgentJson">{{ editingAgentId ? '取消编辑' : '恢复模板' }}</el-button><el-button type="primary" :loading="creatingAgent" @click="saveAgent">{{ editingAgentId ? '校验并保存修改' : '校验并创建 Agent' }}</el-button></div>
-        </el-form>
       </section>
-      <section v-show="managementTab === 'knowledge'" class="manager-panel panel-knowledge">
-         <div class="manager-intro"><span>AGENT KNOWLEDGE</span><div><h3>Agent 知识库</h3><el-tag size="small" type="success" effect="plain">RAG</el-tag></div><p>知识文档上传时直接绑定 Agent；当前 Agent 只能检索自己的文档。</p></div>
-        <el-alert v-if="!workflowKnowledgeAvailable" title="当前工作流插件没有知识库工具权限，因此不需要配置知识库绑定。" type="info" :closable="false" show-icon />
-        <el-alert v-else-if="!canManageKnowledge" title="当前账号可查看绑定；修改需要管理员或运维人员权限。" type="info" :closable="false" show-icon />
-        <el-form v-loading="knowledgeLoading" class="drawer-form" label-position="top" :model="knowledgeBinding" :disabled="!canManageKnowledge || !workflowKnowledgeAvailable">
-          <el-form-item label="检索模式"><el-radio-group v-model="knowledgeBinding.retrievalMode"><el-radio-button value="auto">按需检索</el-radio-button><el-radio-button value="always">强制检索</el-radio-button><el-radio-button value="disabled">禁用</el-radio-button></el-radio-group></el-form-item>
-          <el-alert :title="`${selectedKnowledgeCount} 份文档已直接绑定当前 Agent`" type="success" :closable="false" show-icon />
-          <div class="binding-numbers"><el-form-item label="召回数量"><el-input-number v-model="knowledgeBinding.topK" :min="1" :max="20" controls-position="right" /></el-form-item><el-form-item label="最低相似度"><el-input-number v-model="knowledgeBinding.minScore" :min="0" :max="1" :step="0.05" :precision="2" controls-position="right" /></el-form-item></div>
-          <el-form-item label="无匹配知识时"><el-select v-model="knowledgeBinding.noMatchPolicy"><el-option label="允许模型回答，但必须说明证据不足" value="allow-model" /><el-option label="阻止回答，必须先补充知识" value="require-evidence" /></el-select></el-form-item>
-          <el-alert title="Agent ID 会写入短期 Harness Token；模型无法通过修改工具参数扩大检索范围。" type="success" :closable="false" show-icon />
-          <el-button class="test-button" type="primary" :loading="knowledgeSaving" @click="saveKnowledgeBinding">保存知识库绑定</el-button>
-        </el-form>
-      </section>
-      <section v-show="managementTab === 'provider'" class="manager-panel panel-provider">
-        <div class="manager-intro"><span>CONNECTION SANDBOX</span><div><h3>Provider 测试与配置</h3><el-tag size="small" effect="plain">ADMIN</el-tag></div><p>内置 Provider 可直接测试；自定义 Provider 保存名称、地址和模型配置，API Key 只用于本次测试。</p></div>
-        <el-alert v-if="!isAdmin" class="admin-notice" title="Provider 连接测试仅限管理员；你仍可使用已配置的运维 AI。" type="warning" :closable="false" show-icon />
-        <el-form class="drawer-form" label-position="top" :model="sandbox" :disabled="!isAdmin">
-          <el-form-item label="模型插件"><div class="provider-select-row"><el-select v-model="sandbox.provider"><el-option v-for="item in providerItems" :key="item.id" :label="item.name" :value="item.id" /></el-select><el-button type="primary" plain @click="startCustomProvider">添加</el-button></div></el-form-item>
-          <div class="provider-profile-toolbar"><small>可选：DeepSeek、Ollama、OpenAI Compatible，或添加自定义 OpenAI-compatible 配置。</small><div v-if="selectedCustomProvider"><el-button size="small" @click="editCustomProvider(selectedCustomProvider)">编辑</el-button><el-button size="small" type="danger" plain @click="deleteCustomProvider(selectedCustomProvider)">删除</el-button></div></div>
-          <div v-if="providerProfileEditorVisible" class="provider-profile-editor"><el-form-item label="Provider 显示名称"><el-input v-model="providerProfileDraft.name" placeholder="例如：公司私有大模型" maxlength="128" /></el-form-item><el-form-item label="Provider ID"><el-input v-model="providerProfileDraft.id" placeholder="custom-company-model" maxlength="64" :disabled="Boolean(providerProfileEditingId)" /></el-form-item><el-checkbox v-model="providerProfileDraft.requiresApiKey">测试时需要 API Key</el-checkbox><div class="provider-profile-actions"><el-button size="small" @click="cancelProviderProfileEdit">取消</el-button><el-button size="small" type="primary" @click="saveProviderProfile">保存到当前租户</el-button></div></div>
-          <div v-if="selectedPlugin" class="plugin-description"><strong>{{ selectedPlugin.name }}</strong><span>{{ selectedPlugin.description }}</span></div>
-          <el-form-item label="API Base URL"><el-input v-model="sandbox.baseUrl" placeholder="https://api.deepseek.com" /></el-form-item><el-form-item label="模型"><el-input v-model="sandbox.model" placeholder="deepseek-chat" /></el-form-item>
-          <el-form-item v-if="selectedPlugin?.requiresApiKey || sandbox.provider === 'openai-compatible' || customProviderSelected" label="API Key"><el-input v-model="sandbox.apiKey" type="password" show-password autocomplete="off" placeholder="仅用于本次连接测试" /></el-form-item>
-          <el-form-item label="测试问题"><el-input v-model="sandbox.question" type="textarea" :rows="3" maxlength="2000" show-word-limit /></el-form-item><el-alert title="API Key 不会保存，也不会写入 trace 或审计日志；自定义 Provider 的来源必须在 IOT_AI_PROVIDER_TEST_ALLOWED_ORIGINS 白名单中。" type="info" :closable="false" show-icon /><el-button class="test-button" type="primary" :loading="testing" @click="testPlugin">连接并测试插件</el-button>
-        </el-form>
-        <div v-if="testResult" class="test-result" :class="{ success:testResult.success, failed:!testResult.success }"><div><strong>{{ testResult.success ? '连接成功' : '连接失败' }}</strong><el-tag :type="testResult.success ? 'success' : 'danger'" effect="dark">{{ testResult.success ? `${testResult.latencyMs} ms` : 'ERROR' }}</el-tag></div><small v-if="testResult.providerName">{{ testResult.providerName }} · {{ testResult.model }}</small><MarkdownContent :source="testResult.answer || testResult.error" /><small v-if="testResult.traceId">Trace · {{ testResult.traceId }}</small></div>
-      </section>
-      </div>
-    </div>
   </el-drawer>
+  <el-dialog v-model="agentEditorVisible" :title="editingAgentId ? '编辑 Agent' : '新建 Agent'" width="min(820px, 94vw)" class="agent-editor-dialog" append-to-body destroy-on-close>
+    <el-alert title="JSON 标准不支持注释。内置 Agent 仅可查看，动态 Agent 可在管理清单中编辑、启用或删除。" type="info" :closable="false" show-icon />
+    <el-form class="drawer-form" label-position="top" :disabled="!isAdmin || creatingAgent">
+      <el-form-item label="Agent Manifest JSON"><el-input ref="agentEditorRef" v-model="agentJson" class="agent-json-editor" type="textarea" :rows="18" resize="vertical" spellcheck="false" /></el-form-item>
+      <div class="manifest-guide">
+        <div class="manifest-guide-title"><div><strong>字段说明</strong><small>所有字段均为必填，请参考下方说明填写。</small></div><el-tag size="small" effect="plain">11 个字段</el-tag></div>
+        <div class="manifest-field-list">
+          <div v-for="field in agentFieldDocs" :key="field.name" class="manifest-field"><code>{{ field.name }}</code><span>{{ field.type }}</span><p>{{ field.note }}</p></div>
+        </div>
+        <div class="tool-whitelist"><strong>allowedTools 可用工具</strong><div><span v-for="tool in agentToolDocs" :key="tool.name"><code>{{ tool.name }}</code><small>{{ tool.label }}</small></span></div></div>
+      </div>
+      <el-alert title="只允许受控查询工具与“仅生成、不保存”的规则草稿工具；内置 Agent 不能覆盖，Agent 不能直接启用规则。" type="info" :closable="false" show-icon />
+    </el-form>
+    <template #footer><el-button @click="cancelAgentEditor">取消</el-button><el-button type="primary" :loading="creatingAgent" @click="saveAgent">{{ editingAgentId ? '校验并保存修改' : '校验并创建 Agent' }}</el-button></template>
+  </el-dialog>
+  <el-dialog v-model="agentPreviewVisible" title="查看内置 Agent Manifest（只读）" width="min(760px, 92vw)" append-to-body>
+    <el-alert title="内置 Agent 仅供查看，不能编辑、启用/禁用或删除。" type="info" :closable="false" show-icon />
+    <div v-if="agentPreview" class="agent-preview-summary"><div><strong>{{ workflowName(agentPreview) }}</strong><el-tag size="small" effect="plain">内置只读</el-tag></div><small>{{ workflowKey(agentPreview) }} · {{ agentPreview.version ? `v${agentPreview.version}` : '无版本' }} · {{ agentPreview.defaultModel || '未设置模型' }}</small><p>{{ agentPreview.description || '未填写插件说明' }}</p></div>
+    <pre class="agent-manifest-preview">{{ agentPreviewJson }}</pre>
+    <template #footer><el-button @click="agentPreviewVisible = false">关闭</el-button></template>
+  </el-dialog>
   <HarnessTraceDrawer v-model="traceVisible" :run="selectedRun" />
 </template>
 
@@ -809,6 +620,7 @@ onBeforeUnmount(() => { abortController?.abort(); flushPendingAssistantText(fals
 .ai-workbench { display:grid; grid-template-columns:minmax(280px,320px) minmax(0,1fr); gap:16px; align-items:stretch; }.control-card,.ai-chat-card { height:clamp(580px,calc(100vh - 190px),780px); min-height:0; }.card-header>div { display:grid; gap:3px; }.card-header small { display:block; }.control-card :deep(.el-card__body) { height:calc(100% - 57px); padding:0; }.control-scroll { height:100%; padding:16px; overflow:auto; }.control-scroll>.el-alert { margin-bottom:14px; }.workflow-description { margin:-3px 0 14px; padding:12px; background:#f5f9ff; border:1px solid #d6e8ff; border-radius:4px; }.workflow-description>div:first-child { display:flex; align-items:center; gap:9px; }.workflow-description>div:first-child>div { display:grid; gap:2px; }.workflow-description strong { color:#1554ad; font-size:12px; }.workflow-description small { color:#8c8c8c; font-size:10px; }.workflow-description p { margin:9px 0; color:#646c73; font-size:11px; line-height:1.6; }.workflow-icon { width:30px; height:30px; display:grid; place-items:center; color:#fff; background:#1677ff; border-radius:4px; font-size:9px; font-weight:800; }.capability-list { display:flex; flex-wrap:wrap; gap:5px; }.run-config { margin-bottom:2px; }.run-config>div { display:grid; grid-template-columns:minmax(0,1fr) 112px; gap:9px; }.run-config :deep(.el-input-number) { width:100%; }.provider-summary { margin:0 0 14px; padding:11px; display:grid; gap:4px; background:#fafafa; border:1px solid #ededed; border-radius:4px; }.provider-summary>span { color:#8c8c8c; font-size:10px; }.provider-summary strong { font-size:12px; }.provider-summary small { color:#646c73; }.provider-summary .el-alert { margin-top:7px; }.sandbox-collapse { border-top:1px solid #ededed; }.collapse-title { width:100%; padding-right:8px; display:flex; align-items:center; justify-content:space-between; }.collapse-title>div { display:grid; gap:2px; }.collapse-title strong { font-size:12px; }.collapse-title small { color:#8c8c8c; font-size:10px; }.plugin-description { margin:-4px 0 15px; display:grid; gap:4px; }.plugin-description strong { color:#1554ad; font-size:11px; }.plugin-description span { color:#646c73; font-size:10px; line-height:1.5; }.provider-select-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:7px; }.provider-select-row :deep(.el-select) { width:100%; }.provider-profile-toolbar { margin:-5px 0 12px; display:flex; align-items:center; justify-content:space-between; gap:8px; }.provider-profile-toolbar small { color:#86909c; font-size:10px; line-height:1.5; }.provider-profile-toolbar>div { display:flex; gap:5px; flex:none; }.provider-profile-editor { margin:0 0 13px; padding:11px; background:#f9f0ff; border:1px solid #d3adf7; border-radius:5px; }.provider-profile-editor :deep(.el-form-item) { margin-bottom:10px; }.provider-profile-actions { display:flex; justify-content:flex-end; gap:7px; margin-top:10px; }.admin-notice { margin-bottom:14px; }.test-button { width:100%; margin-top:12px; }.test-result { margin-top:14px; padding:11px; border:1px solid; border-radius:4px; }.test-result.success { background:#f6ffed; border-color:#b7eb8f; }.test-result.failed { background:#fff2f0; border-color:#ffccc7; }.test-result>div { display:flex; justify-content:space-between; align-items:center; }.test-result p { margin:8px 0; color:#3d3d3d; font-size:11px; line-height:1.6; white-space:pre-wrap; }.test-result small { color:#8c8c8c; word-break:break-all; }
 .knowledge-summary { margin:0 0 14px; padding:11px; display:grid; gap:5px; background:#f6ffed; border:1px solid #d9f7be; border-radius:4px; }.knowledge-summary>div { display:flex; align-items:center; justify-content:space-between; }.knowledge-summary span,.knowledge-summary small { color:#5b6b59; font-size:10px; }.knowledge-summary strong { color:#237804; font-size:11px; }.binding-numbers { display:grid; grid-template-columns:1fr 1fr; gap:9px; }.binding-numbers :deep(.el-input-number),.sandbox-collapse :deep(.el-select),.sandbox-collapse :deep(.el-radio-group) { width:100%; }.sandbox-collapse :deep(.el-radio-button) { flex:1; }.sandbox-collapse :deep(.el-radio-button__inner) { width:100%; padding-left:7px; padding-right:7px; }
 .agent-json-editor :deep(textarea) { font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-size:10px; line-height:1.55; }.agent-actions { margin-top:12px; display:flex; justify-content:flex-end; gap:8px; }
+.agent-preview-summary { margin-top:14px; padding:12px; display:grid; gap:5px; background:#f6faff; border:1px solid #d6e8ff; border-radius:5px; }.agent-preview-summary>div { display:flex; align-items:center; gap:7px; }.agent-preview-summary strong { color:#1f2329; font-size:13px; }.agent-preview-summary small { color:#697386; font-size:10px; }.agent-preview-summary p { margin:0; color:#4e5969; font-size:11px; line-height:1.6; }.agent-manifest-preview { max-height:min(58vh,560px); margin:12px 0 0; padding:14px; overflow:auto; color:#1f2329; background:#fbfcfe; border:1px solid #d6e4ff; border-radius:5px; font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-size:11px; line-height:1.65; white-space:pre-wrap; word-break:break-word; }
 .workflow-admin-panel { margin-bottom:18px; padding:12px; background:#fafcff; border:1px solid #d6e4ff; border-radius:6px; }.workflow-admin-toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:10px; }.workflow-admin-toolbar>div:first-child { min-width:0; display:grid; gap:3px; }.workflow-admin-toolbar strong { color:#1f2329; font-size:12px; }.workflow-admin-toolbar small { color:#86909c; font-size:10px; }.workflow-admin-toolbar>div:last-child { display:flex; gap:6px; flex:none; }.workflow-admin-list { display:grid; gap:7px; }.workflow-admin-item { padding:10px; display:flex; align-items:flex-start; justify-content:space-between; gap:12px; background:#fff; border:1px solid #edf0f5; border-radius:5px; }.workflow-admin-main { min-width:0; display:grid; gap:4px; }.workflow-admin-main>div { min-width:0; display:flex; align-items:center; flex-wrap:wrap; gap:5px; }.workflow-admin-main strong { max-width:260px; overflow:hidden; color:#303133; font-size:11px; text-overflow:ellipsis; white-space:nowrap; }.workflow-admin-main small { overflow:hidden; color:#86909c; font-size:9px; text-overflow:ellipsis; white-space:nowrap; }.workflow-admin-main p { margin:2px 0 0; overflow:hidden; color:#646c73; font-size:10px; line-height:1.5; text-overflow:ellipsis; white-space:nowrap; }.workflow-admin-actions { display:flex; flex:none; align-items:center; gap:5px; }.workflow-admin-actions .el-button { margin-left:0; }
 .manifest-guide { margin:-2px 0 16px; overflow:hidden; background:#fbfcfe; border:1px solid #d6e4ff; border-radius:6px; }.manifest-guide-title { padding:12px 14px; display:flex; align-items:center; justify-content:space-between; gap:12px; background:#f0f5ff; border-bottom:1px solid #d6e4ff; }.manifest-guide-title>div { display:grid; gap:3px; }.manifest-guide-title strong { color:#10239e; font-size:12px; }.manifest-guide-title small { color:#697386; font-size:10px; }.manifest-field-list { display:grid; }.manifest-field { padding:10px 14px; display:grid; grid-template-columns:124px 74px minmax(0,1fr); align-items:start; gap:10px; border-bottom:1px solid #edf0f5; }.manifest-field:last-child { border-bottom:0; }.manifest-field code,.tool-whitelist code { color:#0958d9; font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-size:10px; font-weight:700; word-break:break-all; }.manifest-field>span { width:max-content; padding:2px 6px; color:#595959; background:#f0f0f0; border-radius:3px; font-size:9px; }.manifest-field p { margin:0; color:#4e5969; font-size:10px; line-height:1.55; }.tool-whitelist { padding:13px 14px; display:grid; gap:10px; background:#fff; border-top:1px solid #d6e4ff; }.tool-whitelist>strong { color:#303133; font-size:11px; }.tool-whitelist>div { display:grid; grid-template-columns:1fr 1fr; gap:7px; }.tool-whitelist span { min-width:0; padding:8px 9px; display:grid; gap:3px; background:#f7f9fc; border-radius:4px; }.tool-whitelist small { color:#697386; font-size:9px; }
 .ai-chat-card :deep(.el-card__body) { height:calc(100% - 57px); display:flex; flex-direction:column; }.chat-header>div:last-child { display:flex; align-items:center; }.quick-prompts { flex:none; display:flex; flex-wrap:wrap; gap:7px; padding-bottom:12px; border-bottom:1px solid #f0f0f0; }.quick-prompts button { padding:6px 9px; color:#1554ad; background:#f5f9ff; border:1px solid #d6e8ff; border-radius:3px; font-size:11px; cursor:pointer; }.quick-prompts button:hover:not(:disabled) { color:#fff; background:#1677ff; border-color:#1677ff; }.quick-prompts button:disabled { opacity:.5; cursor:not-allowed; }.chat-log { min-height:0; flex:1; padding:15px 3px 6px; overflow:auto; }.message-row { display:flex; align-items:flex-start; gap:9px; }.message-row.user { flex-direction:row-reverse; }.message-avatar { width:28px; height:28px; flex:0 0 28px; display:grid; place-items:center; color:#fff; background:#3f4960; border-radius:4px; font-size:10px; font-weight:700; }.message-row.user .message-avatar { background:#1677ff; }.message-content { width:100%; min-width:0; max-width:min(82%,760px); margin-bottom:14px; }.message-row.user .message-content { width:fit-content; max-width:min(82%,760px); display:flex; flex-direction:column; align-items:flex-end; }.chat-message { width:100%; max-width:none; box-sizing:border-box; margin:0; padding:10px 12px; color:#3d3d3d; background:#f5f5f5; border-radius:4px; font-size:12px; line-height:1.75; word-break:break-word; }.message-row.user .chat-message { width:fit-content; max-width:100%; }.chat-message.user { color:#fff; background:#1677ff; }.chat-message.is-failed { background:#fff7f6; border:1px solid #ffccc7; }.chat-message.is-canceled { color:#646c73; background:#fafafa; border:1px dashed #d9d9d9; }.chat-message p { margin:0; white-space:pre-wrap; }.typing { min-width:150px; display:flex; align-items:center; gap:5px; color:#8c8c8c; }.typing i { width:5px; height:5px; background:#8c8c8c; border-radius:50%; animation:pulse 1s infinite; }.typing i:nth-child(2){animation-delay:.16s}.typing i:nth-child(3){animation-delay:.32s}.typing span { margin-left:4px; font-size:10px; }.message-error { margin-top:9px; padding-top:9px; display:grid; gap:3px; border-top:1px solid #ffccc7; }.message-error strong { color:#cf1322; font-size:11px; }.message-error small { color:#8c8c8c; font-size:9px; word-break:break-all; }.message-error .el-button { width:max-content; height:auto; margin-top:3px; padding:0; }.message-meta { margin-top:5px; display:flex; align-items:center; gap:8px; color:#8c8c8c; font-size:9px; }.message-meta button { padding:0; color:#1677ff; background:none; border:0; font-size:9px; cursor:pointer; }.chat-compose { flex:none; display:flex; align-items:flex-end; gap:9px; padding-top:11px; border-top:1px solid #f0f0f0; }.chat-compose .el-button { min-width:72px; }.chat-notice { margin-top:8px; color:#8c8c8c; text-align:center; }
@@ -816,8 +628,10 @@ onBeforeUnmount(() => { abortController?.abort(); flushPendingAssistantText(fals
 .ai-workbench { grid-template-columns:minmax(250px,286px) minmax(0,1fr); }
 .control-section-label { margin:2px 0 10px; display:flex; align-items:center; gap:7px; color:#303133; font-size:11px; font-weight:700; letter-spacing:.02em; }.control-section-label span { width:22px; height:18px; display:grid; place-items:center; color:#1677ff; background:#eaf3ff; border-radius:3px; font-size:9px; }
 .runtime-overview { display:grid; grid-template-columns:1fr 1fr; gap:8px; }.overview-item { min-width:0; padding:10px; display:grid; gap:3px; color:inherit; text-align:left; background:#fafafa; border:1px solid #ededed; border-radius:4px; cursor:pointer; transition:border-color .15s,background .15s; }.overview-item:hover { background:#f5f9ff; border-color:#91caff; }.overview-item span { color:#8c8c8c; font-size:9px; }.overview-item strong { overflow:hidden; color:#303133; font-size:11px; text-overflow:ellipsis; white-space:nowrap; }.overview-item small { overflow:hidden; color:#646c73; font-size:9px; text-overflow:ellipsis; white-space:nowrap; }.runtime-warning { margin-top:10px; }.manager-entry { width:100%; margin-top:12px; padding:11px 12px; display:flex; align-items:center; justify-content:space-between; color:inherit; text-align:left; background:#fff; border:1px solid #d9d9d9; border-radius:4px; cursor:pointer; }.manager-entry:hover { background:#f5f9ff; border-color:#1677ff; }.manager-entry>span { display:grid; gap:2px; }.manager-entry strong { font-size:11px; }.manager-entry small { color:#8c8c8c; font-size:9px; }.manager-entry b { color:#1677ff; font-size:10px; }
+.runtime-overview-single { grid-template-columns:1fr; }.overview-item-static { cursor:default; }.overview-item-static:hover { background:#fafafa; border-color:#ededed; }
 .overview-item:first-child { background:#f9f0ff; border-color:#efdbff; }.overview-item:first-child:hover { border-color:#b37feb; }.overview-item:first-child strong { color:#531dab; }.overview-item:last-child { background:#f6ffed; border-color:#d9f7be; }.overview-item:last-child:hover { border-color:#95de64; }.overview-item:last-child strong { color:#237804; }
-.manager-shell { min-height:100%; display:grid; grid-template-columns:176px minmax(0,1fr); gap:22px; }.manager-menu { height:max-content; padding:6px; background:#f7f8fa; border:0; border-radius:8px; }.manager-menu :deep(.el-menu-item) { height:62px; margin-bottom:5px; padding:0 10px !important; display:flex; gap:10px; color:#4e5969; border:1px solid transparent; border-radius:6px; line-height:normal; }.manager-menu :deep(.el-menu-item:last-child) { margin-bottom:0; }.manager-menu :deep(.el-menu-item:hover) { background:#fff; }.manager-menu-icon { width:32px; height:32px; flex:0 0 32px; display:grid; place-items:center; border-radius:6px; font-size:10px; font-weight:800; }.manager-menu-copy { min-width:0; display:grid; gap:4px; }.manager-menu-copy strong { font-size:12px; }.manager-menu-copy small { color:#86909c; font-size:9px; }.manager-menu :deep(.menu-agent .manager-menu-icon) { color:#0958d9; background:#e6f4ff; }.manager-menu :deep(.menu-knowledge .manager-menu-icon) { color:#237804; background:#f6ffed; }.manager-menu :deep(.menu-provider .manager-menu-icon) { color:#531dab; background:#f9f0ff; }.manager-menu :deep(.menu-agent.is-active) { color:#0958d9; background:#e6f4ff; border-color:#91caff; }.manager-menu :deep(.menu-knowledge.is-active) { color:#237804; background:#f6ffed; border-color:#b7eb8f; }.manager-menu :deep(.menu-provider.is-active) { color:#531dab; background:#f9f0ff; border-color:#d3adf7; }.manager-content { min-width:0; }.manager-panel { animation:manager-in .16s ease-out; }.manager-intro { margin-bottom:20px; padding:16px; background:#f5f9ff; border:1px solid #d6e8ff; border-left:4px solid #1677ff; border-radius:6px; }.manager-intro>span { color:#1677ff; font-size:9px; font-weight:700; letter-spacing:.12em; }.manager-intro>div { margin-top:5px; display:flex; align-items:center; justify-content:space-between; gap:12px; }.manager-intro h3 { margin:0; color:#1f2329; font-size:16px; }.manager-intro p { margin:7px 0 0; color:#646c73; font-size:11px; line-height:1.6; }.panel-knowledge .manager-intro { background:#f6ffed; border-color:#b7eb8f; border-left-color:#52c41a; }.panel-knowledge .manager-intro>span { color:#237804; }.panel-provider .manager-intro { background:#f9f0ff; border-color:#d3adf7; border-left-color:#722ed1; }.panel-provider .manager-intro>span { color:#531dab; }.drawer-form :deep(.el-select),.drawer-form :deep(.el-radio-group) { width:100%; }.drawer-form :deep(.el-radio-button) { flex:1; }.drawer-form :deep(.el-radio-button__inner) { width:100%; }.workflow-manager :deep(.el-drawer__header) { margin-bottom:0; padding-bottom:16px; border-bottom:1px solid #ededed; }.workflow-manager :deep(.el-drawer__body) { padding-top:16px; }
+.overview-item-static { background:#fafafa; border-color:#ededed; }.overview-item-static:hover { background:#fafafa; border-color:#ededed; }.overview-item-static strong { color:#303133; }
+.manager-panel { animation:manager-in .16s ease-out; }.manager-intro { margin-bottom:20px; padding:16px; background:#f5f9ff; border:1px solid #d6e8ff; border-left:4px solid #1677ff; border-radius:6px; }.manager-intro>span { color:#1677ff; font-size:9px; font-weight:700; letter-spacing:.12em; }.manager-intro>div { margin-top:5px; display:flex; align-items:center; justify-content:space-between; gap:12px; }.manager-intro h3 { margin:0; color:#1f2329; font-size:16px; }.manager-intro p { margin:7px 0 0; color:#646c73; font-size:11px; line-height:1.6; }.drawer-form :deep(.el-select),.drawer-form :deep(.el-radio-group) { width:100%; }.drawer-form :deep(.el-radio-button) { flex:1; }.drawer-form :deep(.el-radio-button__inner) { width:100%; }.workflow-manager :deep(.el-drawer__header) { margin-bottom:0; padding-bottom:16px; border-bottom:1px solid #ededed; }.workflow-manager :deep(.el-drawer__body) { padding-top:16px; }.agent-editor-dialog :deep(.el-dialog__body) { max-height:calc(100vh - 210px); overflow-y:auto; overscroll-behavior:contain; }.agent-editor-dialog .drawer-form { margin-top:14px; }
 @keyframes manager-in { from { opacity:0; transform:translateX(6px); } }
 @keyframes pulse { 50% { opacity:.28; transform:translateY(-2px); } }
 @media (max-width:1120px) { .ai-workbench { grid-template-columns:1fr; }.control-card { height:auto; min-height:0; }.control-card :deep(.el-card__body) { height:auto; }.control-scroll { max-height:560px; }.ai-chat-card { height:650px; } }

@@ -31,6 +31,7 @@ import (
 	"iot-platform/internal/model"
 	"iot-platform/internal/parser"
 	"iot-platform/internal/ports"
+	"iot-platform/internal/protocolruntime"
 )
 
 func main() {
@@ -108,7 +109,7 @@ func main() {
 		registry.Set("mqtt_subscription_count", 4)
 		log.Info("realtime enabled", "adapter", "mqtt")
 	}
-	parsers := parser.NewRegistry(parser.GB26875Parser{}, parser.ConfigurableJSONParser{}, parser.ConfigurableHexParser{}, parser.ModbusCoilParser{}, parser.JavaScriptParser{}, parser.ExternalParser{Root: cfg.DataDir}, parser.FireSmokeHexParser{}, parser.ModbusParser{}, parser.JSONParser{})
+	parsers := parser.NewRegistry(parser.GB26875Parser{}, parser.ConfigurableJSONParser{}, parser.ConfigurableHexParser{}, parser.ModbusTCPParser{}, parser.ModbusCoilParser{}, parser.JavaScriptParser{}, parser.ExternalParser{Root: cfg.DataDir}, parser.FireSmokeHexParser{}, parser.ModbusParser{}, parser.JSONParser{})
 	engine := core.New(repo, archivePort, bus, realtime, parsers, log)
 	var legacyRaw ports.RawMessageReader
 	if reader, ok := archivePort.(ports.RawMessageReader); ok {
@@ -173,6 +174,12 @@ func main() {
 		}()
 	}
 	fatal(log, "start engine", engine.Start(ctx))
+	protocolRuntime := protocolruntime.New(repo, func(c context.Context, raw model.RawMessage) error {
+		_, _, err := engine.IngestRaw(c, raw)
+		return err
+	}, log, cfg.ModbusAllowedCIDRs...)
+	protocolRuntime.Start(ctx)
+	log.Info("active protocol runtime enabled", "transports", []string{"MODBUS_TCP"})
 	if mqttClient != nil {
 		fatal(log, "subscribe raw mqtt", mqttClient.SubscribeRaw(func(c context.Context, v model.RawMessage) error { _, _, err := engine.IngestRaw(c, v); return err }))
 		fatal(log, "subscribe device state mqtt", mqttClient.SubscribeDeviceState(engine.UpdateDeviceState))

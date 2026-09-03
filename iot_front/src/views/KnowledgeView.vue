@@ -23,15 +23,22 @@ const category = ref('manual')
 const tags = ref([])
 const runtime = ref({ indexMode:'', persistentIndex:false })
 const agentError = ref('')
+const bindingLoading = ref(false)
+const bindingSaving = ref(false)
+const bindingError = ref('')
+const bindingWorkflowId = ref('')
+const knowledgeBinding = ref({ retrievalMode:'auto', topK:5, minScore:0.25, noMatchPolicy:'allow-model' })
 const page = ref(1)
 const pageSize = ref(20)
 const total = ref(0)
 
 const canUpload = computed(() => session.role === 'admin' || session.role === 'operator')
+const canManageBinding = computed(() => session.role === 'admin' || session.role === 'operator')
 const indexedCount = computed(() => documents.value.filter(item => item.status === 'INDEXED').length)
 const totalChunks = computed(() => documents.value.reduce((sum, item) => sum + Number(item.metadata?.chunks || 0), 0))
 const totalSize = computed(() => documents.value.reduce((sum, item) => sum + Number(item.metadata?.size || 0), 0))
 const selectedAgent = computed(() => agents.value.find(item => (item.id || item.workflowId) === workflowId.value))
+const selectedBindingAgent = computed(() => agents.value.find(item => agentKey(item) === bindingWorkflowId.value))
 
 function agentKey(item) { return item?.id || item?.workflowId || '' }
 function agentName(item) { return item?.name || item?.label || agentKey(item) || '未命名 Agent' }
@@ -66,11 +73,47 @@ async function load() {
     if (agentResult.status === 'fulfilled') agents.value = Array.isArray(agentResult.value.items) ? agentResult.value.items.filter(item => item.enabled !== false) : []
     else agentError.value = agentResult.reason?.message || 'Agent 列表读取失败'
     if (!workflowId.value && agents.value.length) workflowId.value = agentKey(agents.value[0])
+    if (!bindingWorkflowId.value && agents.value.length) bindingWorkflowId.value = agentKey(agents.value[0])
+    if (bindingWorkflowId.value) void loadBinding()
   } catch (error) {
     if (error?.message?.includes('workflows')) agentError.value = error.message
     else notifyError(error)
   } finally {
     loading.value = false
+  }
+}
+
+async function loadBinding() {
+  if (!bindingWorkflowId.value) return
+  bindingLoading.value = true
+  bindingError.value = ''
+  try {
+    const value = await api(`/api/v1/ai/workflows/${encodeURIComponent(bindingWorkflowId.value)}/knowledge-binding`)
+    knowledgeBinding.value = {
+      retrievalMode:value.retrievalMode || 'auto',
+      topK:Number(value.topK) || 5,
+      minScore:Number(value.minScore ?? 0.25),
+      noMatchPolicy:value.noMatchPolicy || 'allow-model'
+    }
+  } catch (error) {
+    bindingError.value = error.message || '知识库策略读取失败'
+  } finally {
+    bindingLoading.value = false
+  }
+}
+
+async function saveBinding() {
+  if (!bindingWorkflowId.value || !canManageBinding.value) return
+  bindingSaving.value = true
+  bindingError.value = ''
+  try {
+    const value = await api(`/api/v1/ai/workflows/${encodeURIComponent(bindingWorkflowId.value)}/knowledge-binding`, { method:'PUT', body:JSON.stringify(knowledgeBinding.value) })
+    knowledgeBinding.value = { ...knowledgeBinding.value, ...value }
+    ElMessage.success(`已保存 ${agentName(selectedBindingAgent.value)} 的知识库策略`)
+  } catch (error) {
+    bindingError.value = error.message || '知识库策略保存失败'
+  } finally {
+    bindingSaving.value = false
   }
 }
 
@@ -149,6 +192,22 @@ onMounted(load)
 
   <div class="page-toolbar knowledge-toolbar"><el-button type="primary" :disabled="!canUpload" @click="openUpload">上传并绑定 Agent</el-button><el-button :loading="loading" @click="load">刷新</el-button><span>共 {{ total }} 份文档，上传时必须选择或输入一个 Agent ID。</span></div>
 
+  <el-card v-if="agents.length" shadow="never" class="surface-card knowledge-policy-card">
+    <template #header><div class="card-header"><div><strong>Agent 知识库策略</strong><small>文档、绑定和检索策略统一在本页面维护</small></div><el-button size="small" :loading="bindingLoading" @click="loadBinding">刷新策略</el-button></div></template>
+    <el-alert v-if="bindingError" :title="bindingError" type="warning" :closable="false" show-icon />
+    <el-form label-position="top" :model="knowledgeBinding" :disabled="!canManageBinding || bindingLoading || bindingSaving">
+      <div class="knowledge-policy-grid">
+        <el-form-item label="当前 Agent"><el-select v-model="bindingWorkflowId" filterable placeholder="选择 Agent" @change="loadBinding"><el-option v-for="agent in agents" :key="agentKey(agent)" :label="`${agentName(agent)} · ${agentKey(agent)}`" :value="agentKey(agent)" /></el-select></el-form-item>
+        <el-form-item label="检索模式"><el-radio-group v-model="knowledgeBinding.retrievalMode"><el-radio-button value="auto">按需检索</el-radio-button><el-radio-button value="always">每次强制检索</el-radio-button><el-radio-button value="disabled">禁用</el-radio-button></el-radio-group></el-form-item>
+      </div>
+      <el-alert :title="`${documents.filter(item => item.workflowId === bindingWorkflowId).length} 份文档已直接绑定当前 Agent`" type="success" :closable="false" show-icon />
+      <div class="binding-numbers"><el-form-item label="召回数量"><el-input-number v-model="knowledgeBinding.topK" :min="1" :max="20" controls-position="right" /></el-form-item><el-form-item label="最低相似度"><el-input-number v-model="knowledgeBinding.minScore" :min="0" :max="1" :step="0.05" :precision="2" controls-position="right" /></el-form-item></div>
+      <el-form-item label="无匹配知识时"><el-select v-model="knowledgeBinding.noMatchPolicy"><el-option label="允许模型回答，但必须说明证据不足" value="allow-model" /><el-option label="阻止回答，必须先补充知识" value="require-evidence" /></el-select></el-form-item>
+      <el-alert title="Agent ID 会写入短期 Harness Token；模型无法通过修改工具参数扩大检索范围。" type="info" :closable="false" show-icon />
+      <div class="knowledge-policy-actions"><small v-if="!canManageBinding">当前账号可查看策略；修改需要管理员或运维人员权限。</small><el-button type="primary" :loading="bindingSaving" :disabled="!canManageBinding || !bindingWorkflowId" @click="saveBinding">保存知识库策略</el-button></div>
+    </el-form>
+  </el-card>
+
   <el-card shadow="never" class="surface-card table-card documents-card">
     <template #header><div class="card-header"><div><strong>已上传文档</strong><small>文档和 Agent 归属持久化保存</small></div><el-tag effect="plain">{{ runtime.indexMode || 'INDEX' }}</el-tag></div></template>
     <el-table v-loading="loading" :data="documents" stripe>
@@ -209,8 +268,9 @@ onMounted(load)
 .knowledge-hero>div { position:relative; z-index:1; }.knowledge-hero span { color:rgba(255,255,255,.68); font-size:9px; font-weight:700; letter-spacing:.16em; }.knowledge-hero h3 { margin:5px 0; font-size:22px; }.knowledge-hero p { margin:0; color:rgba(255,255,255,.72); font-size:12px; }.hero-actions { display:flex; align-items:center; gap:9px; }.hero-actions .el-button { color:#fff; background:rgba(255,255,255,.08); border-color:rgba(255,255,255,.28); }
 .knowledge-stats { margin:14px 0; display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }.knowledge-stats .el-card :deep(.el-card__body) { min-height:92px; display:grid; grid-template-columns:1fr auto; align-items:center; gap:2px 14px; }.knowledge-stats span,.knowledge-stats small { color:var(--muted-foreground); font-size:11px; }.knowledge-stats strong { grid-row:1/3; grid-column:2; color:#1554ad; font-size:28px; }.knowledge-stats small { grid-column:1; }
 .knowledge-toolbar { margin-top:2px; }.upload-icon { color:#1677ff; font-size:38px; }.field-tip { display:block; margin-top:5px; color:#475569; font-size:10px; line-height:1.5; }.metadata-grid { display:grid; grid-template-columns:.8fr 1.2fr; gap:10px; }.document-name { display:flex; align-items:center; gap:9px; }.document-name>.el-icon { width:30px; height:30px; flex:none; color:#1677ff; background:#eaf3ff; border-radius:4px; }.document-name span { min-width:0; }.document-name b { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.document-name small { display:block; margin-top:3px; color:#475569; font-size:9px; word-break:break-all; }
+.knowledge-policy-card { margin-bottom:14px; }.knowledge-policy-card :deep(.el-alert) { margin-bottom:12px; }.knowledge-policy-grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.35fr); gap:12px; }.knowledge-policy-grid :deep(.el-select),.knowledge-policy-grid :deep(.el-radio-group) { width:100%; }.knowledge-policy-grid :deep(.el-radio-button) { flex:1; }.knowledge-policy-grid :deep(.el-radio-button__inner) { width:100%; padding-left:8px; padding-right:8px; }.knowledge-policy-actions { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:12px; }.knowledge-policy-actions small { color:#475569; font-size:10px; line-height:1.5; }
 .detail-body { min-height:180px; }.chunk-policy { margin-top:14px; padding:14px; border:1px solid #dbeafe; border-radius:6px; background:#f8fbff; }.chunk-policy-title { display:flex; align-items:center; flex-wrap:wrap; gap:7px; }.chunk-policy-title strong { margin-right:auto; color:#16345f; }.chunk-policy-grid { display:grid; grid-template-columns:repeat(5,1fr); gap:8px; margin:12px 0 9px; }.chunk-policy-grid span { display:flex; flex-direction:column; gap:3px; color:#64748b; font-size:10px; }.chunk-policy-grid strong { color:#16345f; font-size:13px; }.chunk-policy>small { color:#475569; line-height:1.6; }.chunk-table { margin-top:14px; }.chunk-table :deep(.el-table__cell) { vertical-align:top; }.chunk-content { max-height:180px; overflow:auto; white-space:pre-wrap; word-break:break-word; color:#1e293b; line-height:1.6; font-size:12px; }.subline { display:block; margin-top:4px; color:#64748b; font-size:10px; word-break:break-all; }
-@media (max-width:640px) { .knowledge-hero { align-items:flex-start; flex-direction:column; }.knowledge-hero p { line-height:1.6; }.hero-actions { width:100%; justify-content:space-between; }.knowledge-stats { grid-template-columns:1fr; }.documents-card { overflow:hidden; }.metadata-grid { grid-template-columns:1fr; } }
+@media (max-width:640px) { .knowledge-hero { align-items:flex-start; flex-direction:column; }.knowledge-hero p { line-height:1.6; }.hero-actions { width:100%; justify-content:space-between; }.knowledge-stats { grid-template-columns:1fr; }.documents-card { overflow:hidden; }.metadata-grid { grid-template-columns:1fr; }.knowledge-policy-grid { grid-template-columns:1fr; }.knowledge-policy-actions { align-items:flex-start; flex-direction:column; }.knowledge-policy-actions .el-button { width:100%; } }
 :deep(.el-dialog__body) { overflow-x:hidden; }
 :deep(.el-table .cell) { white-space:normal; }
 :deep(.el-upload__text), :deep(.el-upload__tip) { color:#475569; }

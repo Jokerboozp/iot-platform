@@ -40,6 +40,38 @@ CREATE TABLE IF NOT EXISTS raw_message_log (
   received_at bigint NOT NULL, stored_at bigint NOT NULL, body jsonb NOT NULL,
   PRIMARY KEY (tenant_id, message_id)
 );
+
+-- Protocol v2 keeps the protocol family stable while every release and point
+-- table version is immutable. Product bindings are switched atomically and
+-- retain the previous version for one-click rollback.
+CREATE TABLE IF NOT EXISTS protocol_definition (
+  tenant_id text NOT NULL, id text NOT NULL, body jsonb NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (tenant_id,id)
+);
+CREATE TABLE IF NOT EXISTS protocol_release (
+  tenant_id text NOT NULL, protocol_id text NOT NULL, version text NOT NULL,
+  status text NOT NULL, parser_type text NOT NULL, body jsonb NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id,protocol_id,version)
+);
+CREATE INDEX IF NOT EXISTS protocol_release_status_idx ON protocol_release(tenant_id,status,created_at DESC);
+CREATE TABLE IF NOT EXISTS point_table_release (
+  tenant_id text NOT NULL, protocol_id text NOT NULL, version text NOT NULL,
+  source_sha256 text NOT NULL DEFAULT '', body jsonb NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id,protocol_id,version)
+);
+CREATE TABLE IF NOT EXISTS product_protocol_binding (
+  tenant_id text NOT NULL, product_id text NOT NULL, protocol_id text NOT NULL,
+  version text NOT NULL, body jsonb NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id,product_id)
+);
+CREATE TABLE IF NOT EXISTS device_access_profile (
+  tenant_id text NOT NULL, id text NOT NULL, device_id text NOT NULL,
+  product_id text NOT NULL, enabled boolean NOT NULL, body jsonb NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (tenant_id,id)
+);
+CREATE INDEX IF NOT EXISTS device_access_profile_runtime_idx ON device_access_profile(enabled,tenant_id,device_id);
 CREATE INDEX IF NOT EXISTS raw_message_log_device_time_idx ON raw_message_log(tenant_id, device_id, received_at DESC);
 CREATE INDEX IF NOT EXISTS raw_message_log_time_idx ON raw_message_log(received_at, message_id);
 

@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { AlertTriangle, BellRing, Clock3, Volume2, X } from '@lucide/vue'
 import { formatTime, session } from '../api'
-import { alarmSources, alarmType, label } from '../labels'
+import { alarmType } from '../labels'
 import {
   alertKeys,
   alertTagType,
@@ -63,6 +63,10 @@ function dismissAlert(id) {
   popupAlerts.value = popupAlerts.value.filter(item => item.id !== id)
 }
 
+function alertContent(item) {
+  return item?.detail || (item?.kind === 'fault' ? '检测到设备故障，请及时处理。' : '检测到设备异常报警，请及时处理。')
+}
+
 function viewAlert(alert) {
   dismissAlert(alert.id)
   if (alert.alarmId) {
@@ -114,23 +118,33 @@ onBeforeUnmount(() => {
       <div class="global-alert-head">
         <div class="global-alert-icon"><component :is="item.kind === 'fault' ? AlertTriangle : BellRing" /></div>
         <div class="global-alert-title">
-          <span class="global-alert-kicker">{{ item.kind === 'fault' ? '设备故障' : '实时报警' }}</span>
-          <h3>{{ item.alarmTypeLabel || alarmType(item.alarmType) }}</h3>
-          <span>{{ item.deviceName || item.deviceId || '未知设备' }}</span>
+          <span class="global-alert-kicker">实时通知</span>
+          <h3>{{ item.kind === 'fault' ? '设备故障' : '发现报警' }}</h3>
         </div>
         <button class="global-alert-close" type="button" aria-label="关闭报警提示" @click="dismissAlert(item.id)"><X /></button>
       </div>
 
-      <div class="global-alert-meta">
-        <el-tag :type="alertTagType(item.alarmLevel)" round>{{ item.alarmLevelLabel }}</el-tag>
-        <span>{{ formatTime(item.timestamp) }}</span>
-        <span v-if="item.source">来源：{{ label(alarmSources, item.source, item.source) }}</span>
-      </div>
-      <p v-if="item.detail" class="global-alert-detail">{{ item.detail }}</p>
-      <div class="global-alert-identifiers">
-        <span>设备 ID <code>{{ item.deviceId || '—' }}</code></span>
-        <span v-if="item.alarmId">告警编号 <code>{{ item.alarmId }}</code></span>
-        <span v-else-if="item.messageId">消息 ID <code>{{ item.messageId }}</code></span>
+      <div class="global-alert-facts">
+        <div class="global-alert-fact">
+          <span>设备名称</span>
+          <strong>{{ item.deviceName || '未知设备' }}</strong>
+        </div>
+        <div class="global-alert-fact global-alert-fact-content">
+          <span>报警内容</span>
+          <strong>{{ alertContent(item) }}</strong>
+        </div>
+        <div class="global-alert-fact">
+          <span>报警类型</span>
+          <strong>{{ item.alarmTypeLabel || alarmType(item.alarmType) }}</strong>
+        </div>
+        <div class="global-alert-fact">
+          <span>报警时间</span>
+          <strong>{{ formatTime(item.timestamp) }}</strong>
+        </div>
+        <div class="global-alert-fact">
+          <span>报警等级</span>
+          <el-tag :type="alertTagType(item.alarmLevel)" round>{{ item.alarmLevelLabel }}</el-tag>
+        </div>
       </div>
       <div class="global-alert-actions">
         <el-button size="small" type="danger" plain @click="viewAlert(item)">{{ item.alarmId ? '查看告警详情' : '查看原始报文' }}</el-button>

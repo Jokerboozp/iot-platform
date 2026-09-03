@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"iot-platform/internal/model"
 	"iot-platform/internal/ports"
 )
 
@@ -46,6 +47,31 @@ func TestOpenAICompatibleProvider(t *testing.T) {
 	answer, err := client.Chat(context.Background(), "tenant", "hello")
 	if err != nil || answer != "插件连接成功" {
 		t.Fatalf("answer=%q err=%v", answer, err)
+	}
+}
+
+func TestOpenAICompatibleAnalyzeAlarmAcceptsStringConfidence(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]any{"content": `{"summary":"温度持续升高，需现场复核。","possibleReasons":["传感器异常"],"suggestions":["现场复核设备"],"riskLevel":"HIGH","confidence":"0.86"}`}}},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewOpenAICompatible("deepseek", "DeepSeek", server.URL, "test-model", "test-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	analysis, err := client.AnalyzeAlarm(context.Background(), model.Alarm{ID: "alarm-1", AlarmLevel: "HIGH"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if analysis.Summary == "" || analysis.Model != "test-model" || analysis.Confidence != 0.86 {
+		t.Fatalf("unexpected decoded alarm analysis: %#v", analysis)
 	}
 }
 

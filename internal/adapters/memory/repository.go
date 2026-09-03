@@ -16,32 +16,37 @@ import (
 var ErrNotFound = errors.New("not found")
 
 type Repository struct {
-	mu                sync.RWMutex
-	raw               map[string]model.RawArchiveIndex
-	rawMessages       map[string]model.RawMessage
-	standard          map[string]model.StandardMessage
-	standardProcessed map[string]bool
-	rulePending       map[string]int64
-	states            map[string]model.DeviceState
-	stateEvents       []model.DeviceState
-	rules             map[string]model.AlarmRule
-	alarms            map[string]model.Alarm
-	video             map[string]model.VideoAlarmEvent
-	videoMappings     map[string]model.VideoCameraMapping
-	videoRelations    map[string][]model.VideoCameraRelation
-	ai                map[string]model.AIAnalysis
-	knowledge         map[string]model.KnowledgeDoc
-	workflowKnowledge map[string]model.WorkflowKnowledgeBinding
-	replays           map[string]model.ReplayRequest
-	audits            []model.AuditLog
-	aiToolCalls       []model.AIToolCallLog
-	products          map[string]model.Product
-	protocols         map[string]model.ProtocolPackage
-	devices           map[string]model.ManagedDevice
+	mu                  sync.RWMutex
+	raw                 map[string]model.RawArchiveIndex
+	rawMessages         map[string]model.RawMessage
+	standard            map[string]model.StandardMessage
+	standardProcessed   map[string]bool
+	rulePending         map[string]int64
+	states              map[string]model.DeviceState
+	stateEvents         []model.DeviceState
+	rules               map[string]model.AlarmRule
+	alarms              map[string]model.Alarm
+	video               map[string]model.VideoAlarmEvent
+	videoMappings       map[string]model.VideoCameraMapping
+	videoRelations      map[string][]model.VideoCameraRelation
+	ai                  map[string]model.AIAnalysis
+	knowledge           map[string]model.KnowledgeDoc
+	workflowKnowledge   map[string]model.WorkflowKnowledgeBinding
+	replays             map[string]model.ReplayRequest
+	audits              []model.AuditLog
+	aiToolCalls         []model.AIToolCallLog
+	products            map[string]model.Product
+	protocols           map[string]model.ProtocolPackage
+	protocolDefinitions map[string]model.ProtocolDefinition
+	protocolReleases    map[string]model.ProtocolRelease
+	pointTables         map[string]model.PointTableRelease
+	protocolBindings    map[string]model.ProductProtocolBinding
+	accessProfiles      map[string]model.DeviceAccessProfile
+	devices             map[string]model.ManagedDevice
 }
 
 func NewRepository() *Repository {
-	return &Repository{raw: map[string]model.RawArchiveIndex{}, rawMessages: map[string]model.RawMessage{}, standard: map[string]model.StandardMessage{}, standardProcessed: map[string]bool{}, rulePending: map[string]int64{}, states: map[string]model.DeviceState{}, rules: map[string]model.AlarmRule{}, alarms: map[string]model.Alarm{}, video: map[string]model.VideoAlarmEvent{}, videoMappings: map[string]model.VideoCameraMapping{}, videoRelations: map[string][]model.VideoCameraRelation{}, ai: map[string]model.AIAnalysis{}, knowledge: map[string]model.KnowledgeDoc{}, workflowKnowledge: map[string]model.WorkflowKnowledgeBinding{}, replays: map[string]model.ReplayRequest{}, products: map[string]model.Product{}, protocols: map[string]model.ProtocolPackage{}, devices: map[string]model.ManagedDevice{}}
+	return &Repository{raw: map[string]model.RawArchiveIndex{}, rawMessages: map[string]model.RawMessage{}, standard: map[string]model.StandardMessage{}, standardProcessed: map[string]bool{}, rulePending: map[string]int64{}, states: map[string]model.DeviceState{}, rules: map[string]model.AlarmRule{}, alarms: map[string]model.Alarm{}, video: map[string]model.VideoAlarmEvent{}, videoMappings: map[string]model.VideoCameraMapping{}, videoRelations: map[string][]model.VideoCameraRelation{}, ai: map[string]model.AIAnalysis{}, knowledge: map[string]model.KnowledgeDoc{}, workflowKnowledge: map[string]model.WorkflowKnowledgeBinding{}, replays: map[string]model.ReplayRequest{}, products: map[string]model.Product{}, protocols: map[string]model.ProtocolPackage{}, protocolDefinitions: map[string]model.ProtocolDefinition{}, protocolReleases: map[string]model.ProtocolRelease{}, pointTables: map[string]model.PointTableRelease{}, protocolBindings: map[string]model.ProductProtocolBinding{}, accessProfiles: map[string]model.DeviceAccessProfile{}, devices: map[string]model.ManagedDevice{}}
 }
 
 func key(parts ...string) string { return strings.Join(parts, "\x00") }
@@ -113,6 +118,143 @@ func (r *Repository) ListProtocolPackagesPage(ctx context.Context, tenant string
 		return nil, 0, err
 	}
 	return page(items, offset, limit), len(items), nil
+}
+
+func (r *Repository) SaveProtocolDefinition(_ context.Context, v model.ProtocolDefinition) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.protocolDefinitions[key(v.TenantID, v.ID)] = clone(v)
+	return nil
+}
+func (r *Repository) GetProtocolDefinition(_ context.Context, tenant, id string) (model.ProtocolDefinition, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	v, ok := r.protocolDefinitions[key(tenant, id)]
+	if !ok {
+		return v, ErrNotFound
+	}
+	return clone(v), nil
+}
+func (r *Repository) ListProtocolDefinitions(_ context.Context, tenant string) ([]model.ProtocolDefinition, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := []model.ProtocolDefinition{}
+	for _, v := range r.protocolDefinitions {
+		if tenant == "" || v.TenantID == tenant {
+			out = append(out, clone(v))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt > out[j].UpdatedAt })
+	return out, nil
+}
+func (r *Repository) CreateProtocolRelease(_ context.Context, v model.ProtocolRelease) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	k := key(v.TenantID, v.ProtocolID, v.Version)
+	if _, exists := r.protocolReleases[k]; exists {
+		return errors.New("protocol release already exists")
+	}
+	r.protocolReleases[k] = clone(v)
+	return nil
+}
+func (r *Repository) GetProtocolRelease(_ context.Context, tenant, protocolID, version string) (model.ProtocolRelease, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	v, ok := r.protocolReleases[key(tenant, protocolID, version)]
+	if !ok {
+		return v, ErrNotFound
+	}
+	return clone(v), nil
+}
+func (r *Repository) ListProtocolReleases(_ context.Context, tenant, protocolID string) ([]model.ProtocolRelease, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := []model.ProtocolRelease{}
+	for _, v := range r.protocolReleases {
+		if (tenant == "" || v.TenantID == tenant) && (protocolID == "" || v.ProtocolID == protocolID) {
+			out = append(out, clone(v))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ProtocolID == out[j].ProtocolID {
+			return out[i].CreatedAt > out[j].CreatedAt
+		}
+		return out[i].ProtocolID < out[j].ProtocolID
+	})
+	return out, nil
+}
+func (r *Repository) UpdateProtocolReleaseStatus(_ context.Context, tenant, protocolID, version, status string, publishedAt int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	k := key(tenant, protocolID, version)
+	v, ok := r.protocolReleases[k]
+	if !ok {
+		return ErrNotFound
+	}
+	v.Status, v.PublishedAt = status, publishedAt
+	r.protocolReleases[k] = clone(v)
+	return nil
+}
+func (r *Repository) CreatePointTableRelease(_ context.Context, v model.PointTableRelease) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	k := key(v.TenantID, v.ProtocolID, v.Version)
+	if _, exists := r.pointTables[k]; exists {
+		return errors.New("point table release already exists")
+	}
+	r.pointTables[k] = clone(v)
+	return nil
+}
+func (r *Repository) GetPointTableRelease(_ context.Context, tenant, protocolID, version string) (model.PointTableRelease, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	v, ok := r.pointTables[key(tenant, protocolID, version)]
+	if !ok {
+		return v, ErrNotFound
+	}
+	return clone(v), nil
+}
+func (r *Repository) SaveProductProtocolBinding(_ context.Context, v model.ProductProtocolBinding) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.protocolBindings[key(v.TenantID, v.ProductID)] = clone(v)
+	return nil
+}
+func (r *Repository) GetProductProtocolBinding(_ context.Context, tenant, productID string) (model.ProductProtocolBinding, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	v, ok := r.protocolBindings[key(tenant, productID)]
+	if !ok {
+		return v, ErrNotFound
+	}
+	return clone(v), nil
+}
+func (r *Repository) SaveDeviceAccessProfile(_ context.Context, v model.DeviceAccessProfile) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.accessProfiles[key(v.TenantID, v.ID)] = clone(v)
+	return nil
+}
+func (r *Repository) GetDeviceAccessProfile(_ context.Context, tenant, id string) (model.DeviceAccessProfile, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	v, ok := r.accessProfiles[key(tenant, id)]
+	if !ok {
+		return v, ErrNotFound
+	}
+	return clone(v), nil
+}
+func (r *Repository) ListDeviceAccessProfiles(_ context.Context, tenant string) ([]model.DeviceAccessProfile, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := []model.DeviceAccessProfile{}
+	for _, v := range r.accessProfiles {
+		if tenant == "" || v.TenantID == tenant {
+			out = append(out, clone(v))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt > out[j].UpdatedAt })
+	return out, nil
 }
 func (r *Repository) SaveManagedDevice(_ context.Context, v model.ManagedDevice) error {
 	r.mu.Lock()

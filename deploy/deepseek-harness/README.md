@@ -3,7 +3,7 @@
 This directory turns the official DeepSeek Harness JSON-RPC runtime into a
 small, manifest-driven IoT workflow service. The Harness source is vendored at
 `upstream/deepseek-harness` and pinned by `REVISION` to
-`cd5ef8148158c3a752a658978873241fdf8e2bbc`.
+`dsh-v0.1.2-rc.1` (`a66e4702047846cdaa10c66c9d3df3951f5ea70d`).
 
 The public gateway listens on port `8091`. A separate MCP credential proxy
 listens only on `127.0.0.1:8092`; it is not an externally exposed port.
@@ -15,7 +15,7 @@ Build context must be the repository root:
 ```bash
 docker build \
   -f deploy/deepseek-harness/Dockerfile \
-  -t iot-deepseek-harness:cd5ef81 .
+  -t iot-deepseek-harness:a66e470 .
 ```
 
 The image installs `pnpm@11.7.0`, builds the complete upstream package tree
@@ -47,7 +47,7 @@ docker run --rm \
   -e IOT_HARNESS_GATEWAY_TOKEN='replace-with-at-least-32-random-characters' \
   -e IOT_HARNESS_MCP_ALLOWED_ORIGINS='http://platform-api:8080' \
   -v iot-harness-data:/data \
-  iot-deepseek-harness:cd5ef81
+  iot-deepseek-harness:a66e470
 ```
 
 Important settings:

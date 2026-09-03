@@ -115,6 +115,29 @@ func (e *Engine) runReplay(ctx context.Context, req model.ReplayRequest) {
 }
 
 func (e *Engine) parseReplay(ctx context.Context, raw model.RawMessage, version string) (*model.StandardMessage, error) {
+	protocolID, releaseVersion := raw.ProtocolID, raw.ProtocolVersion
+	if binding, bindingErr := e.Repo.GetProductProtocolBinding(ctx, raw.TenantID, raw.ProductID); bindingErr == nil {
+		if protocolID == "" {
+			protocolID = binding.ProtocolID
+		}
+		if releaseVersion == "" {
+			releaseVersion = binding.Version
+		}
+	}
+	if version != "" && protocolID != "" {
+		releaseVersion = version
+	}
+	if protocolID != "" && releaseVersion != "" {
+		release, releaseErr := e.Repo.GetProtocolRelease(ctx, raw.TenantID, protocolID, releaseVersion)
+		if releaseErr != nil {
+			return nil, releaseErr
+		}
+		if release.Status == "REVOKED" {
+			return nil, fmt.Errorf("protocol release %s@%s is revoked", protocolID, releaseVersion)
+		}
+		raw.ProtocolID, raw.ProtocolVersion, raw.PointTableVersion = protocolID, releaseVersion, release.PointTableVersion
+		return e.Parsers.ParseWithConfig(release.ParserType, release.Config, raw)
+	}
 	product, err := e.Repo.GetProduct(ctx, raw.TenantID, raw.ProductID)
 	if err == nil && product.ProtocolPackageID != "" {
 		pkg, pkgErr := e.Repo.GetProtocolPackage(ctx, raw.TenantID, product.ProtocolPackageID)

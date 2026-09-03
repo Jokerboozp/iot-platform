@@ -1,0 +1,131 @@
+package httpapi
+
+import (
+	"archive/zip"
+	"bytes"
+	"context"
+	"io"
+	"log/slog"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"iot-platform/internal/adapters/local"
+	"iot-platform/internal/adapters/memory"
+	"iot-platform/internal/config"
+	"iot-platform/internal/core"
+	"iot-platform/internal/metrics"
+	"iot-platform/internal/parser"
+)
+
+func TestImportModbusTCPV2CreatesImmutableRelease(t *testing.T) {
+	repo := memory.NewRepository()
+	archive, err := local.NewArchive(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	engine := core.New(repo, archive, local.NewBus(), local.NewRealtime(), parser.NewRegistry(parser.ModbusTCPParser{}), log)
+	engine.Metrics = metrics.New()
+	if err = engine.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Load()
+	cfg.DataDir = t.TempDir()
+	cfg.JWTSecret = "protocol-v2-test-secret-at-least-32"
+	cfg.AdminTenants = []string{"tenant_001"}
+	api := New(cfg, engine, engine.Metrics.(*metrics.Registry), log)
+	token, err := api.auth.Issue("tester", "tenant_001", "operator", nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(api.Handler())
+	defer server.Close()
+	csv := []byte("标识,名称,功能码,地址,数据类型,倍率\ntemperature,温度,03,40001,int16,0.1\n")
+	doImport := func() int {
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		part, _ := writer.CreateFormFile("file", "points.csv")
+		_, _ = part.Write(csv)
+		for key, value := range map[string]string{"protocolId": "pump-modbus", "version": "1.0.0", "name": "消防泵 Modbus", "productId": "pump-product", "deviceId": "pump-01", "host": "127.0.0.1"} {
+			_ = writer.WriteField(key, value)
+		}
+		_ = writer.Close()
+		req, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v2/modbus-tcp/import", &body)
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		req.Header.Set("Authorization", "Bearer "+token)
+		response, requestErr := server.Client().Do(req)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		defer response.Body.Close()
+		return response.StatusCode
+	}
+	if status := doImport(); status != http.StatusCreated {
+		t.Fatalf("first import status=%d", status)
+	}
+	if status := doImport(); status != http.StatusConflict {
+		t.Fatalf("immutable duplicate status=%d", status)
+	}
+	release, err := repo.GetProtocolRelease(context.Background(), "tenant_001", "pump-modbus", "1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if release.Status != "PUBLISHED" || release.ParserType != parser.ModbusTCPParserName {
+		t.Fatalf("unexpected release: %+v", release)
+	}
+	table, err := repo.GetPointTableRelease(context.Background(), "tenant_001", "pump-modbus", "1.0.0")
+	if err != nil || len(table.Points) != 1 || table.Points[0].Address != 0 {
+		t.Fatalf("unexpected point table: %+v err=%v", table, err)
+	}
+	binding, err := repo.GetProductProtocolBinding(context.Background(), "tenant_001", "pump-product")
+	if err != nil || binding.Version != "1.0.0" {
+		t.Fatalf("unexpected binding: %+v err=%v", binding, err)
+	}
+	profile, err := repo.GetDeviceAccessProfile(context.Background(), "tenant_001", "access_pump-01")
+	if err != nil || !profile.Enabled || profile.Port != 502 {
+		t.Fatalf("unexpected access profile: %+v err=%v", profile, err)
+	}
+}
+
+func TestProtocolPackageV2RejectsTraversal(t *testing.T) {
+	var body bytes.Buffer
+	writer := zip.NewWriter(&body)
+	entry, err := writer.Create("../artifact")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = entry.Write([]byte("bad"))
+	_ = writer.Close()
+	reader, err := zip.NewReader(bytes.NewReader(body.Bytes()), int64(body.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = inspectProtocolPackageV2(reader); err == nil {
+		t.Fatal("expected traversal package to be rejected")
+	}
+}
+
+func TestProtocolPackageV2RejectsDuplicateNormalizedEntry(t *testing.T) {
+	var body bytes.Buffer
+	writer := zip.NewWriter(&body)
+	for _, name := range []string{"workers/artifact", "workers/./artifact"} {
+		entry, err := writer.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = entry.Write([]byte(name))
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := zip.NewReader(bytes.NewReader(body.Bytes()), int64(body.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = inspectProtocolPackageV2(reader); err == nil {
+		t.Fatal("expected duplicate normalized entry to be rejected")
+	}
+}

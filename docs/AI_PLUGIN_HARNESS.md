@@ -11,7 +11,7 @@ Web AI 工作台
           -> 租户绑定的只读 MCP 工具
 ```
 
-现有的 Eino/Provider 链路继续用于告警自动分析、规则草稿和 Provider 在线测试；Harness 工作流用于可追踪、可选插件的交互式助手。两者互不耦合。
+现有的 Eino/Provider 链路继续用于告警自动分析和规则草稿；Harness 工作流用于可追踪、可选插件的交互式助手。两者互不耦合，Provider 连接参数由服务端配置管理。
 
 ## 源码版本
 
@@ -23,14 +23,14 @@ Harness 源码不会复制进本仓库。`deploy/deepseek-harness/REVISION` 固�
 
 脚本不会覆盖有本地修改的上游目录。升级时先验证新提交，再更新 `REVISION` 并重新生成 `upstream/deepseek-harness.revision`。
 
-当前锁定的是上游 `cd5ef8148158c3a752a658978873241fdf8e2bbc`。该版本已将旧的 JSON-RPC demo 入口迁移为统一 `@deepseek-ai/dsh/lib/bin.js`；侧车使用 `sdk-minimal` profile，再通过 `cordis.yml` overlay 注入 IoT MCP 和只读策略。Docker 构建会按上游 `python/sdk-runtime` 的依赖清单生成独立 Node carrier，并执行真实 SDK、Cordis 与模拟 MCP 的启动握手；源码工作区的开发用软链接不会直接作为生产运行时。
+当前锁定的是上游 `dsh-v0.1.2-rc.1`（`a66e4702047846cdaa10c66c9d3df3951f5ea70d`）。侧车使用统一 `@deepseek-ai/dsh/lib/bin.js` 和 `sdk-minimal` profile，再通过 `cordis.yml` overlay 配置拆分后的 `system-prompt`、`agent-loop`、`tools`，并注入 IoT MCP 和只读策略。Docker 构建会按上游 `python/sdk-runtime` 的依赖清单生成独立 Node carrier，并执行真实 SDK、Cordis 与模拟 MCP 的启动握手；源码工作区的开发用软链接不会直接作为生产运行时。
 
 ## 业务插件
 
-插件清单位于 `deploy/deepseek-harness/plugins/*.json`。网关启动时校验全部清单，并通过 `GET /v1/plugins` 提供启用插件的公开元数据。管理员管理使用 `GET /v1/plugins/admin` 读取完整清单（含禁用插件、persona 和工具白名单），通过 `POST /v1/plugins` 保存新建或修改，通过 `DELETE /v1/plugins/{id}` 删除自定义插件。内置插件始终只读。
+插件清单位于 `deploy/deepseek-harness/plugins/*.json`。网关启动时校验全部清单，并通过 `GET /v1/plugins` 提供启用插件的公开元数据。管理员管理使用 `GET /v1/plugins/admin` 读取完整清单（含禁用插件、persona 和工具白名单），通过 `POST /v1/plugins` 保存新建或修改，通过 `DELETE /v1/plugins/{id}` 删除自定义插件。内置插件始终只读。平台的聊天工作台和“已配置的工作流插件”清单只展示交互式聊天 Agent；`alarm-handler`、`device-health-inspector`、`protocol-assistant` 由告警、设备巡检和协议接入业务页面调用，不在上述两个界面中显示。
 
-- `ops-assistant`：设备、告警、属性趋势、相似告警和知识库辅助排障。
-- `alarm-handler`：聚焦告警事实核验、影响判断和人工处置建议。
+- `ops-assistant`：设备、告警、属性趋势、相似告警和知识库辅助排障（聊天工作台可选）。
+- `alarm-handler`：聚焦告警事实核验、影响判断和人工处置建议（告警业务专用，不出现在聊天工作台）。
 
 新增插件时复制一份清单并修改以下字段：
 
@@ -55,8 +55,8 @@ Harness 源码不会复制进本仓库。`deploy/deepseek-harness/REVISION` 固�
 
 Go API 暴露：
 
-- `GET /api/v1/ai/workflows`：列出已启用的业务插件。
-- `GET /api/v1/ai/workflows/admin`：管理员读取完整插件清单。
+- `GET /api/v1/ai/workflows`：列出聊天工作台可选的已启用插件；业务专用工作流不返回。
+- `GET /api/v1/ai/workflows/admin`：管理员读取聊天 Agent 管理清单；业务专用工作流不返回。
 - `POST /api/v1/ai/workflows`：管理员创建动态 Agent。
 - `PUT /api/v1/ai/workflows/{id}`：管理员编辑或启用/禁用动态 Agent。
 - `DELETE /api/v1/ai/workflows/{id}`：管理员删除动态 Agent。
