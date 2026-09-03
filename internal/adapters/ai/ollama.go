@@ -100,16 +100,7 @@ func (o *Ollama) AnalyzeAlarm(ctx context.Context, a model.Alarm, history []map[
 	if err != nil {
 		return model.AIAnalysis{}, err
 	}
-	content = extractJSON(content)
-	var out model.AIAnalysis
-	if err := json.Unmarshal([]byte(content), &out); err != nil {
-		return out, fmt.Errorf("decode model json: %w", err)
-	}
-	out.AlarmID = a.ID
-	out.Model = o.model
-	out.PromptVersion = "alarm-diagnosis-v1"
-	out.CreatedAt = time.Now().UnixMilli()
-	return out, nil
+	return decodeAIAnalysis(content, a.ID, o.model)
 }
 func (o *Ollama) Chat(ctx context.Context, tenant, question string) (string, error) {
 	return o.call(ctx, "你是消防物联网运维助手。回答必须基于提供的受控平台数据；缺少数据时明确说明，不能编造，也不能直接控制设备。租户："+tenant, question)

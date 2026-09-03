@@ -75,6 +75,31 @@ func TestOpenAICompatibleAnalyzeAlarmAcceptsStringConfidence(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatibleAnalyzeAlarmKeepsSummaryWhenConfidenceIsMalformed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]any{"content": `{"summary":"告警事实已核对，请人工复核现场。","possibleReasons":["传感器异常"],"suggestions":["现场复核设备"],"riskLevel":"HIGH","confidence":"较高"}`}}},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewOpenAICompatible("deepseek", "DeepSeek", server.URL, "test-model", "test-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	analysis, err := client.AnalyzeAlarm(context.Background(), model.Alarm{ID: "alarm-2", AlarmLevel: "HIGH"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if analysis.Summary == "" || analysis.Confidence != 0 {
+		t.Fatalf("malformed confidence should not discard summary: %#v", analysis)
+	}
+}
+
 func TestOpenAICompatibleBoundsAndSanitizesProviderErrors(t *testing.T) {
 	leaky := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)

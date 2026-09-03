@@ -126,11 +126,7 @@ func decodeAIAnalysis(content, alarmID, modelName string) (model.AIAnalysis, err
 		return model.AIAnalysis{}, fmt.Errorf("decode model json: %w", err)
 	}
 	if confidence, ok := raw["confidence"]; ok {
-		normalized, err := normalizeAIConfidence(confidence)
-		if err != nil {
-			return model.AIAnalysis{}, fmt.Errorf("decode model json: %w", err)
-		}
-		raw["confidence"] = normalized
+		raw["confidence"] = normalizeAIConfidence(confidence)
 	}
 	normalized, err := json.Marshal(raw)
 	if err != nil {
@@ -147,28 +143,27 @@ func decodeAIAnalysis(content, alarmID, modelName string) (model.AIAnalysis, err
 	return out, nil
 }
 
-func normalizeAIConfidence(raw json.RawMessage) (json.RawMessage, error) {
+func normalizeAIConfidence(raw json.RawMessage) json.RawMessage {
 	var number float64
 	if err := json.Unmarshal(raw, &number); err == nil {
-		return raw, nil
+		return raw
 	}
 	var text string
-	if err := json.Unmarshal(raw, &text); err != nil {
-		return nil, fmt.Errorf("confidence must be a number")
+	if err := json.Unmarshal(raw, &text); err == nil {
+		text = strings.TrimSpace(text)
+		if text != "" {
+			if number, err = strconv.ParseFloat(text, 64); err == nil {
+				normalized, marshalErr := json.Marshal(number)
+				if marshalErr == nil {
+					return normalized
+				}
+			}
+		}
 	}
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return json.RawMessage("0"), nil
-	}
-	number, err := strconv.ParseFloat(text, 64)
-	if err != nil {
-		return nil, fmt.Errorf("confidence must be a number")
-	}
-	normalized, err := json.Marshal(number)
-	if err != nil {
-		return nil, fmt.Errorf("confidence must be a number")
-	}
-	return normalized, nil
+	// Confidence is presentation metadata. If the model emits a label such
+	// as “较高” instead of a number, keep the useful analysis and expose zero
+	// confidence rather than discarding the complete result.
+	return json.RawMessage("0")
 }
 
 func (o *OpenAICompatible) Chat(ctx context.Context, tenant, question string) (string, error) {
