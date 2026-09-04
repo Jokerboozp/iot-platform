@@ -21,9 +21,9 @@ services:
       IOT_CORS_ALLOWED_ORIGINS: ${IOT_CORS_ALLOWED_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080,http://localhost:5173,http://127.0.0.1:5173}
       IOT_DEV_MODE: "false"
       IOT_DATA_DIR: /app/data
-      IOT_JWT_SECRET: ${IOT_JWT_SECRET:-local-iot-jwt-change-me-at-least-32-characters}
+      IOT_JWT_SECRET: ${IOT_JWT_SECRET:?IOT_JWT_SECRET must be set}
       IOT_ADMIN_USER: ${IOT_ADMIN_USER:-admin}
-      IOT_ADMIN_PASSWORD: ${IOT_ADMIN_PASSWORD:-admin123}
+      IOT_ADMIN_PASSWORD: ${IOT_ADMIN_PASSWORD:?IOT_ADMIN_PASSWORD must be set}
       IOT_ADMIN_TENANTS: ${IOT_ADMIN_TENANTS:-tenant_001}
       IOT_VIDEO_PLATFORM_SECRETS: ${IOT_VIDEO_PLATFORM_SECRETS:-video-platform-1:local-video-secret-change-me}
       IOT_VIDEO_PLATFORM_TENANTS: ${IOT_VIDEO_PLATFORM_TENANTS:-video-platform-1:tenant_001}
@@ -94,7 +94,7 @@ services:
       GB26875_PLATFORM_URL: http://platform-api:8080
       GB26875_TENANT: ${GB26875_TENANT:-tenant_001}
       GB26875_USERNAME: ${IOT_ADMIN_USER:-admin}
-      GB26875_PASSWORD: ${IOT_ADMIN_PASSWORD:-admin123}
+      GB26875_PASSWORD: ${IOT_ADMIN_PASSWORD:?IOT_ADMIN_PASSWORD must be set}
       GB26875_CONTROL_LISTEN: ${GB26875_CONTROL_LISTEN:-}
       GB26875_CONTROL_TOKEN: ${GB26875_CONTROL_TOKEN:-}
     ports: ["${GB26875_PORT:-26875}:26875/tcp", "${GB26875_PORT:-26875}:26875/udp", "127.0.0.1:${GB26875_CONTROL_PORT:-26876}:26876"]
@@ -168,7 +168,7 @@ services:
       GOTP_MQTT_BROKER: emqx:1883
       GOTP_MQTT_ACCESS_ADDRESS: localhost:1883
       GOTP_MQTT_USER: thingspanel
-      IOT_JWT_SECRET: ${IOT_JWT_SECRET:-local-iot-jwt-change-me-at-least-32-characters}
+      IOT_JWT_SECRET: ${IOT_JWT_SECRET:?IOT_JWT_SECRET must be set}
       GOTP_MARKET_ENABLED: "false"
       GOTP_TELEMETRY_ENABLED: "false"
       GOTP_LOG_LEVEL: info
@@ -350,7 +350,7 @@ services:
         exec /usr/bin/docker-entrypoint.sh /opt/emqx/bin/emqx foreground
     environment:
       EMQX_NAME: iot-emqx
-      IOT_JWT_SECRET: ${IOT_JWT_SECRET:-local-iot-jwt-change-me-at-least-32-characters}
+      IOT_JWT_SECRET: ${IOT_JWT_SECRET:?IOT_JWT_SECRET must be set}
       EMQX_AUTHORIZATION__NO_MATCH: deny
       EMQX_AUTHORIZATION__DENY_ACTION: ignore
       EMQX_DASHBOARD__DEFAULT_USERNAME: ${EMQX_DASHBOARD_USER:-admin}

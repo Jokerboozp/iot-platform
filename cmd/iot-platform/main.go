@@ -37,6 +37,7 @@ import (
 func main() {
 	cfg := config.Load()
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	fatal(log, "validate configuration", cfg.Validate())
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	var repo ports.Repository = memory.NewRepository()

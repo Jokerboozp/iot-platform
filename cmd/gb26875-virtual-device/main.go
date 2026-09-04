@@ -33,7 +33,7 @@ func main() {
 		network  = flag.String("network", "tcp", "gateway network: tcp or udp")
 		tenant   = flag.String("tenant", "tenant_001", "tenant ID")
 		username = flag.String("username", "admin", "platform username")
-		password = flag.String("password", "admin123", "platform password")
+		password = flag.String("password", "", "platform password")
 		deviceID = flag.String("device", "gb26875_virtual_001", "virtual device ID")
 		source   = flag.String("source", "123456789012", "12 hexadecimal source-address digits")
 		scenario = flag.String("scenario", "manual-alarm", "manual-alarm, manual-normal, smoke-alarm, sound-light-start, sound-light-stop or time-sync-request")

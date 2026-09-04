@@ -32,6 +32,9 @@
 
 启动基础平台：
 
+Compose 以生产安全模式启动，首次运行前必须通过 shell 环境变量或 `.env` 显式设置
+`IOT_JWT_SECRET`（至少 32 个字符）和 `IOT_ADMIN_PASSWORD`（至少 12 个字符）。固定示例值和占位符会被拒绝。
+
 首次部署或修改了后端/前端代码、Dockerfile 时，只构建应用服务：
 
 ```powershell
@@ -62,12 +65,12 @@ docker compose --profile harness ps
 http://localhost:8080
 ```
 
-本地开发默认账号：
+内置管理员账号：
 
 ```text
 租户：tenant_001
 用户名：admin
-密码：admin123
+密码：启动前设置的 IOT_ADMIN_PASSWORD
 ```
 
 内置管理员只能为白名单中的租户签发管理员 Token。默认白名单只有 `tenant_001`；确需让内置管理员管理多个租户时，必须显式配置：
@@ -531,9 +534,10 @@ go run ./cmd/gb26875-virtual-device --help
 
 ## 10. 配置与密钥
 
-基础平台本地开发不要求创建 `.env`，Compose 已提供本地默认值。
+直接运行 Go API 且保持 `IOT_DEV_MODE=true` 时不要求创建 `.env`。Docker Compose 明确使用
+`IOT_DEV_MODE=false`，因此必须设置 `IOT_JWT_SECRET` 和 `IOT_ADMIN_PASSWORD`，缺失、长度不足或仍为占位符时 API 会拒绝启动。
 
-`.env.example` 是完整部署变量模板，不是每次启动都必须复制的文件。对已有数据卷直接复制整份模板，会同时改变 PostgreSQL、Redis、ClickHouse、MinIO、JWT、管理员和 EMQX 凭据，可能导致服务认证失败。
+`.env.example` 是完整部署变量模板，其中的值仍是待替换占位符，不能原样用于生产。对已有数据卷直接复制整份模板，会同时改变 PostgreSQL、Redis、ClickHouse、MinIO、JWT、管理员和 EMQX 凭据，可能导致服务认证失败。已有环境只需在现有 `.env` 或部署平台 Secret 中补齐上述两个认证变量，不要覆盖其他持久化服务密码。
 
 规则：
 
@@ -772,15 +776,16 @@ IOT_VIDEO_PLATFORM_TENANTS=video-platform-1:tenant_001
 ```bash
 curl -sS http://localhost:8080/api/v1/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"admin123","tenantId":"tenant_001"}'
+  -d "{\"username\":\"admin\",\"password\":\"$IOT_ADMIN_PASSWORD\",\"tenantId\":\"tenant_001\"}"
 ```
 
 PowerShell：
 
 ```powershell
+$loginBody = @{ username = 'admin'; password = $env:IOT_ADMIN_PASSWORD; tenantId = 'tenant_001' } | ConvertTo-Json
 $login = Invoke-RestMethod -Method Post http://localhost:8080/api/v1/auth/login `
   -ContentType application/json `
-  -Body '{"username":"admin","password":"admin123","tenantId":"tenant_001"}'
+  -Body $loginBody
 $headers = @{ Authorization = "Bearer $($login.accessToken)" }
 ```
 

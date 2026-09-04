@@ -205,7 +205,7 @@ func main() {
 	platformURL := flag.String("platform", env("GB26875_PLATFORM_URL", "http://localhost:8081"), "platform API base URL")
 	tenant := flag.String("tenant", env("GB26875_TENANT", "tenant_001"), "platform tenant")
 	username := flag.String("username", env("GB26875_USERNAME", "admin"), "platform username")
-	password := flag.String("password", env("GB26875_PASSWORD", "admin123"), "platform password")
+	password := flag.String("password", env("GB26875_PASSWORD", ""), "platform password")
 	controlListen := flag.String("control-listen", env("GB26875_CONTROL_LISTEN", ""), "optional local HTTP control address, for example 127.0.0.1:26876")
 	controlToken := flag.String("control-token", env("GB26875_CONTROL_TOKEN", ""), "optional X-Gateway-Token for the control API")
 	flag.Parse()

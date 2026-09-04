@@ -1,9 +1,11 @@
 package deploycheck
 
 import (
+	"bytes"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"testing"
 
@@ -38,6 +40,27 @@ func TestDeploymentYAMLParses(t *testing.T) {
 				t.Fatal("no YAML documents")
 			}
 		})
+	}
+}
+
+func TestProductionComposeDoesNotInjectAuthenticationFallbacks(t *testing.T) {
+	_, file, _, _ := runtime.Caller(0)
+	root := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+	content, err := os.ReadFile(filepath.Join(root, "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pattern := regexp.MustCompile(`\$\{IOT_(?:JWT_SECRET|ADMIN_PASSWORD):-([^}]*)\}`)
+	matches := pattern.FindAllSubmatch(content, -1)
+	for _, match := range matches {
+		if len(match) == 2 && len(match[1]) != 0 {
+			t.Fatal("production compose injects a fixed authentication fallback")
+		}
+	}
+	for _, variable := range [][]byte{[]byte("${IOT_JWT_SECRET:?"), []byte("${IOT_ADMIN_PASSWORD:?")} {
+		if !bytes.Contains(content, variable) {
+			t.Fatal("production compose must require authentication variables")
+		}
 	}
 }
 

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -73,5 +74,52 @@ func TestAdminTenantAllowlist(t *testing.T) {
 	cfg := Load()
 	if len(cfg.AdminTenants) != 2 || cfg.AdminTenants[0] != "tenant-a" || cfg.AdminTenants[1] != "tenant-b" {
 		t.Fatalf("unexpected admin tenant allowlist: %#v", cfg.AdminTenants)
+	}
+}
+
+func TestProductionConfigRequiresExplicitStrongAuthenticationSecrets(t *testing.T) {
+	t.Setenv("IOT_DEV_MODE", "false")
+	t.Setenv("IOT_JWT_SECRET", "")
+	t.Setenv("IOT_ADMIN_PASSWORD", "")
+	if err := Load().Validate(); err == nil {
+		t.Fatal("production configuration accepted built-in authentication fallbacks")
+	}
+
+	t.Setenv("IOT_JWT_SECRET", strings.Repeat("j", 48))
+	t.Setenv("IOT_ADMIN_PASSWORD", strings.Repeat("p", 20))
+	if err := Load().Validate(); err != nil {
+		t.Fatalf("production configuration rejected explicit strong secrets: %v", err)
+	}
+}
+
+func TestDevelopmentConfigAllowsLocalFallbacks(t *testing.T) {
+	t.Setenv("IOT_DEV_MODE", "true")
+	t.Setenv("IOT_JWT_SECRET", "")
+	t.Setenv("IOT_ADMIN_PASSWORD", "")
+	if err := Load().Validate(); err != nil {
+		t.Fatalf("development configuration rejected local fallbacks: %v", err)
+	}
+}
+
+func TestProductionConfigRejectsPlaceholderSecretsAndInvalidMode(t *testing.T) {
+	t.Setenv("IOT_DEV_MODE", "false")
+	t.Setenv("IOT_JWT_SECRET", "change-this-"+strings.Repeat("j", 48))
+	t.Setenv("IOT_ADMIN_PASSWORD", "replace-me-"+strings.Repeat("p", 20))
+	if err := Load().Validate(); err == nil {
+		t.Fatal("production configuration accepted placeholder secrets")
+	}
+
+	t.Setenv("IOT_DEV_MODE", "not-a-boolean")
+	t.Setenv("IOT_JWT_SECRET", strings.Repeat("j", 48))
+	t.Setenv("IOT_ADMIN_PASSWORD", strings.Repeat("p", 20))
+	if err := Load().Validate(); err == nil {
+		t.Fatal("configuration accepted an invalid IOT_DEV_MODE value")
+	}
+}
+
+func TestExplicitConfigValueCanBeValidatedWithoutEnvironmentProvenance(t *testing.T) {
+	cfg := Config{DevMode: false, JWTSecret: strings.Repeat("j", 48), AdminPassword: strings.Repeat("p", 20)}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("explicit configuration values were rejected: %v", err)
 	}
 }

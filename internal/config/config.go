@@ -1,10 +1,16 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+)
+
+const (
+	defaultJWTSecret     = "change-me-in-production"
+	defaultAdminPassword = "admin123"
 )
 
 type Config struct {
@@ -66,9 +72,11 @@ type Config struct {
 	OfflineScan                 time.Duration
 	ModbusAllowedCIDRs          []string
 	DevMode                     bool
+	loadErr                     error
 }
 
 func Load() Config {
+	devMode, devModeErr := strictBoolValue("IOT_DEV_MODE", true)
 	aiProvider := strings.ToLower(strings.TrimSpace(os.Getenv("IOT_AI_PROVIDER")))
 	deepSeekAPIKey := strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY"))
 	if aiProvider == "" && deepSeekAPIKey != "" {
@@ -82,9 +90,9 @@ func Load() Config {
 		HTTPAddr:                    get("IOT_HTTP_ADDR", ":8080"),
 		CORSAllowedOrigins:          split(os.Getenv("IOT_CORS_ALLOWED_ORIGINS")),
 		DataDir:                     get("IOT_DATA_DIR", "./data"),
-		JWTSecret:                   get("IOT_JWT_SECRET", "change-me-in-production"),
+		JWTSecret:                   get("IOT_JWT_SECRET", defaultJWTSecret),
 		AdminUser:                   get("IOT_ADMIN_USER", "admin"),
-		AdminPassword:               get("IOT_ADMIN_PASSWORD", "admin123"),
+		AdminPassword:               get("IOT_ADMIN_PASSWORD", defaultAdminPassword),
 		AdminTenants:                split(get("IOT_ADMIN_TENANTS", "tenant_001")),
 		PostgresDSN:                 os.Getenv("IOT_POSTGRES_DSN"),
 		RedisAddr:                   os.Getenv("IOT_REDIS_ADDR"),
@@ -136,8 +144,51 @@ func Load() Config {
 		ThingsPanelSync:             duration("IOT_THINGSPANEL_SYNC_INTERVAL", 5*time.Minute),
 		OfflineScan:                 duration("IOT_OFFLINE_SCAN_INTERVAL", 30*time.Second),
 		ModbusAllowedCIDRs:          split(get("IOT_MODBUS_ALLOWED_CIDRS", "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8,fc00::/7,::1/128")),
-		DevMode:                     boolValue("IOT_DEV_MODE", true),
+		DevMode:                     devMode,
+		loadErr:                     devModeErr,
 	}
+}
+
+func (c Config) Validate() error {
+	if c.loadErr != nil {
+		return c.loadErr
+	}
+	if c.DevMode {
+		return nil
+	}
+	var invalid []string
+	if c.JWTSecret == defaultJWTSecret || len(c.JWTSecret) < 32 || insecurePlaceholder(c.JWTSecret) {
+		invalid = append(invalid, "IOT_JWT_SECRET must be explicitly set to at least 32 characters and must not be a placeholder")
+	}
+	if c.AdminPassword == defaultAdminPassword || len(c.AdminPassword) < 12 || insecurePlaceholder(c.AdminPassword) {
+		invalid = append(invalid, "IOT_ADMIN_PASSWORD must be explicitly set to at least 12 characters and must not be a placeholder")
+	}
+	if len(invalid) > 0 {
+		return fmt.Errorf("invalid production security configuration: %s", strings.Join(invalid, "; "))
+	}
+	return nil
+}
+
+func strictBoolValue(name string, fallback bool) (bool, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("invalid production security configuration: IOT_DEV_MODE must be true or false")
+	}
+	return parsed, nil
+}
+
+func insecurePlaceholder(value string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	for _, marker := range []string{"change-me", "change-this", "replace_me", "replace-me", "local-iot-", "public-change-me"} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func get(name, fallback string) string {

@@ -61,17 +61,52 @@ func (r *Repository) SaveStandardMessage(ctx context.Context, v model.StandardMe
 }
 func (r *Repository) SaveStandardMessageIfAbsent(ctx context.Context, v model.StandardMessage) (bool, error) {
 	created, err := r.Repository.SaveStandardMessageIfAbsent(ctx, v)
-	if err != nil || !created {
+	if err != nil {
 		return created, err
 	}
-	if v.MessageType != model.PropertyReport && v.MessageType != model.AlarmReport {
-		return true, nil
+	if err = r.ensureTelemetry(ctx, v, created); err != nil {
+		return created, err
+	}
+	return created, nil
+}
+
+func telemetryMessage(v model.StandardMessage) bool {
+	return v.MessageType == model.PropertyReport || v.MessageType == model.AlarmReport
+}
+
+func (r *Repository) ensureTelemetry(ctx context.Context, v model.StandardMessage, created bool) error {
+	if !telemetryMessage(v) {
+		return nil
+	}
+	if !created {
+		exists, err := r.telemetryExists(ctx, v.TenantID, v.MessageID)
+		if err != nil {
+			return err
+		}
+		if exists {
+			return nil
+		}
 	}
 	row := map[string]any{"tenant_id": v.TenantID, "device_id": v.DeviceID, "product_id": v.ProductID, "message_id": v.MessageID, "ts": time.UnixMilli(v.Timestamp).UTC().Format("2006-01-02 15:04:05.000"), "properties": v.Properties}
 	b, _ := json.Marshal(row)
 	b = append(b, '\n')
-	_, err = r.query(ctx, "INSERT INTO iot_telemetry FORMAT JSONEachRow", b)
-	return true, err
+	_, err := r.query(ctx, "INSERT INTO iot_telemetry FORMAT JSONEachRow", b)
+	return err
+}
+
+func (r *Repository) telemetryExists(ctx context.Context, tenantID, messageID string) (bool, error) {
+	query := fmt.Sprintf(`SELECT count() AS total FROM iot_telemetry WHERE tenant_id=%s AND message_id=%s FORMAT JSONEachRow`, quote(tenantID), quote(messageID))
+	body, err := r.query(ctx, query, nil)
+	if err != nil {
+		return false, err
+	}
+	var result struct {
+		Total int64 `json:"total"`
+	}
+	if err = json.Unmarshal(bytes.TrimSpace(body), &result); err != nil {
+		return false, fmt.Errorf("decode clickhouse telemetry existence: %w", err)
+	}
+	return result.Total > 0, nil
 }
 
 func (r *Repository) SaveRawMessage(ctx context.Context, v model.RawMessage) error {
@@ -115,17 +150,19 @@ func (r *Repository) GetRawMessage(ctx context.Context, tenant, messageID string
 
 func (r *Repository) ClaimStandardMessage(ctx context.Context, v model.StandardMessage) (bool, bool, error) {
 	shouldProcess, created, err := r.Repository.ClaimStandardMessage(ctx, v)
-	if err != nil || !shouldProcess || !created {
+	if err != nil || !shouldProcess {
 		return shouldProcess, created, err
 	}
-	if v.MessageType != model.PropertyReport && v.MessageType != model.AlarmReport {
-		return true, true, nil
+	err = r.ensureTelemetry(ctx, v, created)
+	return shouldProcess, created, err
+}
+
+func (r *Repository) Health(ctx context.Context) error {
+	if err := r.Repository.Health(ctx); err != nil {
+		return err
 	}
-	row := map[string]any{"tenant_id": v.TenantID, "device_id": v.DeviceID, "product_id": v.ProductID, "message_id": v.MessageID, "ts": time.UnixMilli(v.Timestamp).UTC().Format("2006-01-02 15:04:05.000"), "properties": v.Properties}
-	b, _ := json.Marshal(row)
-	b = append(b, '\n')
-	_, err = r.query(ctx, "INSERT INTO iot_telemetry FORMAT JSONEachRow", b)
-	return true, true, err
+	_, err := r.query(ctx, "SELECT 1", nil)
+	return err
 }
 func (r *Repository) PropertyHistory(ctx context.Context, tenant, device, property string, start, end int64, limit int) ([]map[string]any, error) {
 	if limit <= 0 {

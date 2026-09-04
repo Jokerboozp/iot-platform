@@ -30,6 +30,12 @@ test('account logout is available from the top-right avatar menu', async () => {
   assert.doesNotMatch(app, /class="logout-button"/)
 })
 
+test('login form never exposes a built-in password', async () => {
+  const app = await readFile(new URL('src/App.vue', root), 'utf8')
+  assert.match(app, /loginForm = ref\(\{ tenantId: 'tenant_001', username: 'admin', password: '' \}\)/)
+  assert.doesNotMatch(app, /password:\s*'admin123'/)
+})
+
 test('shared controls keep file pickers and text actions visibly shaped', async () => {
   const styles = await readFile(new URL('src/styles.css', root), 'utf8')
   const assistant = await readFile(new URL('src/views/ProtocolAssistantView.vue', root), 'utf8')
